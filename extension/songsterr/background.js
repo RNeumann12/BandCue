@@ -190,8 +190,18 @@ async function connect() {
         at: Date.now()
       });
       setTimeout(() => {
-        sendTransportToSongsterr(message.action, message.sequenceId, message.currentSong?.song);
+        sendTransportToSongsterr(
+          message.action,
+          message.sequenceId,
+          message.currentSong?.song,
+          Boolean(message.resetBeforePlay)
+        );
       }, delayMs);
+      return;
+    }
+
+    if (message.type === "openSongCommand") {
+      openSongsterrFromRoom(message.currentSong?.song, message.sequenceId);
     }
   });
 
@@ -210,7 +220,7 @@ async function connect() {
   });
 }
 
-async function sendTransportToSongsterr(action, sequenceId, currentSong) {
+async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false) {
   const tabs = await ensureSongsterrTabs(currentSong);
   if (!tabs.length) {
     reportCommandStatus({
@@ -228,7 +238,7 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong) {
   for (const tab of tabs) {
     if (tab.id) {
       const result = await chrome.tabs
-        .sendMessage(tab.id, { type: "bandcueTransport", action })
+        .sendMessage(tab.id, { type: "bandcueTransport", action, resetBeforePlay })
         .catch((error) => ({
           ok: false,
           detail: error?.message || "Songsterr content script did not respond",
@@ -255,6 +265,59 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong) {
     controlPath: final.controlPath,
     at: Date.now()
   });
+}
+
+async function openSongsterrFromRoom(currentSong, sequenceId) {
+  if (currentSong?.sourceType !== "songsterr" || !normalizeSongsterrUrl(currentSong.source)) {
+    reportCommandStatus({
+      action: "open-song",
+      sequenceId,
+      status: "failed",
+      ready: false,
+      detail: "Current song does not have a usable Songsterr URL",
+      controlPath: "browser-tab",
+      at: Date.now()
+    });
+    return;
+  }
+
+  reportCommandStatus({
+    action: "open-song",
+    sequenceId,
+    status: "pending",
+    ready: lastStatus.ready,
+    detail: "Opening current Songsterr song",
+    controlPath: "browser-tab",
+    at: Date.now()
+  });
+
+  const tabs = await ensureSongsterrTabs(currentSong, { active: true });
+  const tab = tabs[0];
+  if (!tab) {
+    reportCommandStatus({
+      action: "open-song",
+      sequenceId,
+      status: "failed",
+      ready: false,
+      detail: "Current song does not have a usable Songsterr URL",
+      controlPath: "browser-tab",
+      at: Date.now()
+    });
+    return;
+  }
+
+  reportCommandStatus({
+    action: "open-song",
+    sequenceId,
+    status: "succeeded",
+    ready: true,
+    detail: currentSong?.title
+      ? `Opened Songsterr tab for ${currentSong.title}`
+      : "Opened current Songsterr tab",
+    controlPath: "browser-tab",
+    at: Date.now()
+  });
+  requestSongsterrStatusFromTabs([tab]);
 }
 
 async function reportActiveTabStatus() {
@@ -414,20 +477,57 @@ function getSongsterrTabIdentity(tab) {
   }
 }
 
-async function ensureSongsterrTabs(currentSong) {
-  const existing = await findSongsterrTabs(currentSong);
-  if (existing.length || currentSong?.sourceType !== "songsterr" || !currentSong.source) {
-    return existing;
+async function ensureSongsterrTabs(currentSong, options = {}) {
+  const url = normalizeSongsterrUrl(currentSong?.source);
+  if (currentSong?.sourceType === "songsterr") {
+    if (!url) {
+      return [];
+    }
+
+    const existing = await findSongsterrTabsForUrl(url);
+    if (existing.length) {
+      return options.active ? [await activateSongsterrTab(existing[0]), ...existing.slice(1)] : existing;
+    }
+
+    const tab = await chrome.tabs.create({ url, active: Boolean(options.active) });
+    const loaded = tab.id ? await waitForTabReady(tab.id, 7000) : undefined;
+    return loaded ? [loaded] : tab.id ? [tab] : [];
   }
 
-  const url = normalizeSongsterrUrl(currentSong.source);
-  if (!url) {
-    return existing;
+  const existing = await findSongsterrTabs();
+  if (options.active && existing[0]) {
+    return [await activateSongsterrTab(existing[0]), ...existing.slice(1)];
   }
 
-  const tab = await chrome.tabs.create({ url, active: false });
-  const loaded = tab.id ? await waitForTabReady(tab.id, 7000) : undefined;
-  return loaded ? [loaded] : tab.id ? [tab] : [];
+  return existing;
+}
+
+async function activateSongsterrTab(tab) {
+  if (!tab?.id) {
+    return tab;
+  }
+
+  const updated = await chrome.tabs.update(tab.id, { active: true }).catch(() => tab);
+  if (tab.windowId) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+  }
+
+  return updated || tab;
+}
+
+async function findSongsterrTabsForUrl(targetUrl) {
+  const target = new URL(targetUrl);
+  const tabs = (await chrome.tabs.query({}))
+    .filter((tab) => isSongsterrUrl(tab.url || ""));
+  return tabs.filter((tab) => {
+    if (!tab.url) return false;
+    try {
+      const url = new URL(tab.url);
+      return normalizePath(url.pathname) === normalizePath(target.pathname);
+    } catch {
+      return false;
+    }
+  });
 }
 
 async function requestSongsterrStatusFromTabs(tabs) {

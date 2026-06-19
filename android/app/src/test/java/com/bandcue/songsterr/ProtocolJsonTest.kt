@@ -27,6 +27,7 @@ class ProtocolJsonTest {
             .put("sequenceId", 3)
             .put("scheduledServerTime", 12_000)
             .put("manualOffsetMs", -50)
+            .put("resetBeforePlay", true)
             .put(
                 "currentSong",
                 JSONObject().put(
@@ -44,6 +45,31 @@ class ProtocolJsonTest {
         assertEquals("play", command?.action)
         assertEquals(3, command?.sequenceId)
         assertEquals(-50L, command?.manualOffsetMs)
+        assertEquals(true, command?.resetBeforePlay)
         assertEquals("songsterr", command?.currentSong?.sourceType)
+    }
+
+    @Test
+    fun parsesOpenSongCommandWithCurrentSong() {
+        val payload = JSONObject()
+            .put("type", "openSongCommand")
+            .put("sequenceId", 4)
+            .put(
+                "currentSong",
+                JSONObject().put(
+                    "song",
+                    JSONObject()
+                        .put("title", "Correct Song")
+                        .put("sourceType", "songsterr")
+                        .put("source", "https://www.songsterr.com/a/wsa/correct-song-tab-s1")
+                )
+            )
+
+        val command = ProtocolJson.parseOpenSongCommand(payload)
+
+        assertNotNull(command)
+        assertEquals(4, command?.sequenceId)
+        assertEquals("Correct Song", command?.currentSong?.title)
+        assertEquals("https://www.songsterr.com/a/wsa/correct-song-tab-s1", command?.currentSong?.source)
     }
 }

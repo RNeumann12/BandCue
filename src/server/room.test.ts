@@ -46,6 +46,44 @@ describe("RoomController", () => {
     expect(room.getState(1200).currentSong?.song?.title).toBe("Test Song");
   });
 
+  it("broadcasts play commands with a reset-to-start instruction", () => {
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "safetyUpdate",
+      armed: true,
+      updatedAt: 1100
+    }, 1100);
+    adapterMessages.length = 0;
+
+    room.handleMessage(host.id, {
+      type: "transportRequest",
+      action: "play",
+      requestedAt: 1200
+    }, 1200);
+
+    const playCommand = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "transportCommand" && message.action === "play");
+    expect(playCommand).toMatchObject({
+      action: "play",
+      resetBeforePlay: true
+    });
+  });
+
   it("stores clock telemetry from clients", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const client = room.addClient(undefined, {
@@ -272,6 +310,60 @@ describe("RoomController", () => {
         title: "First Song",
         sourceType: "songsterr",
         notes: "Start at chorus"
+      }
+    });
+  });
+
+  it("broadcasts a host request to open the current Songsterr song", () => {
+    const hostMessages: string[] = [];
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1200,
+      song: {
+        id: "song-1",
+        title: "Correct Song",
+        sourceType: "songsterr",
+        source: "https://www.songsterr.com/a/wsa/correct-song-tab-s1"
+      }
+    }, 1200);
+    hostMessages.length = 0;
+    adapterMessages.length = 0;
+
+    room.handleMessage(host.id, {
+      type: "openSongRequest",
+      requestedAt: 1300
+    }, 1300);
+
+    const command = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "openSongCommand");
+    expect(command).toMatchObject({
+      leaderId: host.id,
+      sequenceId: 1,
+      requestedAt: 1300,
+      currentSong: {
+        song: {
+          title: "Correct Song",
+          sourceType: "songsterr",
+          source: "https://www.songsterr.com/a/wsa/correct-song-tab-s1"
+        }
       }
     });
   });

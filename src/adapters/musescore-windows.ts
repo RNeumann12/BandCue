@@ -42,6 +42,7 @@ interface Args {
   discoveryPort: number;
   name: string;
   playKey: string;
+  resetKey: string;
   stopKey: string;
   playMode: "single-key" | "stop-then-play";
   processMatch: string;
@@ -67,6 +68,7 @@ interface BridgeCommand {
   sequenceId: number;
   dueLocalAt: number;
   scheduledServerTime: number;
+  resetBeforePlay?: boolean;
   currentSong?: SetlistSong;
   status: "queued" | "claimed" | "succeeded" | "failed" | "expired";
   createdAt: number;
@@ -182,6 +184,7 @@ async function connect(): Promise<void> {
         sequenceId: message.sequenceId,
         dueLocalAt: Date.now() + delayMs,
         scheduledServerTime: message.scheduledServerTime + manualOffsetMs,
+        resetBeforePlay: Boolean(message.resetBeforePlay),
         currentSong,
         status: "queued",
         createdAt: Date.now()
@@ -416,7 +419,8 @@ async function triggerMuseScoreTransport(action: TransportAction, sequenceId: nu
     console.warn(`MuseScore bridge ${action} failed: ${bridgeResult.detail ?? "No detail reported"}`);
   }
 
-  const keys = keysForAction(action);
+  const resetBeforePlay = Boolean(bridgeCommands.get(sequenceId)?.resetBeforePlay);
+  const keys = keysForAction(action, resetBeforePlay);
   const script = `
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type -AssemblyName System.Windows.Forms
@@ -501,8 +505,8 @@ foreach ($key in $keys) {
       action,
       sequenceId,
       status: "succeeded",
-      detail: mismatch ?? museScoreCommandSuccessDetail(action, keys, bridgeResult),
-      controlPath: `windows-sendkeys:${action === "play" ? args.playMode : "stop-key"}`,
+      detail: mismatch ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, bridgeResult),
+      controlPath: `windows-sendkeys:${action === "play" ? playControlPath(resetBeforePlay) : "stop-key"}`,
       at: Date.now()
     });
   }
@@ -587,9 +591,16 @@ function reportCommandStatus(command: {
   });
 }
 
-function keysForAction(action: TransportAction): string[] {
+function keysForAction(action: TransportAction, resetBeforePlay = false): string[] {
   if (action === "stop") {
     return [args.stopKey];
+  }
+
+  if (resetBeforePlay) {
+    const prefixKeys = args.playMode === "stop-then-play"
+      ? [args.stopKey, args.resetKey]
+      : [args.resetKey];
+    return [...prefixKeys, args.playKey];
   }
 
   if (args.playMode === "single-key") {
@@ -602,17 +613,28 @@ function keysForAction(action: TransportAction): string[] {
 function museScoreCommandSuccessDetail(
   action: TransportAction,
   keys: string[],
+  resetBeforePlay: boolean,
   bridgeResult?: BridgeCommand
 ): string {
   const fallbackPrefix = bridgeResult?.status === "failed"
     ? `MuseScore bridge failed (${bridgeResult.detail ?? "no detail"}); fallback `
     : "";
 
+  if (action === "play" && resetBeforePlay && args.playMode === "stop-then-play") {
+    return `${fallbackPrefix}stopped first, sent ${describeKey(args.resetKey)} to reset to the beginning, then sent ${describeKey(args.playKey)} to MuseScore`;
+  }
+
   if (action === "play" && args.playMode === "stop-then-play") {
     return `${fallbackPrefix}stopped first, then sent ${describeKey(args.playKey)} to MuseScore`;
   }
 
   return `${fallbackPrefix}sent ${keys.map(describeKey).join(", ")} to MuseScore`;
+}
+
+function playControlPath(resetBeforePlay: boolean): string {
+  return resetBeforePlay
+    ? `${args.playMode}+reset-to-start`
+    : args.playMode;
 }
 
 function museScoreCommandFailureDetail(result: {
@@ -997,6 +1019,7 @@ function parseArgs(raw: string[]): Args {
     discoveryPort: parsePositiveInt(process.env.BANDCUE_DISCOVERY_PORT, 0),
     name: `${hostname()} MuseScore`,
     playKey: " ",
+    resetKey: "{HOME}",
     stopKey: "{ESC}",
     playMode: "stop-then-play",
     processMatch: "MuseScore|mscore",
@@ -1015,6 +1038,7 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--name") parsed.name = raw[index + 1] ?? parsed.name;
     if (value === "--play-key") parsed.playKey = raw[index + 1] ?? parsed.playKey;
+    if (value === "--reset-key") parsed.resetKey = raw[index + 1] ?? parsed.resetKey;
     if (value === "--stop-key") parsed.stopKey = raw[index + 1] ?? parsed.stopKey;
     if (value === "--play-mode") parsed.playMode = parsePlayMode(raw[index + 1], parsed.playMode);
     if (value === "--process-match") parsed.processMatch = raw[index + 1] ?? parsed.processMatch;

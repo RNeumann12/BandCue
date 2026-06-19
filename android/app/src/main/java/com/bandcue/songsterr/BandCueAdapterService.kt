@@ -178,6 +178,11 @@ class BandCueAdapterService : Service() {
                 currentSong = command.currentSong ?: currentSong
                 handleTransportCommand(command)
             }
+            "openSongCommand" -> {
+                val command = ProtocolJson.parseOpenSongCommand(message) ?: return
+                currentSong = command.currentSong ?: currentSong
+                handleOpenSongCommand(command)
+            }
             "error" -> {
                 connectionDetail = message.optString("message", connectionDetail)
                 publishUiStatus()
@@ -246,6 +251,51 @@ class BandCueAdapterService : Service() {
         }, delayMs, TimeUnit.MILLISECONDS)
     }
 
+    private fun handleOpenSongCommand(command: OpenSongCommand) {
+        val song = command.currentSong
+        latestCommand = AdapterCommandStatus(
+            action = "open-song",
+            sequenceId = command.sequenceId,
+            status = "pending",
+            at = System.currentTimeMillis(),
+            detail = "Opening current Songsterr song on Android",
+            controlPath = "android-intent"
+        )
+        publishAdapterStatus(stateOverride = "command-pending")
+        publishUiStatus()
+
+        val songUrl = song?.source
+        if (song?.sourceType != "songsterr" || songUrl.isNullOrBlank()) {
+            latestCommand = AdapterCommandStatus(
+                action = "open-song",
+                sequenceId = command.sequenceId,
+                status = "failed",
+                at = System.currentTimeMillis(),
+                detail = "Current song does not have a usable Songsterr URL.",
+                controlPath = "android-intent"
+            )
+            publishAdapterStatus(stateOverride = "last-command-failed")
+            publishUiStatus()
+            return
+        }
+
+        val opened = openSongsterrUrl(songUrl)
+        latestCommand = AdapterCommandStatus(
+            action = "open-song",
+            sequenceId = command.sequenceId,
+            status = if (opened) "succeeded" else "failed",
+            at = System.currentTimeMillis(),
+            detail = if (opened) {
+                "Opened Songsterr for ${song.title.ifBlank { "current song" }}."
+            } else {
+                "Android could not open the current Songsterr URL."
+            },
+            controlPath = "android-intent"
+        )
+        publishAdapterStatus(stateOverride = if (opened) "last-command-succeeded" else "last-command-failed")
+        publishUiStatus()
+    }
+
     private fun shouldOpenSongForCommand(): Boolean {
         if (!BandCueAccessibilityService.isEnabled()) {
             return true
@@ -259,6 +309,9 @@ class BandCueAdapterService : Service() {
         if (controller != null) {
             try {
                 if (command.action == "play") {
+                    if (command.resetBeforePlay) {
+                        controller.transportControls.seekTo(0)
+                    }
                     controller.transportControls.play()
                 } else {
                     controller.transportControls.pause()
@@ -269,7 +322,11 @@ class BandCueAdapterService : Service() {
                     status = "succeeded",
                     at = now,
                     detail = if (command.action == "play") {
-                        "Requested Songsterr playback through Android media session."
+                        if (command.resetBeforePlay) {
+                            "Requested Songsterr seek to start and playback through Android media session."
+                        } else {
+                            "Requested Songsterr playback through Android media session."
+                        }
                     } else {
                         "Requested Songsterr pause through Android media session."
                     },
@@ -286,7 +343,10 @@ class BandCueAdapterService : Service() {
             }
         }
 
-        val accessibilityResult = BandCueAccessibilityService.control(command.action)
+        val accessibilityResult = BandCueAccessibilityService.control(
+            command.action,
+            command.resetBeforePlay
+        )
         if (accessibilityResult.ok) {
             latestCommand = AdapterCommandStatus(
                 action = command.action,

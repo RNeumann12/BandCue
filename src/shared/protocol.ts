@@ -4,6 +4,8 @@ export type AppType = "musescore" | "songsterr" | "mock";
 
 export type TransportAction = "play" | "stop";
 
+export type AdapterCommandAction = TransportAction | "open-song";
+
 export type TransportStatus = "stopped" | "scheduled" | "running";
 
 export type SongSourceType = "songsterr" | "musescore" | "other";
@@ -77,7 +79,7 @@ export interface AdapterStatus {
   title?: string;
   detail?: string;
   lastCommand?: {
-    action: TransportAction;
+    action: AdapterCommandAction;
     sequenceId?: number;
     status: AdapterCommandStatus;
     at: number;
@@ -92,6 +94,11 @@ export interface TransportRequest {
   requestedAt: number;
 }
 
+export interface OpenSongRequest {
+  type: "openSongRequest";
+  requestedAt: number;
+}
+
 export interface TransportCommand {
   type: "transportCommand";
   action: TransportAction;
@@ -99,7 +106,16 @@ export interface TransportCommand {
   sequenceId: number;
   scheduledServerTime: number;
   manualOffsetMs?: number;
+  resetBeforePlay?: boolean;
   currentSong?: CurrentSongState;
+}
+
+export interface OpenSongCommand {
+  type: "openSongCommand";
+  leaderId: string;
+  sequenceId: number;
+  requestedAt: number;
+  currentSong: CurrentSongState;
 }
 
 export interface SetlistSong {
@@ -204,11 +220,13 @@ export type ClientMessage =
   | CurrentSongUpdate
   | SetlistUpdate
   | SafetyUpdate
+  | OpenSongRequest
   | TransportRequest;
 
 export type ServerMessage =
   | ServerHello
   | ClockSyncResult
   | TransportCommand
+  | OpenSongCommand
   | RoomState
   | ErrorMessage;

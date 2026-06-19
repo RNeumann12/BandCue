@@ -7,6 +7,8 @@ import type {
   ClientMessage,
   CurrentSongState,
   CurrentSongUpdate,
+  OpenSongCommand,
+  OpenSongRequest,
   RoomClientSummary,
   RoomState,
   SafetyState,
@@ -41,6 +43,7 @@ export class RoomController {
     status: "stopped",
     sequenceId: 0
   };
+  private openSongSequence = 0;
   private currentSong?: CurrentSongState;
   private setlist: SetlistState = {
     songs: [],
@@ -104,6 +107,7 @@ export class RoomController {
         leaderId: clientId,
         sequenceId: this.transport.sequenceId,
         scheduledServerTime: now,
+        resetBeforePlay: false,
         currentSong: this.currentSong
       });
     }
@@ -155,6 +159,11 @@ export class RoomController {
 
     if (message.type === "safetyUpdate") {
       this.updateSafety(client, message, now);
+      return;
+    }
+
+    if (message.type === "openSongRequest") {
+      this.handleOpenSongRequest(client, message, now);
       return;
     }
 
@@ -347,6 +356,7 @@ export class RoomController {
       leaderId: this.transport.leaderId ?? client.id,
       sequenceId: this.transport.sequenceId,
       scheduledServerTime: this.transport.scheduledServerTime ?? now,
+      resetBeforePlay: request.action === "play",
       currentSong: this.currentSong
     };
 
@@ -362,6 +372,42 @@ export class RoomController {
     if (request.action === "play") {
       this.markRunningAt(command.scheduledServerTime);
     }
+  }
+
+  private handleOpenSongRequest(
+    client: RoomClientSummary,
+    request: OpenSongRequest,
+    now: number
+  ): void {
+    if (client.role !== "host") {
+      this.send(client, {
+        type: "error",
+        message: "Only a host can ask adapters to open the current Songsterr song."
+      });
+      return;
+    }
+
+    if (
+      !this.currentSong?.song ||
+      this.currentSong.song.sourceType !== "songsterr" ||
+      !this.currentSong.song.source
+    ) {
+      this.send(client, {
+        type: "error",
+        message: "Select a current setlist song with a Songsterr URL before opening it."
+      });
+      return;
+    }
+
+    this.openSongSequence += 1;
+    const command: OpenSongCommand = {
+      type: "openSongCommand",
+      leaderId: client.id,
+      sequenceId: this.openSongSequence,
+      requestedAt: request.requestedAt || now,
+      currentSong: this.currentSong
+    };
+    this.broadcast(command);
   }
 
   private markRunningAt(scheduledServerTime: number): void {

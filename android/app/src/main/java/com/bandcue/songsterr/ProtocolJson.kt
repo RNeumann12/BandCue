@@ -14,6 +14,12 @@ data class TransportCommand(
     val sequenceId: Int,
     val scheduledServerTime: Long,
     val manualOffsetMs: Long,
+    val resetBeforePlay: Boolean,
+    val currentSong: CurrentSong?
+)
+
+data class OpenSongCommand(
+    val sequenceId: Int,
     val currentSong: CurrentSong?
 )
 
@@ -111,6 +117,29 @@ object ProtocolJson {
             sequenceId = message.optInt("sequenceId"),
             scheduledServerTime = message.optLong("scheduledServerTime"),
             manualOffsetMs = message.optLong("manualOffsetMs", 0),
+            resetBeforePlay = message.optBoolean("resetBeforePlay", false),
+            currentSong = song
+        )
+    }
+
+    fun parseOpenSongCommand(message: JSONObject): OpenSongCommand? {
+        if (message.optString("type") != "openSongCommand") {
+            return null
+        }
+
+        val song = message
+            .optJSONObject("currentSong")
+            ?.optJSONObject("song")
+            ?.let {
+                CurrentSong(
+                    title = it.optString("title"),
+                    sourceType = it.optString("sourceType"),
+                    source = it.optString("source").takeIf { source -> source.isNotBlank() }
+                )
+            }
+
+        return OpenSongCommand(
+            sequenceId = message.optInt("sequenceId"),
             currentSong = song
         )
     }

@@ -17,7 +17,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "bandcueTransport") {
-    controlSongsterr(message.action).then((result) => {
+    controlSongsterr(message.action, Boolean(message.resetBeforePlay)).then((result) => {
       reportStatus();
       sendResponse(result);
     });
@@ -30,10 +30,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 reportStatus();
 setInterval(reportStatus, 5000);
 
-async function controlSongsterr(action) {
-  const mediaControlled = await controlMediaElement(action);
+async function controlSongsterr(action, resetBeforePlay = false) {
+  const resetDetail = action === "play" && resetBeforePlay
+    ? resetSongsterrPosition()
+    : "";
+  const mediaControlled = await controlMediaElement(action, resetBeforePlay);
   if (mediaControlled) {
-    lastControlDetail = `Used native media ${action}`;
+    lastControlDetail = joinControlDetails(resetDetail, `Used native media ${action}`);
     return {
       ok: true,
       detail: lastControlDetail,
@@ -43,7 +46,7 @@ async function controlSongsterr(action) {
 
   const clicked = clickTransportButton(action);
   if (clicked) {
-    lastControlDetail = `Clicked Songsterr player control: ${clicked}`;
+    lastControlDetail = joinControlDetails(resetDetail, `Clicked Songsterr player control: ${clicked}`);
     return {
       ok: true,
       detail: lastControlDetail,
@@ -52,7 +55,7 @@ async function controlSongsterr(action) {
   }
 
   if (dispatchSpaceFallback()) {
-    lastControlDetail = `Used safe Space shortcut fallback for ${action}`;
+    lastControlDetail = joinControlDetails(resetDetail, `Used safe Space shortcut fallback for ${action}`);
     return {
       ok: true,
       detail: lastControlDetail,
@@ -68,7 +71,7 @@ async function controlSongsterr(action) {
   };
 }
 
-async function controlMediaElement(action) {
+async function controlMediaElement(action, resetBeforePlay = false) {
   const mediaElements = [...document.querySelectorAll("audio, video")];
   if (!mediaElements.length) {
     return false;
@@ -77,6 +80,9 @@ async function controlMediaElement(action) {
   if (action === "play") {
     for (const media of mediaElements) {
       try {
+        if (resetBeforePlay) {
+          media.currentTime = 0;
+        }
         await media.play();
         return true;
       } catch {
@@ -95,6 +101,29 @@ async function controlMediaElement(action) {
   }
 
   return pausedActiveMedia;
+}
+
+function resetSongsterrPosition() {
+  const mediaElements = [...document.querySelectorAll("audio, video")];
+  let resetMedia = false;
+  for (const media of mediaElements) {
+    try {
+      media.currentTime = 0;
+      resetMedia = true;
+    } catch {
+      // Some embedded players expose media elements without a writable timeline.
+    }
+  }
+
+  if (resetMedia) {
+    return "Reset Songsterr media timeline to the song start";
+  }
+
+  if (dispatchKeyShortcut("Home")) {
+    return "Sent Home shortcut to reset Songsterr to the song start";
+  }
+
+  return "Tried to reset Songsterr to the song start";
 }
 
 function clickTransportButton(action) {
@@ -167,6 +196,10 @@ function isVisible(element) {
 }
 
 function dispatchSpaceFallback() {
+  return dispatchKeyShortcut(" ");
+}
+
+function dispatchKeyShortcut(key) {
   const active = document.activeElement;
   if (active instanceof HTMLElement) {
     active.blur();
@@ -180,16 +213,18 @@ function dispatchSpaceFallback() {
   document.body.setAttribute("tabindex", "-1");
   document.body.focus({ preventScroll: true });
 
+  const code = key === " " ? "Space" : key;
+  const keyCode = key === " " ? 32 : key === "Home" ? 36 : 0;
   for (const target of [window, document, document.body]) {
     for (const type of ["keydown", "keypress", "keyup"]) {
       target.dispatchEvent(new KeyboardEvent(type, {
-      key: " ",
-      code: "Space",
-      keyCode: 32,
-      which: 32,
-      bubbles: true,
-      cancelable: true,
-      composed: true
+        key,
+        code,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true
       }));
     }
   }
@@ -201,4 +236,8 @@ function dispatchSpaceFallback() {
   }
 
   return true;
+}
+
+function joinControlDetails(...details) {
+  return details.filter(Boolean).join("; ");
 }

@@ -832,7 +832,26 @@ function openCurrentSong() {
     return;
   }
 
-  window.open(url, "_blank", "noopener,noreferrer");
+  const requestSent = send({ type: "openSongRequest", requestedAt: Date.now() });
+  const songTitle = lastState?.currentSong?.song?.title
+    || (currentSongIndex >= 0 ? setlist[currentSongIndex]?.title : "current song")
+    || "current song";
+  const songsterrAdapters = lastState?.clients.filter(
+    (device) => device.role === "desktop-adapter" && device.status?.app === "songsterr"
+  ) ?? [];
+
+  if (!requestSent || !songsterrAdapters.length) {
+    window.open(url, "_blank", "noopener,noreferrer");
+    setText(
+      elements.hostWarning,
+      requestSent
+        ? `No Songsterr adapter connected; opened ${songTitle} locally.`
+        : `Room connection is not ready; opened ${songTitle} locally.`
+    );
+    return;
+  }
+
+  setText(elements.hostWarning, `Asked ${songsterrAdapters.length} Songsterr adapter${songsterrAdapters.length === 1 ? "" : "s"} to open ${songTitle}.`);
 }
 
 function getCurrentSongUrl() {
@@ -1055,7 +1074,10 @@ function formatTime(timestamp) {
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message));
+    return true;
   }
+
+  return false;
 }
 
 function calculateClockSample(clientSentAt, clientReceivedAt, serverReceivedAt, serverSentAt) {

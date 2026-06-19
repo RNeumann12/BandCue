@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.Rect
+import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -30,7 +31,7 @@ class BandCueAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() = Unit
 
-    private fun controlSongsterr(action: String): AccessibilityControlResult {
+    private fun controlSongsterr(action: String, resetBeforePlay: Boolean): AccessibilityControlResult {
         val root = rootInActiveWindow
             ?: return AccessibilityControlResult(false, "Accessibility fallback could not read the active window.")
         val foregroundPackage = root.packageName?.toString().orEmpty()
@@ -47,6 +48,11 @@ class BandCueAccessibilityService : AccessibilityService() {
             )
         }
 
+        val resetDetail = if (action == "play" && resetBeforePlay) {
+            resetSongsterrToStart(root)
+        } else {
+            null
+        }
         val candidate = findBestTransportCandidate(root, action)
             ?: return AccessibilityControlResult(
                 ok = false,
@@ -68,10 +74,79 @@ class BandCueAccessibilityService : AccessibilityService() {
         return if (clicked) {
             AccessibilityControlResult(
                 ok = true,
-                detail = "Tapped Songsterr control: ${candidate.label.ifBlank { actionLabel(action) }}."
+                detail = listOfNotNull(
+                    resetDetail,
+                    "Tapped Songsterr control: ${candidate.label.ifBlank { actionLabel(action) }}."
+                ).joinToString(" ")
             )
         } else {
             AccessibilityControlResult(false, "Songsterr rejected the accessibility click on ${candidate.label}.")
+        }
+    }
+
+    private fun resetSongsterrToStart(root: AccessibilityNodeInfo): String {
+        val progress = findProgressCandidate(root)
+            ?: return "Tried to reset Songsterr to the song start; no visible progress control was exposed."
+
+        val setProgress = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+            val args = Bundle().apply {
+                putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, 0f)
+            }
+            progress.node.performAction(ACTION_SET_PROGRESS, args)
+        } else {
+            false
+        }
+        if (setProgress) {
+            return "Reset Songsterr progress to the song start."
+        }
+
+        val dragged = dragToStart(progress.bounds)
+        return if (dragged) {
+            "Dragged Songsterr progress to the song start."
+        } else {
+            "Tried to reset Songsterr to the song start, but the progress control did not respond."
+        }
+    }
+
+    private fun findProgressCandidate(root: AccessibilityNodeInfo): ProgressCandidate? {
+        val candidates = mutableListOf<ProgressCandidate>()
+        collectProgressCandidates(root, candidates)
+        return candidates.maxByOrNull { it.score }
+    }
+
+    private fun collectProgressCandidates(
+        node: AccessibilityNodeInfo?,
+        candidates: MutableList<ProgressCandidate>
+    ) {
+        if (node == null) {
+            return
+        }
+
+        if (node.packageName?.toString() == SONGSTERR_PACKAGE && node.isVisibleToUser) {
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            val label = nodeLabel(node)
+            val className = node.className?.toString().orEmpty()
+            val rangeBonus = if (node.rangeInfo != null) 10 else 0
+            val classBonus = if (
+                className.contains("SeekBar", ignoreCase = true) ||
+                className.contains("ProgressBar", ignoreCase = true) ||
+                label.contains("progress", ignoreCase = true) ||
+                label.contains("seek", ignoreCase = true)
+            ) 6 else 0
+            val shapeBonus = if (bounds.width() > resources.displayMetrics.widthPixels * 0.45 && bounds.height() <= 120) {
+                4
+            } else {
+                0
+            }
+            val score = rangeBonus + classBonus + shapeBonus
+            if (score > 0 && bounds.width() > 120 && bounds.height() > 0) {
+                candidates.add(ProgressCandidate(node, bounds, score))
+            }
+        }
+
+        for (index in 0 until node.childCount) {
+            collectProgressCandidates(node.getChild(index), candidates)
         }
     }
 
@@ -351,6 +426,24 @@ class BandCueAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, null, null)
     }
 
+    private fun dragToStart(bounds: Rect): Boolean {
+        if (bounds.width() <= 1 || bounds.height() <= 1) {
+            return false
+        }
+
+        val y = bounds.centerY().toFloat()
+        val startX = (bounds.right - 8).toFloat()
+        val endX = (bounds.left + 8).toFloat()
+        val path = Path().apply {
+            moveTo(startX, y)
+            lineTo(endX, y)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 250))
+            .build()
+        return dispatchGesture(gesture, null, null)
+    }
+
     private fun actionLabel(action: String): String = if (action == "play") "play" else "pause"
 
     private data class TransportCandidate(
@@ -362,9 +455,16 @@ class BandCueAccessibilityService : AccessibilityService() {
         val subtreeLabel: String = ""
     )
 
+    private data class ProgressCandidate(
+        val node: AccessibilityNodeInfo,
+        val bounds: Rect,
+        val score: Int
+    )
+
     companion object {
         private const val SONGSTERR_PACKAGE = "com.songsterr"
         private const val TOOLBAR_ROW_BUCKET_PX = 180
+        private const val ACTION_SET_PROGRESS = 0x00200000
         private val IGNORED_CONTROL_WORDS = listOf(
             "playlist",
             "playlists",
@@ -392,13 +492,13 @@ class BandCueAccessibilityService : AccessibilityService() {
             }
         }
 
-        fun control(action: String): AccessibilityControlResult {
+        fun control(action: String, resetBeforePlay: Boolean = false): AccessibilityControlResult {
             val service = activeService
                 ?: return AccessibilityControlResult(
                     ok = false,
                     detail = "Enable BandCue Songsterr in Android Accessibility settings."
                 )
-            return service.controlSongsterr(action)
+            return service.controlSongsterr(action, resetBeforePlay)
         }
     }
 }

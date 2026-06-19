@@ -35,7 +35,7 @@ npm run package:extension
 
 Open the host controls URL and use the Setlist panel to add songs for the rehearsal. The setlist is stored locally in the host browser. Selecting **Make Current**, **Previous**, or **Next** publishes the current song to every connected companion view.
 
-Songs can include a source type, a Songsterr URL, a MuseScore score name, and short notes. Use **Export** and **Import** to move setlists between host browsers. If the current song is a Songsterr URL, BandCue can open it from the host page and the Songsterr adapter will also open it automatically before a transport command when no matching tab is available.
+Songs can include a source type, a Songsterr URL, a MuseScore score name, and short notes. Use **Export** and **Import** to move setlists between host browsers. If the current song is a Songsterr URL, **Open Songsterr** on the host page asks every connected Songsterr adapter to open the same current song. The Songsterr adapter will also open the current URL automatically before a transport command when no matching tab is available.
 
 MuseScore songs still need the score opened manually. The MuseScore helper warns when the active score title does not appear to match the current MuseScore setlist item.
 
@@ -135,7 +135,7 @@ The Android adapter connects as a Songsterr desktop adapter and first uses Andro
 ## V1 Limits
 
 - Same Wi-Fi only.
-- Songs must already be open and positioned.
+- MuseScore songs must already be open and positioned; Songsterr setlist URLs can be opened from the host page.
 - Play/stop only.
 - Phones are companion displays by default; Android phones can be app controllers only through the native adapter.
 - Only the leader's device should feed audible click/backing audio to the mixer.
