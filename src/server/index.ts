@@ -7,9 +7,11 @@ import QRCode from "qrcode";
 import { WebSocketServer } from "ws";
 import type { ClientHello, ClientMessage } from "../shared/protocol.js";
 import { RoomController } from "./room.js";
+import { startDiscoveryResponder } from "./discovery.js";
 
 const PORT = Number(process.env.PORT ?? 4173);
 const HOST = process.env.HOST ?? "0.0.0.0";
+const DISCOVERY_PORT = Number(process.env.BANDCUE_DISCOVERY_PORT ?? PORT);
 const ROOM_TOKEN = process.env.BANDCUE_TOKEN ?? process.env.PLAYSYNC_TOKEN ?? randomBytes(9).toString("base64url");
 const ROOM_CODE = randomBytes(3).toString("hex").toUpperCase();
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -141,12 +143,18 @@ function safeParse(raw: string): unknown {
 }
 
 server.listen(PORT, HOST, () => {
+  startDiscoveryResponder({
+    roomCode: ROOM_CODE,
+    port: PORT,
+    discoveryPort: DISCOVERY_PORT
+  });
   console.log("BandCue coordinator running");
   console.log(`Host controls:      ${hostUrl}`);
   console.log(`Companion room:     ${companionUrl}`);
   console.log(`Same-machine room:  ${localCompanionUrl}`);
   console.log(`Room code:          ${ROOM_CODE}`);
   console.log(`WebSocket endpoint: ws://${lanAddress}:${PORT}/ws?token=${ROOM_TOKEN}`);
+  console.log(`Adapter locator:    ${ROOM_CODE} or ${PORT}`);
   console.log("");
   console.log("Startup checks:");
   console.log("npm run preflight");
@@ -155,7 +163,7 @@ server.listen(PORT, HOST, () => {
   console.log("npm run dev:all");
   console.log("");
   console.log("MuseScore on this machine:");
-  console.log(`npm run dev:musescore -- --room "${localCompanionUrl}" --name "MuseScore laptop"`);
+  console.log(`npm run dev:musescore -- --port ${PORT} --name "MuseScore laptop"`);
   console.log("Optional MuseScore bridge API:");
-  console.log(`npm run dev:musescore -- --room "${localCompanionUrl}" --name "MuseScore laptop" --bridge-port 4731`);
+  console.log(`npm run dev:musescore -- --port ${PORT} --name "MuseScore laptop" --bridge-port 4731`);
 });

@@ -6,6 +6,7 @@ const museScoreName =
 const extraMuseScoreArgs = splitArgs(
   process.env.BANDCUE_MUSESCORE_ARGS || process.env.PLAYSYNC_MUSESCORE_ARGS || ""
 );
+const coordinatorPort = process.env.BANDCUE_PORT || process.env.PORT || "4173";
 
 let coordinator: ChildProcess | undefined;
 let museScore: ChildProcess | undefined;
@@ -15,14 +16,10 @@ coordinator = spawn(npmCommand, ["run", "dev"], {
   shell: false
 });
 
-coordinator.stdout?.on("data", (chunk) => {
-  const text = chunk.toString();
-  process.stdout.write(text);
+startMuseScore();
 
-  const roomUrl = findSameMachineRoom(text);
-  if (roomUrl && !museScore) {
-    startMuseScore(roomUrl);
-  }
+coordinator.stdout?.on("data", (chunk) => {
+  process.stdout.write(chunk.toString());
 });
 
 coordinator.stderr?.on("data", (chunk) => process.stderr.write(chunk));
@@ -36,15 +33,15 @@ coordinator.on("exit", (code) => {
 process.on("SIGINT", stopAll);
 process.on("SIGTERM", stopAll);
 
-function startMuseScore(roomUrl: string): void {
+function startMuseScore(): void {
   console.log("");
   console.log("Starting MuseScore helper for this machine...");
   museScore = spawn(npmCommand, [
     "run",
     "dev:musescore",
     "--",
-    "--room",
-    roomUrl,
+    "--port",
+    coordinatorPort,
     "--name",
     museScoreName,
     ...extraMuseScoreArgs
@@ -52,11 +49,6 @@ function startMuseScore(roomUrl: string): void {
     stdio: "inherit",
     shell: false
   });
-}
-
-function findSameMachineRoom(text: string): string | undefined {
-  const match = text.match(/Same-machine room:\s+(http:\/\/[^\s]+)/);
-  return match?.[1];
 }
 
 function stopAll(): void {

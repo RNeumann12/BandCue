@@ -55,15 +55,23 @@ The host page shows each connected device's round-trip time, clock offset, jitte
 
 ### MuseScore on Windows
 
-Keep `npm run dev` running in one terminal. Open a score in MuseScore Studio, then copy the exact `MuseScore on this machine` command printed by the coordinator into a second terminal.
+Keep `npm run dev` running in one terminal. Open a score in MuseScore Studio, then start the MuseScore helper in a second terminal.
 
-It will look like this, but the token will be different every time unless you set `BANDCUE_TOKEN`:
+On the default local port, no room URL is needed:
 
 ```powershell
-npm run dev:musescore -- --room "http://127.0.0.1:4173/?token=REAL_TOKEN_FROM_SERVER" --name "MuseScore laptop"
+npm run dev:musescore -- --name "MuseScore laptop"
 ```
 
-Do not run the literal placeholder values `HOST`, `TOKEN`, `YOUR_HOST`, or `ROOM_TOKEN`.
+If you changed the coordinator port, pass the port instead of copying the full token URL:
+
+```powershell
+npm run dev:musescore -- --port 5000 --name "MuseScore laptop"
+```
+
+You can also pass the printed room code with `--room ABC123`, or still use the full room URL when you need to target another host explicitly. Do not run the literal placeholder values `HOST`, `TOKEN`, `YOUR_HOST`, or `ROOM_TOKEN`.
+
+When you pass a room code or port, the helper first checks the local machine, then broadcasts a small LAN discovery request. The coordinator replies with its HTTP port, and the helper verifies the room through `/api/room` before connecting.
 
 The helper detects a MuseScore window, verifies that Windows made it the foreground app, and sends keyboard shortcuts to the app when no local bridge handles the command first. This keeps the v1 setup pragmatic while allowing a MuseScore plugin or local helper to provide more reliable playback state and score title reporting.
 
@@ -72,13 +80,13 @@ For MuseScore, BandCue sends `{ESC}` for stop. For play, the default is safer th
 If your MuseScore setup needs different shortcuts or a stricter window match, pass options such as:
 
 ```powershell
-npm run dev:musescore -- --room "http://127.0.0.1:4173/?token=REAL_TOKEN_FROM_SERVER" --name "MuseScore laptop" --stop-key "{ESC}" --play-key " " --process-match "MuseScore|mscore" --title-match "Song Title"
+npm run dev:musescore -- --name "MuseScore laptop" --stop-key "{ESC}" --play-key " " --process-match "MuseScore|mscore" --title-match "Song Title"
 ```
 
 For a more reliable plugin or local helper path, the MuseScore adapter can expose a small localhost bridge:
 
 ```powershell
-npm run dev:musescore -- --room "http://127.0.0.1:4173/?token=REAL_TOKEN_FROM_SERVER" --name "MuseScore laptop" --bridge-port 4731
+npm run dev:musescore -- --name "MuseScore laptop" --bridge-port 4731
 ```
 
 The bridge accepts `POST http://127.0.0.1:4731/status` with JSON such as:
@@ -113,8 +121,10 @@ The host page shows the active MuseScore window title, whether playback is infer
 4. Select `<project-folder>\extension\songsterr`.
 5. Open a Songsterr song tab.
 6. Click the BandCue extension icon.
-7. Paste the exact `Companion room` or `Same-machine room` URL printed by `npm run dev`.
+7. Enter the printed room code, the coordinator port such as `4173`, or the full room URL.
 8. Click **Connect**.
+
+The extension cannot use raw UDP discovery, so room-code or port lookup checks the local machine and scans common rehearsal LAN ranges. If your network uses a different subnet, enter `host:port`, for example `192.168.1.23:4173`.
 
 ## V1 Limits
 

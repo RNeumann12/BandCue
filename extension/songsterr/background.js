@@ -1,10 +1,11 @@
 let socket;
+let roomInput;
 let roomUrl;
 let wsUrl;
 let serverOffsetMs = 0;
 let samples = [];
 let connectionState = "not configured";
-let connectionDetail = "Paste the BandCue room URL and click Connect";
+let connectionDetail = "Enter the BandCue room code, port, or URL and click Connect";
 let clockTimer;
 let lastStatus = {
   ready: false,
@@ -21,20 +22,30 @@ let lastContentScriptStatusAt = 0;
 
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
+const DEFAULT_ROOM_PORT = 4173;
+const LAN_SCAN_BATCH_SIZE = 64;
+const LAN_SCAN_TIMEOUT_MS = 350;
+const LAN_SCAN_SUBNETS = [
+  "192.168.0",
+  "192.168.1",
+  "192.168.178",
+  "10.0.0",
+  "10.0.1",
+  "172.16.0"
+];
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "popupConnect") {
-    try {
-      roomUrl = message.roomUrl;
-      wsUrl = toWsUrl(roomUrl);
-      chrome.storage.local.set({ roomUrl });
-      connect();
+    roomInput = normalizeRoomLocator(message.roomUrl);
+    connectionState = "connecting";
+    connectionDetail = `Looking for BandCue room ${roomInput}`;
+    configureConnection(roomInput).then(() => {
       sendResponse(getPopupState());
-    } catch (error) {
+    }).catch((error) => {
       connectionState = "error";
       connectionDetail = error.message;
       sendResponse(getPopupState());
-    }
+    });
     return true;
   }
 
@@ -67,11 +78,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomUrl"], (stored) => {
-  if (stored.roomUrl) {
-    roomUrl = stored.roomUrl;
-    wsUrl = toWsUrl(roomUrl);
-    connect();
+chrome.storage.local.get(["roomInput", "roomUrl"], (stored) => {
+  const storedInput = stored.roomInput || stored.roomUrl;
+  if (storedInput) {
+    roomInput = storedInput;
+    configureConnection(storedInput).catch((error) => {
+      connectionState = "error";
+      connectionDetail = error.message;
+    });
   }
 });
 
@@ -87,12 +101,39 @@ chrome.tabs.onRemoved.addListener(() => {
   scheduleActiveTabStatusReport();
 });
 
-function connect() {
+async function configureConnection(input) {
+  roomInput = normalizeRoomLocator(input);
+  await refreshRoomEndpoint();
+  chrome.storage.local.set({ roomInput, roomUrl });
+  connect();
+}
+
+async function refreshRoomEndpoint() {
+  const endpoint = await resolveRoomEndpoint(roomInput);
+  roomUrl = endpoint.roomUrl;
+  wsUrl = endpoint.wsUrl;
+}
+
+async function connect() {
+  if (roomInput) {
+    try {
+      await refreshRoomEndpoint();
+      chrome.storage.local.set({ roomInput, roomUrl });
+    } catch (error) {
+      connectionState = "error";
+      connectionDetail = error.message;
+      setTimeout(() => {
+        connect();
+      }, 2000);
+      return;
+    }
+  }
+
   if (!wsUrl) return;
   socket?.close();
   if (clockTimer) clearInterval(clockTimer);
   connectionState = "connecting";
-  connectionDetail = `Connecting to ${wsUrl}`;
+  connectionDetail = `Connecting to ${roomInput || roomUrl}`;
   socket = new WebSocket(wsUrl);
 
   socket.addEventListener("open", () => {
@@ -165,7 +206,7 @@ function connect() {
 
   socket.addEventListener("error", () => {
     connectionState = "error";
-    connectionDetail = "Could not connect. Is `npm run dev` still running, and did you paste the current room URL?";
+    connectionDetail = "Could not connect. Is `npm run dev` still running, and is the room code, port, or URL current?";
   });
 }
 
@@ -504,11 +545,217 @@ function toWsUrl(value) {
   return url.toString();
 }
 
+async function resolveRoomEndpoint(input) {
+  const locator = normalizeRoomLocator(input);
+  if (isAbsoluteRoomUrl(locator)) {
+    return {
+      roomUrl: locator,
+      wsUrl: toWsUrl(locator)
+    };
+  }
+
+  const candidates = buildRoomDiscoveryCandidates(locator);
+  if (!candidates.length) {
+    throw new Error(`Use a room URL, room code, port, or host:port.`);
+  }
+
+  const errors = [];
+  for (const candidate of candidates) {
+    const result = await tryResolveRoomCandidate(candidate, 1000);
+    if (result.endpoint) {
+      return result.endpoint;
+    }
+    errors.push(result.error);
+  }
+
+  if (isRoomCode(locator) || isPort(locator)) {
+    const scanResult = await scanLanForRoom(locator);
+    if (scanResult.endpoint) {
+      return scanResult.endpoint;
+    }
+
+    errors.push(scanResult.error);
+  }
+
+  throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}`);
+}
+
+async function tryResolveRoomCandidate(candidate, timeoutMs) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(candidate.apiUrl, { signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!response.ok) {
+      return { error: `${candidate.label} returned HTTP ${response.status}` };
+    }
+
+    const state = await response.json();
+    const discoveredRoomUrl = roomUrlFromDiscovery(state, candidate);
+    if (!discoveredRoomUrl) {
+      return {
+        error: candidate.expectedRoomCode
+          ? `${candidate.label} did not match an active room`
+          : `${candidate.label} did not return a usable room`
+      };
+    }
+
+    return {
+      endpoint: {
+        roomUrl: discoveredRoomUrl,
+        wsUrl: toWsUrl(discoveredRoomUrl)
+      }
+    };
+  } catch (error) {
+    return { error: `${candidate.label}: ${error.message}` };
+  }
+}
+
+async function scanLanForRoom(roomCode) {
+  const candidates = buildLanScanCandidates(roomCode);
+  const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
+  const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
+  let checked = 0;
+  for (let index = 0; index < candidates.length; index += LAN_SCAN_BATCH_SIZE) {
+    const batch = candidates.slice(index, index + LAN_SCAN_BATCH_SIZE);
+    checked += batch.length;
+    connectionDetail = expectedRoomCode
+      ? `Scanning local network for room ${expectedRoomCode} (${checked}/${candidates.length})`
+      : `Scanning local network on port ${port} (${checked}/${candidates.length})`;
+    const results = await Promise.all(
+      batch.map((candidate) => tryResolveRoomCandidate(candidate, LAN_SCAN_TIMEOUT_MS))
+    );
+    const match = results.find((result) => result.endpoint);
+    if (match?.endpoint) {
+      return { endpoint: match.endpoint };
+    }
+  }
+
+  return {
+    error: expectedRoomCode
+      ? `No room ${expectedRoomCode} found on common local networks at port ${port}`
+      : `No BandCue room found on common local networks at port ${port}`
+  };
+}
+
+function normalizeRoomLocator(value) {
+  const trimmed = String(value || "").trim();
+  return trimmed || String(DEFAULT_ROOM_PORT);
+}
+
+function isAbsoluteRoomUrl(value) {
+  return /^https?:\/\//i.test(value.trim());
+}
+
+function buildRoomDiscoveryCandidates(locator) {
+  if (isAbsoluteRoomUrl(locator)) {
+    return [];
+  }
+
+  if (isPort(locator)) {
+    return localCandidates(Number.parseInt(locator, 10));
+  }
+
+  if (isRoomCode(locator)) {
+    return localCandidates(DEFAULT_ROOM_PORT, locator.toUpperCase());
+  }
+
+  const explicitHost = parseHostAndPort(locator, DEFAULT_ROOM_PORT);
+  return explicitHost ? [discoveryCandidate(explicitHost.host, explicitHost.port)] : [];
+}
+
+function buildLanScanCandidates(roomCode) {
+  const candidates = [];
+  const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
+  const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
+  for (const subnet of LAN_SCAN_SUBNETS) {
+    for (let host = 1; host <= 254; host += 1) {
+      candidates.push(discoveryCandidate(`${subnet}.${host}`, port, expectedRoomCode));
+    }
+  }
+  return candidates;
+}
+
+function roomUrlFromDiscovery(state, candidate) {
+  if (state?.type !== "roomState" || typeof state.companionUrl !== "string") {
+    return "";
+  }
+
+  if (
+    candidate.expectedRoomCode &&
+    state.roomCode?.toUpperCase() !== candidate.expectedRoomCode.toUpperCase()
+  ) {
+    return "";
+  }
+
+  try {
+    const discoveredUrl = new URL(state.companionUrl);
+    const token = discoveredUrl.searchParams.get("token");
+    if (!token) {
+      return "";
+    }
+
+    const url = new URL(candidate.baseUrl);
+    url.pathname = "/";
+    url.search = "";
+    url.searchParams.set("token", token);
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function localCandidates(port, expectedRoomCode) {
+  return [
+    discoveryCandidate("127.0.0.1", port, expectedRoomCode),
+    discoveryCandidate("localhost", port, expectedRoomCode)
+  ];
+}
+
+function discoveryCandidate(host, port, expectedRoomCode) {
+  const baseUrl = `http://${host}:${port}`;
+  return {
+    apiUrl: `${baseUrl}/api/room`,
+    baseUrl,
+    expectedRoomCode,
+    label: expectedRoomCode ? `${expectedRoomCode} on ${host}:${port}` : `${host}:${port}`
+  };
+}
+
+function isPort(value) {
+  const parsed = Number.parseInt(value, 10);
+  return /^\d{2,5}$/.test(value) && Number.isFinite(parsed) && parsed > 0 && parsed <= 65535;
+}
+
+function isRoomCode(value) {
+  return /^[a-f0-9]{6}$/i.test(value);
+}
+
+function parseHostAndPort(value, defaultPort) {
+  try {
+    const url = new URL(`http://${value}`);
+    const host = url.hostname;
+    const port = url.port ? Number.parseInt(url.port, 10) : defaultPort;
+    if (!host || !Number.isFinite(port) || port <= 0 || port > 65535) {
+      return undefined;
+    }
+
+    return { host, port };
+  } catch {
+    return undefined;
+  }
+}
+
 function getPopupState() {
   return {
     connected: socket?.readyState === WebSocket.OPEN,
     connectionState,
     connectionDetail,
+    roomInput,
     roomUrl,
     status: lastStatus
   };

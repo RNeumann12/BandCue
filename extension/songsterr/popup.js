@@ -5,8 +5,8 @@ const stop = document.querySelector("#stop");
 const status = document.querySelector("#status");
 
 chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
-  if (state?.roomUrl) {
-    roomUrl.value = state.roomUrl;
+  if (state?.roomInput || state?.roomUrl) {
+    roomUrl.value = state.roomInput || state.roomUrl;
   }
   renderState(state);
 });
@@ -37,8 +37,8 @@ function renderState(state) {
 
 function refreshState() {
   chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
-    if (state?.roomUrl && !roomUrl.value) {
-      roomUrl.value = state.roomUrl;
+    if ((state?.roomInput || state?.roomUrl) && !roomUrl.value) {
+      roomUrl.value = state.roomInput || state.roomUrl;
     }
     renderState(state);
   });

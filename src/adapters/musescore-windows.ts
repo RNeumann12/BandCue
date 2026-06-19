@@ -14,6 +14,20 @@ import {
   summarizeClock,
   type ClockSample
 } from "../shared/clock.js";
+import {
+  DEFAULT_ROOM_PORT,
+  buildRoomDiscoveryCandidates,
+  isAbsoluteRoomUrl,
+  isPort,
+  isRoomCode,
+  isPlaceholderRoom,
+  normalizeRoomLocator,
+  roomDiscoveryCandidate,
+  roomUrlFromDiscovery,
+  roomUrlToWebSocket,
+  type RoomDiscoveryState
+} from "../shared/room-locator.js";
+import { discoverBandCueRooms } from "../shared/lan-discovery.js";
 import type {
   AdapterPlaybackState,
   AdapterStatus,
@@ -24,6 +38,8 @@ import type {
 
 interface Args {
   room?: string;
+  port: number;
+  discoveryPort: number;
   name: string;
   playKey: string;
   stopKey: string;
@@ -64,22 +80,16 @@ interface BridgeCommand {
 }
 
 const args = parseArgs(process.argv.slice(2));
-if (!args.room) {
-  console.error([
-    "Usage: npm run dev:musescore -- --room \"http://127.0.0.1:4173/?token=REAL_TOKEN\" --name \"MuseScore laptop\"",
-    "Optional: --play-mode stop-then-play|single-key --play-key \" \" --stop-key \"{ESC}\" --process-match \"MuseScore|mscore\" --title-match \"Score Title\""
-  ].join("\n"));
-  process.exit(1);
-}
-
-if (isPlaceholderRoom(args.room)) {
+if (args.room && isAbsoluteRoomUrl(args.room) && isPlaceholderRoom(args.room)) {
   console.error("The --room value still contains HOST/TOKEN placeholders.");
-  console.error("Start the coordinator with `npm run dev`, then copy the printed `Same-machine room` URL.");
+  console.error("Start the coordinator with `npm run dev`, then use --room ROOM_CODE, --room PORT, or the printed room URL.");
   process.exit(1);
 }
 
-const wsUrl = roomUrlToWebSocket(args.room);
 let ws: WebSocket | undefined;
+let wsUrl: string | undefined;
+let roomUrl: string | undefined;
+let lastDiscoveryError = "";
 let serverOffsetMs = 0;
 let inferredPlayback: AdapterPlaybackState = "unknown";
 let lastMuseScoreStatus: MuseScoreStatus | undefined;
@@ -95,12 +105,31 @@ const samples: ClockSample[] = [];
 if (args.bridgePort !== undefined) {
   startBridge(args.bridgePort);
 }
-connect();
+void connect();
 
-function connect(): void {
+async function connect(): Promise<void> {
+  try {
+    const endpoint = await resolveRoomEndpoint();
+    roomUrl = endpoint.roomUrl;
+    wsUrl = endpoint.wsUrl;
+    lastDiscoveryError = "";
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (detail !== lastDiscoveryError) {
+      console.warn(detail);
+      console.warn("Waiting for a BandCue room; retrying in 2s.");
+      lastDiscoveryError = detail;
+    }
+    setTimeout(() => {
+      void connect();
+    }, 2000);
+    return;
+  }
+
   ws = new WebSocket(wsUrl);
 
   ws.on("open", () => {
+    console.log(`Connected to BandCue room at ${roomUrl}`);
     send({
       type: "clientHello",
       deviceName: args.name,
@@ -175,12 +204,99 @@ function connect(): void {
   ws.on("close", () => {
     console.log("Disconnected from coordinator; reconnecting in 2s.");
     stopIntervals();
-    setTimeout(connect, 2000);
+    setTimeout(() => {
+      void connect();
+    }, 2000);
   });
 
   ws.on("error", (error) => {
     console.error(error.message);
   });
+}
+
+async function resolveRoomEndpoint(): Promise<{ roomUrl: string; wsUrl: string }> {
+  const locator = normalizeRoomLocator(args.room, args.port);
+  if (isAbsoluteRoomUrl(locator)) {
+    return {
+      roomUrl: locator,
+      wsUrl: roomUrlToWebSocket(locator)
+    };
+  }
+
+  const candidates = buildRoomDiscoveryCandidates(locator, args.port);
+  if (!candidates.length) {
+    throw new Error(`Could not understand BandCue room locator "${locator}". Use a room URL, room code, port, or host:port.`);
+  }
+
+  const localResult = await resolveFromCandidates(candidates);
+  if (localResult.endpoint) {
+    return localResult.endpoint;
+  }
+
+  const errors: string[] = [];
+  errors.push(...localResult.errors);
+  if (isRoomCode(locator) || isPort(locator)) {
+    const expectedRoomCode = isRoomCode(locator) ? locator.toUpperCase() : undefined;
+    const discoveryPort = isPort(locator) ? Number.parseInt(locator, 10) : args.discoveryPort;
+    const rooms = await discoverBandCueRooms({
+      roomCode: expectedRoomCode,
+      discoveryPort,
+      timeoutMs: 1000
+    });
+    const lanCandidates = rooms
+      .filter((room) => room.host)
+      .map((room) => roomDiscoveryCandidate(room.host ?? "", room.port, expectedRoomCode));
+    const lanResult = await resolveFromCandidates(lanCandidates);
+    if (lanResult.endpoint) {
+      return lanResult.endpoint;
+    }
+
+    if (!rooms.length) {
+      errors.push(expectedRoomCode
+        ? `No LAN discovery response for room ${expectedRoomCode} on UDP ${discoveryPort}`
+        : `No LAN discovery response on UDP ${discoveryPort}`);
+    }
+    errors.push(...lanResult.errors);
+  }
+
+  throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}`);
+}
+
+async function resolveFromCandidates(
+  candidates: ReturnType<typeof buildRoomDiscoveryCandidates>
+): Promise<{ endpoint?: { roomUrl: string; wsUrl: string }; errors: string[] }> {
+  const errors: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch(candidate.apiUrl, { signal: AbortSignal.timeout(1000) });
+      if (!response.ok) {
+        errors.push(`${candidate.label} returned HTTP ${response.status}`);
+        continue;
+      }
+
+      const state = await response.json() as RoomDiscoveryState;
+      const discoveredRoomUrl = roomUrlFromDiscovery(state, candidate);
+      if (!discoveredRoomUrl) {
+        errors.push(candidate.expectedRoomCode
+          ? `${candidate.label} did not match an active room`
+          : `${candidate.label} did not return a usable room`);
+        continue;
+      }
+
+      return {
+        endpoint: {
+          roomUrl: discoveredRoomUrl,
+          wsUrl: roomUrlToWebSocket(discoveredRoomUrl)
+        },
+        errors
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${candidate.label}: ${message}`);
+    }
+  }
+
+  return { errors };
 }
 
 function startClockSync(): void {
@@ -867,26 +983,6 @@ function send(message: unknown): void {
   }
 }
 
-function roomUrlToWebSocket(room: string): string {
-  const url = new URL(room);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/ws";
-  return url.toString();
-}
-
-function isPlaceholderRoom(room: string): boolean {
-  try {
-    const url = new URL(room);
-    const tokenValue = url.searchParams.get("token") ?? "";
-    return (
-      /^(host|your_host)$/i.test(url.hostname) ||
-      /^(token|room_token|real_token|real_token_from_server)$/i.test(tokenValue)
-    );
-  } catch {
-    return false;
-  }
-}
-
 function escapePowerShellSingleQuoted(value: string): string {
   return value.replaceAll("'", "''");
 }
@@ -897,6 +993,8 @@ function trimSingleLine(value: string): string {
 
 function parseArgs(raw: string[]): Args {
   const parsed: Args = {
+    port: parsePositiveInt(process.env.BANDCUE_PORT ?? process.env.PORT, DEFAULT_ROOM_PORT),
+    discoveryPort: parsePositiveInt(process.env.BANDCUE_DISCOVERY_PORT, 0),
     name: `${hostname()} MuseScore`,
     playKey: " ",
     stopKey: "{ESC}",
@@ -911,6 +1009,10 @@ function parseArgs(raw: string[]): Args {
   for (let index = 0; index < raw.length; index += 1) {
     const value = raw[index];
     if (value === "--room") parsed.room = raw[index + 1];
+    if (value === "--port") parsed.port = parsePositiveInt(raw[index + 1], parsed.port);
+    if (value === "--discovery-port") {
+      parsed.discoveryPort = parsePositiveInt(raw[index + 1], parsed.discoveryPort || parsed.port);
+    }
     if (value === "--name") parsed.name = raw[index + 1] ?? parsed.name;
     if (value === "--play-key") parsed.playKey = raw[index + 1] ?? parsed.playKey;
     if (value === "--stop-key") parsed.stopKey = raw[index + 1] ?? parsed.stopKey;
@@ -932,6 +1034,10 @@ function parseArgs(raw: string[]): Args {
     if (value === "--bridge-fallback-ms") {
       parsed.bridgeFallbackMs = parsePositiveInt(raw[index + 1], parsed.bridgeFallbackMs);
     }
+  }
+
+  if (!parsed.discoveryPort) {
+    parsed.discoveryPort = parsed.port;
   }
 
   return parsed;
