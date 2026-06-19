@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 
 const DEFAULT_BRIDGE_PORT = "4731";
 
@@ -20,9 +20,8 @@ const bridgePort = resolveBridgePort(process.argv.slice(2));
 let coordinator: ChildProcess | undefined;
 let museScore: ChildProcess | undefined;
 
-coordinator = spawn(npmCommand, ["run", "dev"], {
-  stdio: ["inherit", "pipe", "pipe"],
-  shell: false
+coordinator = spawnNpm(["run", "dev"], {
+  stdio: ["inherit", "pipe", "pipe"]
 });
 
 startMuseScore();
@@ -54,7 +53,7 @@ function startMuseScore(): void {
   }
 
   const bridgeArgs = bridgePort ? ["--bridge-port", bridgePort] : [];
-  museScore = spawn(npmCommand, [
+  museScore = spawnNpm([
     "run",
     "dev:musescore",
     "--",
@@ -65,9 +64,26 @@ function startMuseScore(): void {
     ...bridgeArgs,
     ...extraMuseScoreArgs
   ], {
-    stdio: "inherit",
-    shell: false
+    stdio: "inherit"
   });
+}
+
+// Spawns npm in a cross-platform safe way. On Windows, npm is `npm.cmd`, and
+// since Node 18.20/20.12/22 (CVE-2024-27980) spawning a `.cmd` file requires a
+// shell — otherwise `spawn` throws EINVAL. When running through a shell we must
+// also quote arguments ourselves, since args containing spaces (e.g. the
+// MuseScore name) would otherwise be split into separate tokens.
+function spawnNpm(args: string[], options: { stdio: SpawnOptions["stdio"] }): ChildProcess {
+  const useShell = process.platform === "win32";
+  const finalArgs = useShell ? args.map(quoteArg) : args;
+  return spawn(npmCommand, finalArgs, {
+    stdio: options.stdio,
+    shell: useShell
+  });
+}
+
+function quoteArg(arg: string): string {
+  return /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
 }
 
 // Returns the bridge port to use, or "" when bridge mode is off. Accepts
