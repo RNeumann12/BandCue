@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BandCue Room</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="mast">
+        <div>
+          <p class="eyebrow">BandCue rehearsal room</p>
+          <h1 id="roomCode">Joining...</h1>
+        </div>
+        <div class="transport" id="transportBadge">Stopped</div>
+      </section>
+
+      <section class="transport-deck" aria-live="polite">
+        <div class="transport-readout">
+          <p class="label">Now</p>
+          <div class="countdown" id="countdown">--</div>
+          <div class="subline" id="subline">Waiting for a transport command</div>
+        </div>
+        <div class="session-stack">
+          <div class="metric">
+            <span>Leader</span>
+            <strong id="leaderName">None</strong>
+          </div>
+          <div class="metric">
+            <span>Elapsed</span>
+            <strong id="elapsedTime">00:00</strong>
+          </div>
+          <div class="metric">
+            <span>Ready Adapters</span>
+            <strong id="readySummary">0 / 0</strong>
+          </div>
+          <div class="metric current-song">
+            <span>Current Song</span>
+            <strong id="currentSongTitle">None</strong>
+            <small id="currentSongMeta">No setlist song selected</small>
+          </div>
+        </div>
+      </section>
+
+      <section class="host-panel" id="hostPanel" hidden>
+        <div class="host-actions">
+          <button class="secondary arm" id="armButton" type="button">Arm</button>
+          <button class="primary" id="playButton" type="button">Play</button>
+          <button class="secondary" id="stopButton" type="button">Stop</button>
+        </div>
+        <div class="safety-controls">
+          <label>
+            <span>Control Mode</span>
+            <select id="controlModeSelect">
+              <option value="host-only">Host only</option>
+              <option value="leader-stop">Leader can stop</option>
+              <option value="everyone-can-stop">Everyone can stop</option>
+            </select>
+          </label>
+          <span class="safety-state" id="safetyState">Not armed</span>
+        </div>
+        <p class="host-warning" id="hostWarning"></p>
+      </section>
+
+      <section class="warnings" id="warnings" hidden></section>
+
+      <section class="grid">
+        <article class="panel">
+          <h2>Join</h2>
+          <img class="qr" src="/qr.svg" alt="QR code for companion room" />
+          <p id="companionUrl" class="mono"></p>
+        </article>
+
+        <article class="panel">
+          <h2>Devices</h2>
+          <div id="devices" class="devices"></div>
+        </article>
+
+        <article class="panel timing-panel" id="timingPanel" hidden>
+          <div class="panel-heading">
+            <h2>Timing</h2>
+            <span class="panel-count">manual offset: negative starts earlier</span>
+          </div>
+          <div id="timingRows" class="timing-rows"></div>
+        </article>
+
+        <article class="panel setlist-panel" id="setlistPanel" hidden>
+          <div class="panel-heading">
+            <h2>Setlist</h2>
+            <span id="setlistCount" class="panel-count">0 songs</span>
+          </div>
+          <form class="setlist-form" id="setlistForm">
+            <label>
+              <span>Title</span>
+              <input id="songTitleInput" name="title" autocomplete="off" required />
+            </label>
+            <label>
+              <span>Source</span>
+              <select id="songSourceTypeInput" name="sourceType">
+                <option value="songsterr">Songsterr</option>
+                <option value="musescore">MuseScore</option>
+                <option value="other">Other</option>
+              </select>
+            </label>
+            <label class="wide">
+              <span>URL or score name</span>
+              <input id="songSourceInput" name="source" autocomplete="off" />
+            </label>
+            <label class="wide">
+              <span>Notes</span>
+              <input id="songNotesInput" name="notes" autocomplete="off" />
+            </label>
+            <button class="secondary" type="submit">Add Song</button>
+          </form>
+          <div class="setlist-controls">
+            <button class="secondary compact" id="previousSongButton" type="button">Previous</button>
+            <button class="secondary compact" id="nextSongButton" type="button">Next</button>
+            <button class="secondary compact" id="clearSongButton" type="button">Clear Current</button>
+            <button class="secondary compact" id="openSongButton" type="button">Open Current</button>
+            <button class="secondary compact" id="exportSetlistButton" type="button">Export</button>
+            <button class="secondary compact" id="importSetlistButton" type="button">Import</button>
+            <input id="importSetlistInput" type="file" accept="application/json,.json" hidden />
+          </div>
+          <div id="setlistItems" class="setlist-items"></div>
+        </article>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

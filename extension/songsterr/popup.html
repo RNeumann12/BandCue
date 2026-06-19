@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>BandCue</title>
+  </head>
+  <body>
+    <main>
+      <h1>BandCue</h1>
+      <label>
+        Room URL
+        <input id="roomUrl" type="url" placeholder="http://host:4173/?token=..." />
+      </label>
+      <button id="connect" type="button">Connect</button>
+      <div class="row">
+        <button id="play" type="button">Play</button>
+        <button id="stop" type="button">Stop</button>
+      </div>
+      <p id="status">Not connected</p>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

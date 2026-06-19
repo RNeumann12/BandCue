@@ -1,0 +1,28 @@
+{
+  "name": "bandcue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server/index.ts",
+    "dev:all": "tsx src/tools/start-rehearsal.ts",
+    "dev:musescore": "tsx src/adapters/musescore-windows.ts",
+    "preflight": "tsx src/tools/preflight.ts",
+    "package:extension": "tsx src/tools/package-extension.ts",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

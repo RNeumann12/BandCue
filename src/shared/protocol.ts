@@ -1,0 +1,214 @@
+export type ClientRole = "host" | "desktop-adapter" | "companion";
+
+export type AppType = "musescore" | "songsterr" | "mock";
+
+export type TransportAction = "play" | "stop";
+
+export type TransportStatus = "stopped" | "scheduled" | "running";
+
+export type SongSourceType = "songsterr" | "musescore" | "other";
+
+export type ControlMode = "host-only" | "leader-stop" | "everyone-can-stop";
+
+export type AdapterState =
+  | "ready"
+  | "not-ready"
+  | "command-pending"
+  | "last-command-succeeded"
+  | "last-command-failed";
+
+export type AdapterCommandStatus = "pending" | "succeeded" | "failed";
+
+export type AdapterPlaybackState = "playing" | "stopped" | "unknown";
+
+export interface AdapterCapability {
+  app: AppType;
+  canPlay: boolean;
+  canStop: boolean;
+}
+
+export interface ClientHello {
+  type: "clientHello";
+  deviceName: string;
+  role: ClientRole;
+  capabilities: AdapterCapability[];
+}
+
+export interface ServerHello {
+  type: "serverHello";
+  clientId: string;
+  roomCode: string;
+  serverTime: number;
+  defaultScheduleDelayMs: number;
+}
+
+export interface ClockSyncRequest {
+  type: "clockSync";
+  clientSentAt: number;
+}
+
+export interface ClockSyncResult {
+  type: "clockSyncResult";
+  clientSentAt: number;
+  serverReceivedAt: number;
+  serverSentAt: number;
+}
+
+export interface ClockStatus {
+  type: "clockStatus";
+  rttMs: number;
+  offsetMs: number;
+  jitterMs?: number;
+}
+
+export interface CalibrationUpdate {
+  type: "calibrationUpdate";
+  targetClientId: string;
+  manualOffsetMs: number;
+}
+
+export interface AdapterStatus {
+  type: "adapterStatus";
+  ready: boolean;
+  app: AppType;
+  state?: AdapterState;
+  playback?: AdapterPlaybackState;
+  playbackDetail?: string;
+  title?: string;
+  detail?: string;
+  lastCommand?: {
+    action: TransportAction;
+    sequenceId?: number;
+    status: AdapterCommandStatus;
+    at: number;
+    detail?: string;
+    controlPath?: string;
+  };
+}
+
+export interface TransportRequest {
+  type: "transportRequest";
+  action: TransportAction;
+  requestedAt: number;
+}
+
+export interface TransportCommand {
+  type: "transportCommand";
+  action: TransportAction;
+  leaderId: string;
+  sequenceId: number;
+  scheduledServerTime: number;
+  manualOffsetMs?: number;
+  currentSong?: CurrentSongState;
+}
+
+export interface SetlistSong {
+  id: string;
+  title: string;
+  sourceType: SongSourceType;
+  source?: string;
+  notes?: string;
+}
+
+export interface CurrentSongState {
+  song?: SetlistSong;
+  index?: number;
+  total?: number;
+  leaderId?: string;
+  updatedAt: number;
+}
+
+export interface CurrentSongUpdate {
+  type: "currentSongUpdate";
+  song?: SetlistSong;
+  index?: number;
+  total?: number;
+  updatedAt: number;
+}
+
+export interface SetlistState {
+  songs: SetlistSong[];
+  updatedAt: number;
+  leaderId?: string;
+}
+
+export interface SetlistUpdate {
+  type: "setlistUpdate";
+  songs: SetlistSong[];
+  updatedAt: number;
+}
+
+export interface SafetyState {
+  armed: boolean;
+  controlMode: ControlMode;
+  updatedAt: number;
+  leaderId?: string;
+}
+
+export interface SafetyUpdate {
+  type: "safetyUpdate";
+  armed?: boolean;
+  controlMode?: ControlMode;
+  updatedAt: number;
+}
+
+export interface RoomClientSummary {
+  id: string;
+  deviceName: string;
+  role: ClientRole;
+  connectedAt: number;
+  lastSeenAt: number;
+  capabilities: AdapterCapability[];
+  status?: Omit<AdapterStatus, "type">;
+  clock?: {
+    rttMs: number;
+    offsetMs: number;
+    jitterMs?: number;
+    manualOffsetMs?: number;
+  };
+}
+
+export interface TransportState {
+  status: TransportStatus;
+  leaderId?: string;
+  action?: TransportAction;
+  sequenceId: number;
+  scheduledServerTime?: number;
+  startedServerTime?: number;
+}
+
+export interface RoomState {
+  type: "roomState";
+  roomCode: string;
+  serverTime: number;
+  clients: RoomClientSummary[];
+  transport: TransportState;
+  currentSong?: CurrentSongState;
+  setlist: SetlistState;
+  safety: SafetyState;
+  companionUrl: string;
+  hostUrl: string;
+}
+
+export interface ErrorMessage {
+  type: "error";
+  message: string;
+}
+
+export type ClientMessage =
+  | ClientHello
+  | ClockSyncRequest
+  | ClockStatus
+  | CalibrationUpdate
+  | AdapterStatus
+  | CurrentSongUpdate
+  | SetlistUpdate
+  | SafetyUpdate
+  | TransportRequest;
+
+export type ServerMessage =
+  | ServerHello
+  | ClockSyncResult
+  | TransportCommand
+  | RoomState
+  | ErrorMessage;
