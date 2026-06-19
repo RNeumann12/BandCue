@@ -4,3 +4,10 @@ dist/
 coverage/
 .playsync-token
 *.log
+android/.gradle/
+android/.gradle-bootstrap/
+android/.gradle-user-home/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties

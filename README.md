@@ -126,10 +126,16 @@ The host page shows the active MuseScore window title, whether playback is infer
 
 The extension cannot use raw UDP discovery, so room-code or port lookup checks the local machine and scans common rehearsal LAN ranges. If your network uses a different subnet, enter `host:port`, for example `192.168.1.23:4173`.
 
+### Songsterr on Android
+
+BandCue also includes a native Android adapter in `android/`. Build the debug APK with `npm run build:android`, install it with `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`, enable **Notification Access** or the opt-in **Accessibility Fallback** for BandCue Songsterr, and connect with the printed room URL, `host:port`, room code, or port.
+
+The Android adapter connects as a Songsterr desktop adapter and first uses Android media sessions to request play and pause from the Songsterr app. If Songsterr does not expose an active media session, the opt-in Accessibility fallback taps the visible Songsterr transport control while Songsterr is foreground. If Songsterr is not installed or permissions are missing, the host page shows that state instead of treating the phone as controllable.
+
 ## V1 Limits
 
 - Same Wi-Fi only.
 - Songs must already be open and positioned.
 - Play/stop only.
-- Phones are companion displays, not app controllers.
+- Phones are companion displays by default; Android phones can be app controllers only through the native adapter.
 - Only the leader's device should feed audible click/backing audio to the mixer.
