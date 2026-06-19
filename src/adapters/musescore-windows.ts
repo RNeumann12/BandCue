@@ -958,6 +958,10 @@ function describeKey(key: string): string {
     return "Space";
   }
 
+  if (key === "^{HOME}") {
+    return "Ctrl+Home";
+  }
+
   return key;
 }
 
@@ -1019,7 +1023,9 @@ function parseArgs(raw: string[]): Args {
     discoveryPort: parsePositiveInt(process.env.BANDCUE_DISCOVERY_PORT, 0),
     name: `${hostname()} MuseScore`,
     playKey: " ",
-    resetKey: "{HOME}",
+    // Ctrl+Home moves the cursor to the start of the score; MuseScore then
+    // plays from that selection. Plain Home only jumps within the current row.
+    resetKey: "^{HOME}",
     stopKey: "{ESC}",
     playMode: "stop-then-play",
     processMatch: "MuseScore|mscore",

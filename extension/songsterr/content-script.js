@@ -34,7 +34,7 @@ async function controlSongsterr(action, resetBeforePlay = false) {
   const resetDetail = action === "play" && resetBeforePlay
     ? resetSongsterrPosition()
     : "";
-  const mediaControlled = await controlMediaElement(action, resetBeforePlay);
+  const mediaControlled = await controlMediaElement(action);
   if (mediaControlled) {
     lastControlDetail = joinControlDetails(resetDetail, `Used native media ${action}`);
     return {
@@ -71,7 +71,7 @@ async function controlSongsterr(action, resetBeforePlay = false) {
   };
 }
 
-async function controlMediaElement(action, resetBeforePlay = false) {
+async function controlMediaElement(action) {
   const mediaElements = [...document.querySelectorAll("audio, video")];
   if (!mediaElements.length) {
     return false;
@@ -80,9 +80,6 @@ async function controlMediaElement(action, resetBeforePlay = false) {
   if (action === "play") {
     for (const media of mediaElements) {
       try {
-        if (resetBeforePlay) {
-          media.currentTime = 0;
-        }
         await media.play();
         return true;
       } catch {
@@ -104,23 +101,21 @@ async function controlMediaElement(action, resetBeforePlay = false) {
 }
 
 function resetSongsterrPosition() {
+  // Songsterr drives its play cursor from internal state, not an HTML media
+  // timeline, so currentTime = 0 alone does not move it. Backspace is
+  // Songsterr's documented "go to the beginning" shortcut, so dispatch it
+  // regardless of any incidental media elements on the page.
   const mediaElements = [...document.querySelectorAll("audio, video")];
-  let resetMedia = false;
   for (const media of mediaElements) {
     try {
       media.currentTime = 0;
-      resetMedia = true;
     } catch {
       // Some embedded players expose media elements without a writable timeline.
     }
   }
 
-  if (resetMedia) {
-    return "Reset Songsterr media timeline to the song start";
-  }
-
-  if (dispatchKeyShortcut("Home")) {
-    return "Sent Home shortcut to reset Songsterr to the song start";
+  if (dispatchKeyShortcut("Backspace")) {
+    return "Sent Backspace to move Songsterr to the song start";
   }
 
   return "Tried to reset Songsterr to the song start";
@@ -214,7 +209,13 @@ function dispatchKeyShortcut(key) {
   document.body.focus({ preventScroll: true });
 
   const code = key === " " ? "Space" : key;
-  const keyCode = key === " " ? 32 : key === "Home" ? 36 : 0;
+  const keyCode = key === " "
+    ? 32
+    : key === "Home"
+      ? 36
+      : key === "Backspace"
+        ? 8
+        : 0;
   for (const target of [window, document, document.body]) {
     for (const type of ["keydown", "keypress", "keyup"]) {
       target.dispatchEvent(new KeyboardEvent(type, {

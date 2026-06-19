@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
+const DEFAULT_BRIDGE_PORT = "4731";
+
 const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const museScoreName =
   process.env.BANDCUE_MUSESCORE_NAME || process.env.PLAYSYNC_MUSESCORE_NAME || "MuseScore laptop";
@@ -7,6 +9,13 @@ const extraMuseScoreArgs = splitArgs(
   process.env.BANDCUE_MUSESCORE_ARGS || process.env.PLAYSYNC_MUSESCORE_ARGS || ""
 );
 const coordinatorPort = process.env.BANDCUE_PORT || process.env.PORT || "4173";
+
+// Bridge mode: run this host on the MuseScore bridge API instead of acting as a
+// Songsterr player. Enable with `npm run dev:all -- --musescore-bridge [port]`
+// or the BANDCUE_MUSESCORE_BRIDGE env var. When enabled, the MuseScore helper
+// starts with `--bridge-port`, and we remind the user to keep the Songsterr
+// extension from auto-opening tabs on this machine.
+const bridgePort = resolveBridgePort(process.argv.slice(2));
 
 let coordinator: ChildProcess | undefined;
 let museScore: ChildProcess | undefined;
@@ -35,7 +44,16 @@ process.on("SIGTERM", stopAll);
 
 function startMuseScore(): void {
   console.log("");
-  console.log("Starting MuseScore helper for this machine...");
+  if (bridgePort) {
+    console.log(`Starting MuseScore helper in bridge mode on http://127.0.0.1:${bridgePort} ...`);
+    console.log("This host will control MuseScore through the bridge API rather than Songsterr.");
+    console.log("Keep the Songsterr extension disconnected (or its auto-open toggle off) on this");
+    console.log("machine so it does not pop open Songsterr tabs while you play from MuseScore.");
+  } else {
+    console.log("Starting MuseScore helper for this machine...");
+  }
+
+  const bridgeArgs = bridgePort ? ["--bridge-port", bridgePort] : [];
   museScore = spawn(npmCommand, [
     "run",
     "dev:musescore",
@@ -44,11 +62,45 @@ function startMuseScore(): void {
     coordinatorPort,
     "--name",
     museScoreName,
+    ...bridgeArgs,
     ...extraMuseScoreArgs
   ], {
     stdio: "inherit",
     shell: false
   });
+}
+
+// Returns the bridge port to use, or "" when bridge mode is off. Accepts
+// `--musescore-bridge` (default port), `--musescore-bridge 4731`,
+// `--musescore-bridge=4731`, or the BANDCUE_MUSESCORE_BRIDGE env var (a port
+// number, or a truthy value such as "1"/"true" for the default port).
+function resolveBridgePort(argv: string[]): string {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--musescore-bridge") {
+      return normalizeBridgePort(argv[index + 1]) || DEFAULT_BRIDGE_PORT;
+    }
+    if (arg?.startsWith("--musescore-bridge=")) {
+      return normalizeBridgePort(arg.slice("--musescore-bridge=".length)) || DEFAULT_BRIDGE_PORT;
+    }
+  }
+
+  const fromEnv = process.env.BANDCUE_MUSESCORE_BRIDGE?.trim();
+  if (!fromEnv) {
+    return "";
+  }
+  if (/^(0|false|no|off)$/i.test(fromEnv)) {
+    return "";
+  }
+  return normalizeBridgePort(fromEnv) || DEFAULT_BRIDGE_PORT;
+}
+
+function normalizeBridgePort(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : "";
 }
 
 function stopAll(): void {

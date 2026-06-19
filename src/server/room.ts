@@ -356,6 +356,10 @@ export class RoomController {
       leaderId: this.transport.leaderId ?? client.id,
       sequenceId: this.transport.sequenceId,
       scheduledServerTime: this.transport.scheduledServerTime ?? now,
+      // Rehearsal sync: hitting play should start every device from the top of
+      // the song so the band stays together. Each adapter performs the reset
+      // through its platform's official seek API on a best-effort basis and
+      // must never let a failed reset block playback.
       resetBeforePlay: request.action === "play",
       currentSong: this.currentSong
     };

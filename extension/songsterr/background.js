@@ -19,6 +19,9 @@ let tabStatusPending = false;
 let lastDeliveredStatusSignature = "";
 let lastSongsterrTabIdentity = "";
 let lastContentScriptStatusAt = 0;
+// When true, this machine never auto-opens a Songsterr tab. Use it on a host
+// that plays from MuseScore so transport/open commands don't pop Songsterr.
+let suppressAutoOpen = false;
 
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
@@ -69,6 +72,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === "popupSetSuppressAutoOpen") {
+    suppressAutoOpen = Boolean(message.suppressAutoOpen);
+    chrome.storage.local.set({ suppressAutoOpen });
+    sendResponse(getPopupState());
+    return true;
+  }
+
   if (message.type === "popupState") {
     scheduleActiveTabStatusReport();
     sendResponse(getPopupState());
@@ -78,7 +88,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen"], (stored) => {
+  suppressAutoOpen = Boolean(stored.suppressAutoOpen);
   const storedInput = stored.roomInput || stored.roomUrl;
   if (storedInput) {
     roomInput = storedInput;
@@ -275,6 +286,19 @@ async function openSongsterrFromRoom(currentSong, sequenceId) {
       status: "failed",
       ready: false,
       detail: "Current song does not have a usable Songsterr URL",
+      controlPath: "browser-tab",
+      at: Date.now()
+    });
+    return;
+  }
+
+  if (suppressAutoOpen) {
+    reportCommandStatus({
+      action: "open-song",
+      sequenceId,
+      status: "failed",
+      ready: lastStatus.ready,
+      detail: "Auto-open is off on this machine (MuseScore host); not opening Songsterr",
       controlPath: "browser-tab",
       at: Date.now()
     });
@@ -487,6 +511,10 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
     const existing = await findSongsterrTabsForUrl(url);
     if (existing.length) {
       return options.active ? [await activateSongsterrTab(existing[0]), ...existing.slice(1)] : existing;
+    }
+
+    if (suppressAutoOpen) {
+      return [];
     }
 
     const tab = await chrome.tabs.create({ url, active: Boolean(options.active) });
@@ -857,6 +885,7 @@ function getPopupState() {
     connectionDetail,
     roomInput,
     roomUrl,
+    suppressAutoOpen,
     status: lastStatus
   };
 }

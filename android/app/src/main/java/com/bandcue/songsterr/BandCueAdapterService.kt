@@ -306,10 +306,20 @@ class BandCueAdapterService : Service() {
     private fun executeTransport(command: TransportCommand) {
         val now = System.currentTimeMillis()
         val controller = if (isNotificationListenerEnabled()) findSongsterrController() else null
-        if (controller != null) {
+
+        // Songsterr's media session does not advertise ACTION_SEEK_TO, so a play
+        // command that must restart from the top cannot reset through the
+        // session. When that is the case and the accessibility fallback is
+        // available, route through it so it can tap Songsterr's reset-to-start
+        // button before playing. Plain play/stop still prefer the media session.
+        val wantsReset = command.action == "play" && command.resetBeforePlay
+        val canSeek = controller != null && controllerSupportsSeek(controller)
+        val resetNeedsAccessibility = wantsReset && !canSeek && BandCueAccessibilityService.isEnabled()
+
+        if (controller != null && !resetNeedsAccessibility) {
             try {
                 if (command.action == "play") {
-                    if (command.resetBeforePlay) {
+                    if (wantsReset && canSeek) {
                         controller.transportControls.seekTo(0)
                     }
                     controller.transportControls.play()
@@ -322,8 +332,10 @@ class BandCueAdapterService : Service() {
                     status = "succeeded",
                     at = now,
                     detail = if (command.action == "play") {
-                        if (command.resetBeforePlay) {
+                        if (wantsReset && canSeek) {
                             "Requested Songsterr seek to start and playback through Android media session."
+                        } else if (wantsReset) {
+                            "Played through Android media session; the session offers no seek, so position was not reset."
                         } else {
                             "Requested Songsterr playback through Android media session."
                         }
@@ -441,6 +453,11 @@ class BandCueAdapterService : Service() {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun controllerSupportsSeek(controller: MediaController): Boolean {
+        val actions = controller.playbackState?.actions ?: 0L
+        return actions and PlaybackState.ACTION_SEEK_TO != 0L
     }
 
     private fun playbackFromController(controller: MediaController?): String {

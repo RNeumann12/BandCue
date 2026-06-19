@@ -2,12 +2,14 @@ const roomUrl = document.querySelector("#roomUrl");
 const connect = document.querySelector("#connect");
 const play = document.querySelector("#play");
 const stop = document.querySelector("#stop");
+const suppressAutoOpen = document.querySelector("#suppressAutoOpen");
 const status = document.querySelector("#status");
 
 chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
   if (state?.roomInput || state?.roomUrl) {
     roomUrl.value = state.roomInput || state.roomUrl;
   }
+  suppressAutoOpen.checked = Boolean(state?.suppressAutoOpen);
   renderState(state);
 });
 
@@ -15,6 +17,13 @@ setInterval(refreshState, 1000);
 
 connect.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupConnect", roomUrl: roomUrl.value }, renderState);
+});
+
+suppressAutoOpen.addEventListener("change", () => {
+  chrome.runtime.sendMessage(
+    { type: "popupSetSuppressAutoOpen", suppressAutoOpen: suppressAutoOpen.checked },
+    renderState
+  );
 });
 
 play.addEventListener("click", () => {

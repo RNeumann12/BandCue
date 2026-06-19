@@ -25,6 +25,14 @@ On a single Windows machine that runs both the coordinator and MuseScore helper,
 npm run dev:all
 ```
 
+To run that host on MuseScore (bridge mode) while the rest of the band stays on Songsterr, use:
+
+```powershell
+npm run dev:all:bridge
+```
+
+See [Running the host on MuseScore bridge mode](#running-the-host-on-musescore-bridge-mode) for details.
+
 To package the Chrome/Edge extension as a zip:
 
 ```powershell
@@ -88,6 +96,18 @@ For a more reliable plugin or local helper path, the MuseScore adapter can expos
 ```powershell
 npm run dev:musescore -- --name "MuseScore laptop" --bridge-port 4731
 ```
+
+#### Running the host on MuseScore bridge mode
+
+When you want this host to play from MuseScore while the rest of the band uses Songsterr, start the one-command rehearsal in bridge mode:
+
+```powershell
+npm run dev:all:bridge
+```
+
+This is shorthand for `npm run dev:all -- --musescore-bridge`. It launches the coordinator and starts the MuseScore helper with `--bridge-port 4731` instead of plain keyboard control. Pass a custom port with `--musescore-bridge 5050`, or set `BANDCUE_MUSESCORE_BRIDGE=4731` (or `=1` for the default port) in the environment.
+
+In bridge mode, also tick **Don't auto-open Songsterr tabs (MuseScore host)** in the BandCue extension popup (or just disconnect the extension) so this machine does not pop open Songsterr tabs when transport or open-song commands arrive.
 
 The bridge accepts `POST http://127.0.0.1:4731/status` with JSON such as:
 

@@ -49,6 +49,21 @@ button {
   gap: 8px;
 }
 
+label.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+label.checkbox input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
 p {
   margin: 0;
   color: #776f61;
