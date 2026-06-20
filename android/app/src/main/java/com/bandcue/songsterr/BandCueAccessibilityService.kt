@@ -18,6 +18,7 @@ data class AccessibilityControlResult(
 
 class BandCueAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var cachedResetControl: CachedResetControl? = null
 
     override fun onServiceConnected() {
         activeService = this
@@ -70,19 +71,51 @@ class BandCueAccessibilityService : AccessibilityService() {
         // sequenced to fire only after the reset gesture finishes; otherwise
         // Android drops the second concurrent gesture.
         if (action == "play" && resetBeforePlay) {
-            val resetTarget = findResetCandidate(root, candidate.bounds)
-            if (resetTarget != null) {
-                val dispatched = tapResetThenPlay(resetTarget.bounds, candidate, clickTarget)
-                return if (dispatched) {
-                    AccessibilityControlResult(
-                        ok = true,
-                        detail = "Tapped Songsterr reset-to-start, then played from the song start."
-                    )
-                } else {
-                    AccessibilityControlResult(
-                        ok = false,
-                        detail = "Could not dispatch the Songsterr reset-to-start tap."
-                    )
+            when (val resetTarget = findResetCandidate(root, candidate.bounds)) {
+                is ResetCandidate.Found -> {
+                    val dispatched = tapResetThenPlay(
+                        resetTarget.candidate.bounds,
+                        candidate,
+                        clickTarget
+                    ) {
+                        cachedResetControl = CachedResetControl(
+                            signature = resetTarget.signature,
+                            bounds = resetTarget.candidate.bounds.toUiRect()
+                        )
+                    }
+                    return if (dispatched) {
+                        AccessibilityControlResult(
+                            ok = true,
+                            detail = "Tapped Songsterr reset-to-start, then played from the song start. ${resetTarget.detail}"
+                        )
+                    } else {
+                        AccessibilityControlResult(
+                            ok = false,
+                            detail = "Songsterr reset tap was rejected before play could start."
+                        )
+                    }
+                }
+                is ResetCandidate.Missing -> {
+                    val clicked = tapPlayNow(candidate, clickTarget)
+                    return if (clicked) {
+                        AccessibilityControlResult(
+                            ok = true,
+                            detail = "${resetTarget.detail} Played from the current position."
+                        )
+                    } else {
+                        AccessibilityControlResult(false, "Songsterr rejected the accessibility play click after reset was unavailable.")
+                    }
+                }
+                is ResetCandidate.SkippedLowConfidence -> {
+                    val clicked = tapPlayNow(candidate, clickTarget)
+                    return if (clicked) {
+                        AccessibilityControlResult(
+                            ok = true,
+                            detail = "${resetTarget.detail} Playback may have started from the current position."
+                        )
+                    } else {
+                        AccessibilityControlResult(false, "Songsterr rejected the accessibility play click after reset was skipped.")
+                    }
                 }
             }
         }
@@ -112,7 +145,8 @@ class BandCueAccessibilityService : AccessibilityService() {
     private fun tapResetThenPlay(
         resetBounds: Rect,
         playCandidate: TransportCandidate,
-        playClickTarget: AccessibilityNodeInfo
+        playClickTarget: AccessibilityNodeInfo,
+        onResetCompleted: () -> Unit
     ): Boolean {
         val path = Path().apply {
             moveTo(resetBounds.centerX().toFloat(), resetBounds.centerY().toFloat())
@@ -122,6 +156,7 @@ class BandCueAccessibilityService : AccessibilityService() {
             .build()
         val callback = object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
+                onResetCompleted()
                 mainHandler.postDelayed({ tapPlay(playCandidate, playClickTarget) }, PLAY_AFTER_RESET_DELAY_MS)
             }
 
@@ -132,6 +167,15 @@ class BandCueAccessibilityService : AccessibilityService() {
         return dispatchGesture(gesture, callback, null)
     }
 
+    private fun tapPlayNow(candidate: TransportCandidate, clickTarget: AccessibilityNodeInfo): Boolean {
+        return if (candidate.tapOnly) {
+            tapCenterOf(candidate.bounds)
+        } else {
+            clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK) ||
+                tapCenterOf(candidate.bounds)
+        }
+    }
+
     private fun tapPlay(candidate: TransportCandidate, clickTarget: AccessibilityNodeInfo) {
         if (candidate.tapOnly) {
             tapCenterOf(candidate.bounds)
@@ -140,19 +184,37 @@ class BandCueAccessibilityService : AccessibilityService() {
         }
     }
 
-    // The reset-to-start button is the rightmost control in the toolbar row that
-    // sits directly above the play button. Songsterr labels none of these nodes,
-    // so it is located purely by geometry relative to the known play control.
-    private fun findResetCandidate(root: AccessibilityNodeInfo, playBounds: Rect): TransportCandidate? {
+    private fun findResetCandidate(root: AccessibilityNodeInfo, playBounds: Rect): ResetCandidate {
         val controls = mutableListOf<TransportCandidate>()
         collectToolbarCandidates(root, controls)
+        val screenWidth = resources.displayMetrics.widthPixels
         val screenHeight = resources.displayMetrics.heightPixels
-        return controls
-            .filter {
-                it.bounds.centerY() < playBounds.centerY() - RESET_ROW_MIN_GAP_PX &&
-                    it.bounds.centerY() > screenHeight * 0.55
+        val signature = resetLayoutSignature(screenWidth, screenHeight, playBounds.toUiRect())
+        return when (
+            val selection = selectResetControl(
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                playBounds = playBounds.toUiRect(),
+                controls = controls.map {
+                    ResetControlCandidate(
+                        bounds = it.bounds.toUiRect(),
+                        label = it.subtreeLabel.ifBlank { it.label }
+                    )
+                },
+                cached = cachedResetControl
+            )
+        ) {
+            is ResetControlSelection.Found -> {
+                val candidate = controls.firstOrNull { it.bounds.toUiRect() == selection.bounds }
+                if (candidate == null) {
+                    ResetCandidate.SkippedLowConfidence("Reset-to-start was skipped: selected control disappeared before tap.")
+                } else {
+                    ResetCandidate.Found(candidate, signature, selection.detail)
+                }
             }
-            .maxByOrNull { it.bounds.centerX() }
+            is ResetControlSelection.Missing -> ResetCandidate.Missing(selection.detail)
+            is ResetControlSelection.SkippedLowConfidence -> ResetCandidate.SkippedLowConfidence(selection.detail)
+        }
     }
 
     private fun findBestTransportCandidate(
@@ -285,11 +347,11 @@ class BandCueAccessibilityService : AccessibilityService() {
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
             val screenHeight = resources.displayMetrics.heightPixels
-            val likelyToolbarSized =
-                bounds.centerY() > screenHeight * 0.60 &&
-                    bounds.bottom < screenHeight - 20 &&
-                    bounds.width() in 80..240 &&
-                    bounds.height() in 50..190
+            val likelyToolbarSized = isPlausibleSongsterrToolbarControl(
+                bounds.toUiRect(),
+                resources.displayMetrics.widthPixels,
+                screenHeight
+            )
 
             if (likelyToolbarSized) {
                 val label = nodeLabel(node)
@@ -446,12 +508,21 @@ class BandCueAccessibilityService : AccessibilityService() {
         val subtreeLabel: String = ""
     )
 
+    private sealed class ResetCandidate {
+        data class Found(
+            val candidate: TransportCandidate,
+            val signature: ResetLayoutSignature,
+            val detail: String
+        ) : ResetCandidate()
+
+        data class Missing(val detail: String) : ResetCandidate()
+
+        data class SkippedLowConfidence(val detail: String) : ResetCandidate()
+    }
+
     companion object {
         private const val SONGSTERR_PACKAGE = "com.songsterr"
         private const val TOOLBAR_ROW_BUCKET_PX = 180
-        // The reset-to-start row must sit at least this far above the play button
-        // to avoid mistaking another play-row control for the reset button.
-        private const val RESET_ROW_MIN_GAP_PX = 120
         // Let the reset tap land and Songsterr settle before the play tap fires.
         private const val PLAY_AFTER_RESET_DELAY_MS = 220L
         private val IGNORED_CONTROL_WORDS = listOf(
@@ -491,3 +562,5 @@ class BandCueAccessibilityService : AccessibilityService() {
         }
     }
 }
+
+private fun Rect.toUiRect(): UiRect = UiRect(left, top, right, bottom)

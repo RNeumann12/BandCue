@@ -122,7 +122,7 @@ Discovery is split across platform-specific implementations with different netwo
 
 ## 3. Android Songsterr Reset-To-Start
 
-Status: `Open`
+Status: `In Progress`
 
 ### Problem
 
@@ -133,6 +133,7 @@ The Android Songsterr `scroll back to start` / reset-to-start action does not al
 - Accessibility fallback finds the play control, then locates reset-to-start mostly by geometry relative to the play button and screen height.
 - Current reset detection assumes a toolbar row above the play button and filters controls using fixed lower-screen thresholds.
 - Larger windows, tablets, split-screen mode, or orientation changes can move the toolbar enough that these assumptions break.
+- 2026-06-20 implementation update: Android reset detection now uses a tested layout-aware scorer that groups visible toolbar controls above play, considers speed/sound-mode anchors, reports missing versus low-confidence reset separately, and caches recently successful reset geometry for the same layout signature.
 
 ### Suspected Cause
 
@@ -157,6 +158,7 @@ The reset button is unlabeled in Songsterr's accessibility tree, so the implemen
 
 - Add Android JVM tests for reset candidate scoring with multiple synthetic geometries.
 - Include layouts where the toolbar is lower, wider, shifted horizontally, or split into a different row grouping.
+- 2026-06-20 automated checks: Android JVM tests cover phone portrait reset selection, larger-window toolbar placement, cached geometry for sparse shifted layouts, missing reset controls, and low-confidence skip reporting.
 - Manual repro: open Songsterr Android in normal phone layout and in a larger/freeform or split-screen window; issue BandCue Play with reset-before-play enabled.
 
 ### Open Questions
