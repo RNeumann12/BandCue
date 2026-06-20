@@ -1,7 +1,8 @@
 let lastControlDetail = "Songsterr content script ready";
+let statusTimer;
 
 function reportStatus() {
-  chrome.runtime.sendMessage({
+  sendRuntimeMessage({
     type: "songsterrStatus",
     ready: true,
     title: document.title,
@@ -28,7 +29,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 reportStatus();
-setInterval(reportStatus, 5000);
+statusTimer = setInterval(reportStatus, 5000);
+
+function sendRuntimeMessage(message) {
+  try {
+    const response = chrome.runtime.sendMessage(message);
+    if (response?.catch) {
+      response.catch((error) => {
+        handleRuntimeMessageError(error);
+      });
+    }
+  } catch (error) {
+    handleRuntimeMessageError(error);
+  }
+}
+
+function handleRuntimeMessageError(error) {
+  const message = error?.message || "";
+  if (/extension context invalidated/i.test(message) && statusTimer) {
+    clearInterval(statusTimer);
+    statusTimer = undefined;
+  }
+}
 
 async function controlSongsterr(action, resetBeforePlay = false) {
   const resetDetail = action === "play" && resetBeforePlay
