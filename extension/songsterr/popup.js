@@ -1,9 +1,14 @@
 const roomUrl = document.querySelector("#roomUrl");
 const connect = document.querySelector("#connect");
+const disconnect = document.querySelector("#disconnect");
 const play = document.querySelector("#play");
 const stop = document.querySelector("#stop");
 const suppressAutoOpen = document.querySelector("#suppressAutoOpen");
 const status = document.querySelector("#status");
+const connectionState = document.querySelector("#connectionState");
+const connectionDot = document.querySelector("#connectionDot");
+const adapterState = document.querySelector("#adapterState");
+const commandState = document.querySelector("#commandState");
 
 chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
   if (state?.roomInput || state?.roomUrl) {
@@ -17,6 +22,10 @@ setInterval(refreshState, 1000);
 
 connect.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupConnect", roomUrl: roomUrl.value }, renderState);
+});
+
+disconnect.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "popupDisconnect" }, renderState);
 });
 
 suppressAutoOpen.addEventListener("change", () => {
@@ -35,13 +44,29 @@ stop.addEventListener("click", () => {
 });
 
 function renderState(state) {
-  const connected = state?.connected ? "connected" : state?.connectionState || "not connected";
+  const connected = state?.connected;
+  const stateLabel = connected ? "connected" : state?.connectionState || "not connected";
   const adapter = state?.status?.ready ? "Songsterr ready" : "Songsterr not found";
   const detail = state?.status?.detail || state?.connectionDetail || "";
   const command = state?.status?.lastCommand
-    ? ` Last command: ${state.status.lastCommand.action} ${state.status.lastCommand.status}.`
+    ? `Last command: ${state.status.lastCommand.action} ${state.status.lastCommand.status}.`
     : "";
-  status.textContent = `${connected}; ${adapter}. ${detail}${command}`;
+  const disconnectedByUser = state?.connectionState === "disconnected-by-user";
+
+  connectionState.textContent = formatConnectionState(stateLabel);
+  connectionDot.dataset.state = connected ? "connected" : disconnectedByUser ? "off" : stateLabel;
+  adapterState.textContent = adapter;
+  status.textContent = detail || "No connection detail yet.";
+  commandState.textContent = command;
+  disconnect.disabled = disconnectedByUser || (!connected && !state?.autoConnectEnabled);
+  play.disabled = !connected;
+  stop.disabled = !connected;
+}
+
+function formatConnectionState(value) {
+  return String(value)
+    .replaceAll("-", " ")
+    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function refreshState() {

@@ -7,13 +7,26 @@
   </head>
   <body>
     <main>
-      <h1>BandCue</h1>
+      <header>
+        <span class="eyebrow">Songsterr adapter</span>
+        <h1>BandCue</h1>
+      </header>
+      <section class="status-card" aria-live="polite">
+        <div>
+          <span class="label">Connection</span>
+          <strong id="connectionState">Not connected</strong>
+        </div>
+        <span id="connectionDot" class="dot"></span>
+      </section>
       <label>
         Room, port, or URL
         <input id="roomUrl" type="text" placeholder="4173 or ABC123" />
       </label>
-      <button id="connect" type="button">Connect</button>
-      <div class="row">
+      <div class="connection-actions">
+        <button id="connect" type="button">Connect</button>
+        <button id="disconnect" type="button">Disconnect</button>
+      </div>
+      <div class="row transport-row">
         <button id="play" type="button">Play</button>
         <button id="stop" type="button">Stop</button>
       </div>
@@ -21,7 +34,11 @@
         <input id="suppressAutoOpen" type="checkbox" />
         Don't auto-open Songsterr tabs (MuseScore host)
       </label>
-      <p id="status">Not connected</p>
+      <div class="readout">
+        <span id="adapterState">Songsterr not found</span>
+        <span id="status">Enter a room and press Connect.</span>
+        <span id="commandState"></span>
+      </div>
     </main>
     <script src="popup.js"></script>
   </body>

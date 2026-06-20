@@ -6,7 +6,15 @@ import {
   type ServerResponse
 } from "node:http";
 import { hostname } from "node:os";
+import { resolve } from "node:path";
 import WebSocket from "ws";
+import {
+  matchMuseScoreSong,
+  matchedCatalogEntry,
+  publicCatalogEntries,
+  scanMuseScoreCatalog,
+  type LocalScoreCatalog
+} from "./musescore-catalog.js";
 import {
   calculateClockSample,
   calculateJitterMs,
@@ -58,6 +66,8 @@ interface Args {
   commandGapMs: number;
   bridgePort?: number;
   bridgeFallbackMs: number;
+  scoreFolders: string[];
+  scoreCatalogRecursive: boolean;
 }
 
 interface MuseScoreStatus {
@@ -70,10 +80,10 @@ interface MuseScoreStatus {
 }
 
 interface BridgeCommand {
-  action: TransportAction;
+  action: TransportAction | "open-song";
   sequenceId: number;
   dueLocalAt: number;
-  scheduledServerTime: number;
+  scheduledServerTime?: number;
   resetBeforePlay?: boolean;
   currentSong?: SetlistSong;
   status: "queued" | "claimed" | "succeeded" | "failed" | "expired";
@@ -104,15 +114,19 @@ let lastMuseScoreStatus: MuseScoreStatus | undefined;
 let currentSong: SetlistSong | undefined;
 let bridgeStatus: Partial<MuseScoreStatus> & { playback?: AdapterPlaybackState } = {};
 let bridgeLastSeenAt: number | undefined;
+let scoreCatalog: LocalScoreCatalog = scanMuseScoreCatalog([]);
+let lastPublishedCatalogAt: number | undefined;
 const bridgeCommands = new Map<number, BridgeCommand>();
 let clockTimer: NodeJS.Timeout | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
+let catalogTimer: NodeJS.Timeout | undefined;
 let bridgeServer: HttpServer | undefined;
 const samples: ClockSample[] = [];
 
 if (args.bridgePort !== undefined) {
   startBridge(args.bridgePort);
 }
+refreshScoreCatalog();
 void connect();
 
 async function connect(): Promise<void> {
@@ -200,12 +214,19 @@ async function connect(): Promise<void> {
       }, delayMs);
     }
 
+    if (message.type === "openSongCommand") {
+      currentSong = message.currentSong?.song;
+      void handleOpenSongCommand(message.sequenceId);
+      return;
+    }
+
     if (message.type === "error") {
       console.warn(`Coordinator rejected request: ${message.message}`);
     }
 
     if (message.type === "roomState") {
       currentSong = message.currentSong?.song;
+      void reportMuseScoreStatus();
       return;
     }
   });
@@ -385,12 +406,27 @@ function pollMuseScore(): void {
   pollTimer = setInterval(() => {
     void reportMuseScoreStatus();
   }, 2000);
+
+  if (!catalogTimer) {
+    catalogTimer = setInterval(() => {
+      refreshScoreCatalog();
+      void reportMuseScoreStatus();
+    }, 30_000);
+  }
 }
 
 async function reportMuseScoreStatus(): Promise<void> {
     const status = await getMuseScoreStatus();
     lastMuseScoreStatus = status;
+    const match = matchMuseScoreSong(currentSong, scoreCatalog.entries);
     const mismatch = scoreMismatchDetail(status);
+    // The full catalog can be large, so only attach it when it has actually been
+    // (re)scanned since the last publish. The coordinator keeps the previous
+    // catalog on status updates that omit it, while songMatch stays fresh every tick.
+    const includeCatalog = scoreCatalog.scannedAt !== lastPublishedCatalogAt;
+    if (includeCatalog) {
+      lastPublishedCatalogAt = scoreCatalog.scannedAt;
+    }
     send({
       type: "adapterStatus",
       app: "musescore",
@@ -398,7 +434,21 @@ async function reportMuseScoreStatus(): Promise<void> {
       title: status.title,
       playback: status.ready ? inferredPlayback : "unknown",
       playbackDetail: playbackDetail(),
-      detail: mismatch ?? status.detail
+      ...(includeCatalog
+        ? {
+          catalog: {
+            entries: publicCatalogEntries(scoreCatalog.entries),
+            total: scoreCatalog.entries.length,
+            rootCount: scoreCatalog.rootCount,
+            scannedAt: scoreCatalog.scannedAt,
+            detail: scoreCatalog.detail
+          }
+        }
+        : {}),
+      songMatch: match,
+      detail: match.status === "missing" || match.status === "ambiguous"
+        ? match.detail
+        : mismatch ?? status.detail
     });
 }
 
@@ -411,6 +461,11 @@ function stopIntervals(): void {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = undefined;
+  }
+
+  if (catalogTimer) {
+    clearInterval(catalogTimer);
+    catalogTimer = undefined;
   }
 }
 
@@ -497,6 +552,7 @@ public static class BandCueWin32 {
   [DllImport("user32.dll")]
   public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 }
+
 "@
 $processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
 $titleMatch = '${escapePowerShellSingleQuoted(args.titleMatch ?? "")}'
@@ -576,6 +632,82 @@ foreach ($key in $keys) {
   }
 }
 
+async function handleOpenSongCommand(sequenceId: number): Promise<void> {
+  reportCommandStatus({
+    ready: true,
+    action: "open-song",
+    sequenceId,
+    status: "pending",
+    detail: "MuseScore open-song command received",
+    controlPath: bridgeServer ? "musescore-bridge" : "local-score-catalog",
+    at: Date.now()
+  });
+
+  const queued = queueBridgeCommand({
+    action: "open-song",
+    sequenceId,
+    dueLocalAt: Date.now(),
+    currentSong,
+    status: "queued",
+    createdAt: Date.now()
+  });
+  const bridgeResult = queued && bridgeLastSeenAt
+    ? await waitForBridgeResult(sequenceId, args.bridgeFallbackMs)
+    : undefined;
+
+  if (bridgeResult?.status === "succeeded") {
+    bridgeStatus = {
+      ...bridgeStatus,
+      ready: true,
+      title: bridgeResult.title ?? currentSong?.title ?? bridgeStatus.title,
+      windowTitle: bridgeResult.windowTitle ?? bridgeResult.title ?? bridgeStatus.windowTitle,
+      detail: bridgeResult.detail ?? "MuseScore bridge opened the score"
+    };
+    reportCommandStatus({
+      ready: true,
+      action: "open-song",
+      sequenceId,
+      status: "succeeded",
+      detail: bridgeResult.detail ?? "MuseScore bridge opened the score",
+      controlPath: bridgeResult.controlPath ?? "musescore-bridge",
+      at: bridgeResult.completedAt ?? Date.now()
+    });
+    return;
+  }
+
+  if (bridgeResult?.status === "failed") {
+    console.warn(`MuseScore bridge open-song failed: ${bridgeResult.detail ?? "No detail reported"}`);
+  }
+
+  const match = matchMuseScoreSong(currentSong, scoreCatalog.entries);
+  const entry = matchedCatalogEntry(match, scoreCatalog.entries);
+  if (!entry) {
+    reportCommandStatus({
+      ready: false,
+      action: "open-song",
+      sequenceId,
+      status: "failed",
+      detail: match.detail ?? "No matching local MuseScore score was found.",
+      controlPath: "local-score-catalog",
+      at: Date.now()
+    });
+    return;
+  }
+
+  const opened = await openLocalScore(entry.absolutePath);
+  reportCommandStatus({
+    ready: opened,
+    action: "open-song",
+    sequenceId,
+    status: opened ? "succeeded" : "failed",
+    detail: opened
+      ? `Opened MuseScore score ${entry.relativePath}`
+      : `Windows could not open MuseScore score ${entry.relativePath}`,
+    controlPath: "local-score-catalog",
+    at: Date.now()
+  });
+}
+
 function applyBridgeCommandResult(
   action: TransportAction,
   sequenceId: number,
@@ -621,7 +753,7 @@ function applyBridgeCommandResult(
 
 function reportCommandStatus(command: {
   ready: boolean;
-  action: TransportAction;
+  action: TransportAction | "open-song";
   sequenceId: number;
   status: "pending" | "succeeded" | "failed";
   detail: string;
@@ -776,6 +908,19 @@ function startBridge(port: number): void {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/catalog") {
+      bridgeLastSeenAt = Date.now();
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        entries: publicCatalogEntries(scoreCatalog.entries),
+        total: scoreCatalog.entries.length,
+        rootCount: scoreCatalog.rootCount,
+        scannedAt: scoreCatalog.scannedAt,
+        detail: scoreCatalog.detail
+      }));
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/commands") {
       bridgeLastSeenAt = Date.now();
       cleanupBridgeCommands();
@@ -837,9 +982,9 @@ function startBridge(port: number): void {
   });
 }
 
-function queueBridgeCommand(command: BridgeCommand): void {
+function queueBridgeCommand(command: BridgeCommand): boolean {
   if (!bridgeServer) {
-    return;
+    return false;
   }
 
   cleanupBridgeCommands();
@@ -849,10 +994,13 @@ function queueBridgeCommand(command: BridgeCommand): void {
     action: command.action,
     sequenceId: command.sequenceId,
     status: "pending",
-    detail: `MuseScore bridge command queued; Windows fallback in ${args.bridgeFallbackMs} ms if no bridge result arrives`,
+    detail: command.action === "open-song"
+      ? `MuseScore bridge open-song queued; local catalog fallback in ${args.bridgeFallbackMs} ms if no bridge result arrives`
+      : `MuseScore bridge command queued; Windows fallback in ${args.bridgeFallbackMs} ms if no bridge result arrives`,
     controlPath: "musescore-bridge",
     at: Date.now()
   });
+  return true;
 }
 
 function handleBridgeClaim(
@@ -924,6 +1072,22 @@ function handleBridgeResult(
   }
 
   writeJson(res, 200, { ok: true, command });
+}
+
+async function openLocalScore(absolutePath: string): Promise<boolean> {
+  const script = `
+$path = '${escapePowerShellSingleQuoted(resolve(absolutePath))}'
+if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { exit 2 }
+Invoke-Item -LiteralPath $path
+`;
+  const result = await runPowerShell(script);
+  return result.code === 0;
+}
+
+function refreshScoreCatalog(): void {
+  scoreCatalog = scanMuseScoreCatalog(args.scoreFolders, {
+    recursive: args.scoreCatalogRecursive
+  });
 }
 
 async function waitForBridgeResult(
@@ -1096,7 +1260,9 @@ function parseArgs(raw: string[]): Args {
     activationRetries: 5,
     activationDelayMs: 90,
     commandGapMs: 120,
-    bridgeFallbackMs: 900
+    bridgeFallbackMs: 900,
+    scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
+    scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0"
   };
 
   for (let index = 0; index < raw.length; index += 1) {
@@ -1128,6 +1294,13 @@ function parseArgs(raw: string[]): Args {
     if (value === "--bridge-fallback-ms") {
       parsed.bridgeFallbackMs = parsePositiveInt(raw[index + 1], parsed.bridgeFallbackMs);
     }
+    if (value === "--score-folder") {
+      const folder = raw[index + 1];
+      if (folder) parsed.scoreFolders.push(folder);
+    }
+    if (value === "--score-recursive") {
+      parsed.scoreCatalogRecursive = parseBooleanFlag(raw[index + 1], parsed.scoreCatalogRecursive);
+    }
   }
 
   if (!parsed.discoveryPort) {
@@ -1135,6 +1308,25 @@ function parseArgs(raw: string[]): Args {
   }
 
   return parsed;
+}
+
+function parseScoreFolders(value: string | undefined): string[] {
+  return String(value ?? "")
+    .split(";")
+    .map((folder) => folder.trim())
+    .filter(Boolean);
+}
+
+function parseBooleanFlag(value: string | undefined, fallback: boolean): boolean {
+  if (value === "0" || value === "false" || value === "no") {
+    return false;
+  }
+
+  if (value === "1" || value === "true" || value === "yes") {
+    return true;
+  }
+
+  return fallback;
 }
 
 function parsePlayMode(value: string | undefined, fallback: Args["playMode"]): Args["playMode"] {

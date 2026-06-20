@@ -31,6 +31,30 @@ export interface AdapterCapability {
   canStop: boolean;
 }
 
+export type CatalogMatchStatus = "matched" | "ambiguous" | "missing" | "not-applicable";
+
+export interface SongCatalogEntry {
+  title: string;
+  relativePath: string;
+  sourceId?: string;
+}
+
+export interface SongCatalogStatus {
+  entries?: SongCatalogEntry[];
+  total: number;
+  rootCount?: number;
+  scannedAt?: number;
+  detail?: string;
+}
+
+export interface SongCatalogMatch {
+  status: CatalogMatchStatus;
+  count?: number;
+  title?: string;
+  relativePath?: string;
+  detail?: string;
+}
+
 export interface ClientHello {
   type: "clientHello";
   deviceName: string;
@@ -82,6 +106,8 @@ export interface AdapterStatus {
   source?: string;
   durationMs?: number;
   durationSource?: SongDurationSource;
+  catalog?: SongCatalogStatus;
+  songMatch?: SongCatalogMatch;
   detail?: string;
   lastCommand?: {
     action: AdapterCommandAction;

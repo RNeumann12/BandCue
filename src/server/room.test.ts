@@ -368,6 +368,90 @@ describe("RoomController", () => {
     });
   });
 
+  it("broadcasts a host request to open the current MuseScore song", () => {
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "MuseScore",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1200,
+      song: {
+        id: "song-1",
+        title: "Bad Moon Rising",
+        sourceType: "musescore",
+        source: "CCR/Bad Moon Rising"
+      }
+    }, 1200);
+    adapterMessages.length = 0;
+
+    room.handleMessage(host.id, {
+      type: "openSongRequest",
+      requestedAt: 1300
+    }, 1300);
+
+    const command = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "openSongCommand");
+    expect(command).toMatchObject({
+      leaderId: host.id,
+      sequenceId: 1,
+      requestedAt: 1300,
+      currentSong: {
+        song: {
+          title: "Bad Moon Rising",
+          sourceType: "musescore",
+          source: "CCR/Bad Moon Rising"
+        }
+      }
+    });
+  });
+
+  it("sanitizes malformed catalog entries without throwing", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "MuseScore",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    expect(() => {
+      room.handleMessage(adapter.id, {
+        type: "adapterStatus",
+        app: "musescore",
+        ready: true,
+        catalog: {
+          entries: [
+            null,
+            "not-an-object",
+            { title: "Bad Moon Rising", relativePath: "CCR/Bad Moon Rising.mscz" },
+            { title: "Escapes", relativePath: "../secrets/escape.mscz" }
+          ],
+          total: 4
+        }
+      } as never, 1100);
+    }).not.toThrow();
+
+    const stored = room.getState(1200).clients.find((client) => client.id === adapter.id);
+    expect(stored?.status?.catalog?.entries).toEqual([
+      { title: "Bad Moon Rising", relativePath: "CCR/Bad Moon Rising.mscz", sourceId: undefined }
+    ]);
+  });
+
   it("associates matching adapter-reported duration with the current setlist song", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const host = room.addClient(undefined, {

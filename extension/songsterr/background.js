@@ -7,6 +7,7 @@ let samples = [];
 let connectionState = "not configured";
 let connectionDetail = "Enter the BandCue room code, port, or URL and click Connect";
 let clockTimer;
+let reconnectTimer;
 let lastStatus = {
   ready: false,
   app: "songsterr",
@@ -22,6 +23,7 @@ let lastContentScriptStatusAt = 0;
 // When true, this machine never auto-opens a Songsterr tab. Use it on a host
 // that plays from MuseScore so transport/open commands don't pop Songsterr.
 let suppressAutoOpen = false;
+let autoConnectEnabled = false;
 
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
@@ -45,6 +47,7 @@ const LAN_SCAN_SUBNETS = [
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "popupConnect") {
     roomInput = normalizeRoomLocator(message.roomUrl);
+    autoConnectEnabled = true;
     connectionState = "connecting";
     connectionDetail = `Looking for BandCue room ${roomInput}`;
     configureConnection(roomInput).then(() => {
@@ -54,6 +57,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       connectionDetail = error.message;
       sendResponse(getPopupState());
     });
+    return true;
+  }
+
+  if (message.type === "popupDisconnect") {
+    disconnectByUser();
+    sendResponse(getPopupState());
     return true;
   }
 
@@ -96,15 +105,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
+  autoConnectEnabled = Boolean(stored.autoConnectEnabled);
   const storedInput = stored.roomInput || stored.roomUrl;
   if (storedInput) {
     roomInput = storedInput;
+  }
+  if (storedInput && autoConnectEnabled) {
     configureConnection(storedInput).catch((error) => {
       connectionState = "error";
       connectionDetail = error.message;
     });
+  } else if (storedInput) {
+    connectionState = "disconnected-by-user";
+    connectionDetail = "Disconnected. Press Connect when you want this extension to join.";
   }
 });
 
@@ -123,7 +138,8 @@ chrome.tabs.onRemoved.addListener(() => {
 async function configureConnection(input) {
   roomInput = normalizeRoomLocator(input);
   await refreshRoomEndpoint();
-  chrome.storage.local.set({ roomInput, roomUrl });
+  autoConnectEnabled = true;
+  chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
   connect();
 }
 
@@ -134,22 +150,28 @@ async function refreshRoomEndpoint() {
 }
 
 async function connect() {
+  if (!autoConnectEnabled) {
+    connectionState = "disconnected-by-user";
+    connectionDetail = "Disconnected. Press Connect when you want this extension to join.";
+    return;
+  }
+
   if (roomInput) {
     try {
       await refreshRoomEndpoint();
-      chrome.storage.local.set({ roomInput, roomUrl });
+      chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
     } catch (error) {
       connectionState = "error";
       connectionDetail = error.message;
-      setTimeout(() => {
-        connect();
-      }, 2000);
+      scheduleReconnect();
       return;
     }
   }
 
   if (!wsUrl) return;
-  socket?.close();
+  const previousSocket = socket;
+  socket = undefined;
+  previousSocket?.close();
   if (clockTimer) clearInterval(clockTimer);
   connectionState = "connecting";
   connectionDetail = `Connecting to ${roomInput || roomUrl}`;
@@ -224,19 +246,66 @@ async function connect() {
     }
   });
 
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
+    if (event.target !== socket) {
+      return;
+    }
+    if (clockTimer) {
+      clearInterval(clockTimer);
+      clockTimer = undefined;
+    }
+    if (!autoConnectEnabled) {
+      connectionState = "disconnected-by-user";
+      connectionDetail = "Disconnected. Press Connect when you want this extension to join.";
+      return;
+    }
     connectionState = "disconnected";
     connectionDetail = "Disconnected; retrying in 2 seconds";
-    if (clockTimer) clearInterval(clockTimer);
-    setTimeout(() => {
-      if (wsUrl) connect();
-    }, 2000);
+    scheduleReconnect();
   });
 
   socket.addEventListener("error", () => {
     connectionState = "error";
     connectionDetail = "Could not connect. Is `npm run dev` still running, and is the room code, port, or URL current?";
   });
+}
+
+function disconnectByUser() {
+  autoConnectEnabled = false;
+  chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+  if (clockTimer) {
+    clearInterval(clockTimer);
+    clockTimer = undefined;
+  }
+  if (tabStatusTimer) {
+    clearTimeout(tabStatusTimer);
+    tabStatusTimer = undefined;
+  }
+  lastDeliveredStatusSignature = "";
+  connectionState = "disconnected-by-user";
+  connectionDetail = "Disconnected. The extension will stay offline until you press Connect.";
+  const closingSocket = socket;
+  socket = undefined;
+  closingSocket?.close();
+}
+
+function scheduleReconnect() {
+  if (!autoConnectEnabled) {
+    return;
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+  }
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    if (autoConnectEnabled) {
+      connect();
+    }
+  }, 2000);
 }
 
 async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false) {
@@ -919,6 +988,7 @@ function getPopupState() {
     connectionDetail,
     roomInput,
     roomUrl,
+    autoConnectEnabled,
     suppressAutoOpen,
     status: lastStatus
   };

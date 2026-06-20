@@ -43,9 +43,17 @@ npm run package:extension
 
 Open the host controls URL and use the Setlist panel to add songs for the rehearsal. The setlist is stored locally in the host browser. Selecting **Make Current**, **Previous**, or **Next** publishes the current song to every connected companion view.
 
-Songs can include a source type, a Songsterr URL, a MuseScore score name, and short notes. Use **Export** and **Import** to move setlists between host browsers. If the current song is a Songsterr URL, **Open Songsterr** on the host page asks every connected Songsterr adapter to open the same current song. The Songsterr adapter will also open the current URL automatically before a transport command when no matching tab is available.
+Songs can include a source type, a Songsterr URL, a MuseScore score name, and short notes. Use **Export** and **Import** to move setlists between host browsers. **Open Current Song** on the host page asks connected adapters for the current source type to open the same song. The Songsterr adapter will also open the current URL automatically before a transport command when no matching tab is available.
 
-MuseScore songs still need the score opened manually. The MuseScore helper warns when the active score title does not appear to match the current MuseScore setlist item.
+MuseScore songs can be opened automatically when the MuseScore helper has a configured score folder and exactly one catalog entry matches the current setlist item. The helper warns when the active score title does not appear to match the current MuseScore setlist item, or when a local catalog match is missing or ambiguous.
+
+To let the MuseScore helper publish and open local scores, pass one or more score folders:
+
+```powershell
+npm run dev:musescore -- --score-folder "C:\Users\you\Documents\MuseScore4\Scores"
+```
+
+The helper scans `.mscz` and `.mscx` files recursively by default and publishes only song titles plus paths relative to the configured folder. Full local paths stay private on the helper machine. MuseScore setlist items can match by title, extensionless score name, or relative path such as `CCR\Bad Moon Rising`.
 
 ## Safety Controls
 
@@ -131,6 +139,8 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4731/commands/12/result -Bo
 
 If a bridge helper has contacted the adapter but no bridge result arrives within 900 ms after the scheduled time, the Windows keyboard path runs as the fallback. When no helper is polling the bridge at all, fallback runs immediately at the scheduled time. You can tune the bridge wait window with `--bridge-fallback-ms 1500`.
 
+The bridge command queue also carries `open-song` commands for MuseScore setlist items. Bridge helpers can claim and complete them through the same `/commands/{sequenceId}/claim` and `/commands/{sequenceId}/result` endpoints. The helper also exposes `GET http://127.0.0.1:4731/catalog`, returning the privacy-safe local score catalog. If no bridge helper handles `open-song`, the Windows helper opens the single matched local score from its configured folders; missing and ambiguous matches are reported back to the host.
+
 The host page shows the active MuseScore window title, whether playback is inferred as playing or stopped from the last successful BandCue command, and a visible failure if Windows could not activate the MuseScore window.
 
 ### Songsterr in Chrome/Edge
@@ -146,16 +156,20 @@ The host page shows the active MuseScore window title, whether playback is infer
 
 The extension cannot use raw UDP discovery, so room-code or port lookup checks the local machine and scans common rehearsal LAN ranges. If your network uses a different subnet, enter `host:port`, for example `192.168.1.23:4173`.
 
+Click **Disconnect** when you want the extension to stay offline. BandCue keeps the last room value for convenience, but it will not reconnect after a deliberate Disconnect until you press **Connect** again.
+
 ### Songsterr on Android
 
 BandCue also includes a native Android adapter in `android/`. Build the debug APK with `npm run build:android`, install it with `adb install -r android/app/build/outputs/apk/debug/app-debug.apk`, enable **Notification Access** or the opt-in **Accessibility Fallback** for BandCue Songsterr, and connect with the printed room URL, `host:port`, room code, or port.
 
 The Android adapter connects as a Songsterr desktop adapter and first uses Android media sessions to request play and pause from the Songsterr app. If Songsterr does not expose an active media session, the opt-in Accessibility fallback taps the visible Songsterr transport control while Songsterr is foreground. If Songsterr is not installed or permissions are missing, the host page shows that state instead of treating the phone as controllable.
 
+Pressing **Disconnect** in the Android app stops reconnect attempts, clock sync, pending transport work, the socket, and the foreground notification/service. Reopen the app and press **Connect** when you want to join the next rehearsal.
+
 ## V1 Limits
 
 - Same Wi-Fi only.
-- MuseScore songs must already be open and positioned; Songsterr setlist URLs can be opened from the host page.
+- MuseScore auto-open requires a configured score folder and a single matching local score; otherwise the host shows missing or ambiguous catalog status.
 - Play/stop only.
 - Phones are companion displays by default; Android phones can be app controllers only through the native adapter.
 - Only the leader's device should feed audible click/backing audio to the mixer.

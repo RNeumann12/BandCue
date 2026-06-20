@@ -457,6 +457,7 @@ function createDeviceCard(key) {
       <span data-device-capabilities></span>
     </div>
     <span class="small" data-device-title></span>
+    <span class="small" data-device-catalog></span>
     <span class="small" data-device-playback></span>
     <span class="small" data-device-command></span>
     <span class="small" data-device-clock></span>
@@ -482,6 +483,7 @@ function updateDeviceCard(card, device) {
   setText(card.querySelector("[data-device-self]"), self);
   setText(card.querySelector("[data-device-capabilities]"), formatCapabilities(device));
   setText(card.querySelector("[data-device-title]"), title);
+  setText(card.querySelector("[data-device-catalog]"), renderCatalogMatch(status));
   setText(card.querySelector("[data-device-playback]"), playback);
   setText(card.querySelector("[data-device-command]"), command);
   setText(card.querySelector("[data-device-clock]"), clock);
@@ -556,6 +558,7 @@ function renderDevice(device) {
         <span>${escapeHtml(formatCapabilities(device))}</span>
       </div>
       <span class="small">${escapeHtml(title)}</span>
+      <span class="small">${escapeHtml(renderCatalogMatch(status))}</span>
       <span class="small">${escapeHtml(playback)}</span>
       <span class="small">${escapeHtml(command)}</span>
       <span class="small">${escapeHtml(clock)}</span>
@@ -802,7 +805,7 @@ function renderSetlist() {
   elements.previousSongButton.disabled = setlist.length < 2;
   elements.nextSongButton.disabled = setlist.length < 1;
   elements.clearSongButton.disabled = currentSongIndex < 0;
-  elements.openSongButton.disabled = !getCurrentSongUrl();
+  elements.openSongButton.disabled = !getCurrentOpenableSong();
 
   if (!setlist.length) {
     elements.setlistItems.innerHTML = '<p class="small">No songs added yet.</p>';
@@ -837,21 +840,20 @@ function publishSafety(update) {
 }
 
 function openCurrentSong() {
-  const url = getCurrentSongUrl();
-  if (!url) {
-    setText(elements.hostWarning, "Current song does not have a Songsterr URL.");
+  const song = getCurrentOpenableSong();
+  if (!song) {
+    setText(elements.hostWarning, "Current song must be a Songsterr URL or MuseScore setlist item.");
     return;
   }
 
   const requestSent = send({ type: "openSongRequest", requestedAt: Date.now() });
-  const songTitle = lastState?.currentSong?.song?.title
-    || (currentSongIndex >= 0 ? setlist[currentSongIndex]?.title : "current song")
-    || "current song";
-  const songsterrAdapters = lastState?.clients.filter(
-    (device) => device.role === "desktop-adapter" && device.status?.app === "songsterr"
+  const songTitle = song.title || "current song";
+  const targetAdapters = lastState?.clients.filter(
+    (device) => device.role === "desktop-adapter" && device.status?.app === song.sourceType
   ) ?? [];
 
-  if (!requestSent || !songsterrAdapters.length) {
+  if (song.sourceType === "songsterr" && (!requestSent || !targetAdapters.length)) {
+    const url = getSongsterrUrl(song);
     window.open(url, "_blank", "noopener,noreferrer");
     setText(
       elements.hostWarning,
@@ -862,15 +864,40 @@ function openCurrentSong() {
     return;
   }
 
-  setText(elements.hostWarning, `Asked ${songsterrAdapters.length} Songsterr adapter${songsterrAdapters.length === 1 ? "" : "s"} to open ${songTitle}.`);
+  if (!requestSent) {
+    setText(elements.hostWarning, `Room connection is not ready; cannot ask MuseScore adapters to open ${songTitle}.`);
+    return;
+  }
+
+  if (!targetAdapters.length) {
+    setText(elements.hostWarning, `No ${formatSongSource(song.sourceType)} adapter connected for ${songTitle}.`);
+    return;
+  }
+
+  setText(elements.hostWarning, `Asked ${targetAdapters.length} ${formatSongSource(song.sourceType)} adapter${targetAdapters.length === 1 ? "" : "s"} to open ${songTitle}.`);
 }
 
-function getCurrentSongUrl() {
+function getCurrentOpenableSong() {
   const song = currentSongIndex >= 0 ? setlist[currentSongIndex] : lastState?.currentSong?.song;
+  if (!song) {
+    return undefined;
+  }
+
+  if (song.sourceType === "musescore") {
+    return song;
+  }
+
+  if (song.sourceType === "songsterr" && getSongsterrUrl(song)) {
+    return song;
+  }
+
+  return undefined;
+}
+
+function getSongsterrUrl(song) {
   if (song?.sourceType !== "songsterr" || !song.source) {
     return "";
   }
-
   try {
     const url = new URL(song.source);
     return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : "";
@@ -1044,6 +1071,23 @@ function renderCommand(command) {
   const path = command.controlPath ? ` via ${command.controlPath}` : "";
   const detail = command.detail ? `: ${command.detail}` : "";
   return `${command.action} ${command.status}${path} at ${when}${detail}`;
+}
+
+function renderCatalogMatch(status) {
+  if (!status?.catalog && !status?.songMatch) {
+    return "catalog not reported";
+  }
+
+  const catalog = status.catalog
+    ? `${status.catalog.total ?? 0} local score${status.catalog.total === 1 ? "" : "s"}`
+    : "catalog pending";
+  const match = status.songMatch;
+  if (!match || match.status === "not-applicable") {
+    return catalog;
+  }
+
+  const target = match.relativePath || match.title || match.detail || "";
+  return target ? `${catalog}; ${match.status}: ${target}` : `${catalog}; ${match.status}`;
 }
 
 function renderClock(clock) {

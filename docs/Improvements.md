@@ -214,7 +214,7 @@ BandCue has transport state but no song-length model. The coordinator cannot kno
 
 ## 5. MuseScore Bridge Local Song Publishing And Auto-Open
 
-Status: `Open`
+Status: `Done`
 
 ### Problem
 
@@ -225,6 +225,7 @@ MuseScore songs still need to be opened manually. BandCue needs a system where M
 - MuseScore setlist items can store a score name or human-readable title.
 - MuseScore helper can warn when the active score title does not match the current setlist item.
 - The bridge can receive transport commands and report status/title/playback, but it does not publish a local song catalog or open scores yet.
+- 2026-06-20 implementation update: MuseScore helper scans configured score folders, publishes a privacy-safe catalog with title and relative path only, reports matched/missing/ambiguous current-song states, exposes the catalog through the localhost bridge, and handles `open-song` through the bridge lifecycle with local catalog fallback.
 
 ### Suspected Cause
 
@@ -252,6 +253,7 @@ The bridge knows the current active score but does not know the user's local sco
 - Matching tests for title, relative path, extensionless names, and ambiguous duplicates.
 - Open-song command lifecycle tests for queued, claimed, succeeded, failed, and timeout/fallback cases.
 - Manual test with two bridge clients where only one has the selected song.
+- 2026-06-20 automated checks: TypeScript catalog tests cover recursive score scanning, relative-path-only publishing, exact source matching, and ambiguous duplicate reporting; room tests cover MuseScore `open-song` broadcast.
 
 ### Open Questions
 
@@ -259,7 +261,7 @@ The bridge knows the current active score but does not know the user's local sco
 
 ## 6. Browser Extension UI And Explicit Connection Control
 
-Status: `Open`
+Status: `Done`
 
 ### Problem
 
@@ -271,6 +273,7 @@ The browser extension UI is hard to use and does not make connection state or us
 - The background script stores the previous room input and auto-configures the connection when the extension loads.
 - When the socket closes, the background script retries after a delay as long as a WebSocket URL is still configured.
 - There is no clear user-facing Disconnect action that means "stay disconnected until I explicitly connect again."
+- 2026-06-20 implementation update: extension popup now has clear connection/readiness panels and a prominent Disconnect action; background stores explicit `autoConnectEnabled` intent, only reconnects when enabled, and clears reconnect, clock sync, and pending status timers on Disconnect while preserving the saved room input.
 
 ### Suspected Cause
 
@@ -298,6 +301,7 @@ The extension currently treats stored room configuration as permission to reconn
 - Extension tests or manual checks for: fresh install, Connect, socket drop retry, Disconnect, extension reload, browser restart, and Songsterr tab reload.
 - Verify background reconnect timers and clock sync timers are cleared on Disconnect.
 - Manual repro: connect extension, press Disconnect, stop and restart the coordinator, then confirm the extension stays disconnected until Connect is pressed.
+- 2026-06-20 automated checks: TypeScript build and unit suite pass after protocol/UI changes. Manual browser extension reload/restart still needs a real Chrome/Edge check.
 
 ### Open Questions
 
@@ -305,7 +309,7 @@ The extension currently treats stored room configuration as permission to reconn
 
 ## 7. Android App Disconnect Should Stop All Activity
 
-Status: `Open`
+Status: `Done`
 
 ### Problem
 
@@ -316,6 +320,7 @@ The Android app is hard to kill. Pressing Disconnect should stop all further act
 - The Android adapter service schedules reconnect attempts after socket close or errors.
 - The service runs clock sync and status publishing while connected.
 - Disconnect currently needs to be audited so it reliably stops reconnect scheduling, active sockets, timers, foreground/background work, and any user-visible running state.
+- 2026-06-20 implementation update: Android Disconnect persists manual offline intent, cancels reconnect, clock sync, and pending transport tasks, closes the socket, stops the foreground notification/service, and the service no longer restarts sticky after a user disconnect.
 
 ### Suspected Cause
 
@@ -342,6 +347,7 @@ The Android service is designed to keep the adapter alive during rehearsal, but 
 - Android tests or manual checks for: Connect, network drop retry, Disconnect, app close/reopen, service restart, device sleep/wake, and coordinator restart.
 - Verify no reconnect task fires after Disconnect.
 - Verify socket, clock sync, and status update jobs stop after Disconnect.
+- 2026-06-20 automated checks: Android JVM tests compile and pass after service lifecycle changes. Real-device checks for device sleep/wake and coordinator restart remain useful.
 
 ### Open Questions
 
@@ -374,4 +380,4 @@ The Android service is designed to keep the adapter alive during rehearsal, but 
 - Safety controls are implemented: host arming is required before Play, Play disarms after acceptance, and the host can choose stop-control mode.
 - Install/run polish is implemented for the current repo shape: preflight checks, one-command local rehearsal startup, and Songsterr extension zip packaging.
 - MuseScore integration has a bridge command lifecycle, bridge-reported playback/title status, current-song title mismatch warnings, and Windows keyboard control as the fallback.
-- MuseScore songs remain manual until the local song publishing and auto-open work in this tracker is completed.
+- MuseScore local song publishing and auto-open are implemented for configured score folders, with privacy-safe relative catalog paths and missing/ambiguous match reporting.

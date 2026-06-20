@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import org.json.JSONObject
+import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -30,6 +31,7 @@ class BandCueAdapterService : Service() {
     private var socket: BandCueWebSocketClient? = null
     private var clockTask: ScheduledFuture<*>? = null
     private var reconnectTask: ScheduledFuture<*>? = null
+    private val commandTasks = Collections.synchronizedSet(mutableSetOf<ScheduledFuture<*>>())
     private var latestCommand: AdapterCommandStatus? = null
     private var currentSong: CurrentSong? = null
     private var roomLocator: String = DEFAULT_ROOM_PORT.toString()
@@ -52,17 +54,23 @@ class BandCueAdapterService : Service() {
                 deviceName = intent.getStringExtra(EXTRA_DEVICE_NAME)?.takeIf { it.isNotBlank() }
                     ?: "Android Songsterr"
                 shouldReconnect = true
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_AUTO_CONNECT, true)
+                    .apply()
                 connect()
             }
             ACTION_DISCONNECT -> {
                 shouldReconnect = false
-                disconnect("Disconnected")
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putBoolean(PREF_AUTO_CONNECT, false)
+                    .apply()
+                disconnect("Disconnected. Android will stay offline until Connect is pressed.", stopService = true)
             }
             ACTION_OPEN_CURRENT_SONG -> {
                 openCurrentSong()
             }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -77,8 +85,11 @@ class BandCueAdapterService : Service() {
 
     private fun connect() {
         reconnectTask?.cancel(false)
-        socket?.close()
+        reconnectTask = null
         worker.execute {
+            if (!shouldReconnect) {
+                return@execute
+            }
             disconnect("Reconnecting")
             connectionState = "connecting"
             connectionDetail = "Resolving BandCue room $roomLocator"
@@ -86,6 +97,9 @@ class BandCueAdapterService : Service() {
 
             try {
                 val endpoint = resolveRoomEndpoint(roomLocator)
+                if (!shouldReconnect) {
+                    return@execute
+                }
                 connectionDetail = "Connecting to ${endpoint.roomUrl}"
                 publishUiStatus()
                 val client = BandCueWebSocketClient(endpoint.wsUrl, object : BandCueWebSocketClient.Listener {
@@ -130,13 +144,25 @@ class BandCueAdapterService : Service() {
         }
     }
 
-    private fun disconnect(detail: String) {
+    private fun disconnect(detail: String, stopService: Boolean = false) {
+        reconnectTask?.cancel(false)
+        reconnectTask = null
         stopClockSync()
+        cancelCommandTasks()
         socket?.close()
         socket = null
         connectionState = "disconnected"
         connectionDetail = detail
         publishUiStatus()
+        if (stopService) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            stopSelf()
+        }
     }
 
     private fun scheduleReconnect() {
@@ -157,6 +183,26 @@ class BandCueAdapterService : Service() {
     private fun stopClockSync() {
         clockTask?.cancel(false)
         clockTask = null
+    }
+
+    private fun scheduleCommandTask(task: () -> Unit, delay: Long, unit: TimeUnit) {
+        var future: ScheduledFuture<*>? = null
+        future = scheduler.schedule({
+            try {
+                if (shouldReconnect) {
+                    task()
+                }
+            } finally {
+                future?.let { commandTasks.remove(it) }
+            }
+        }, delay, unit)
+        future?.let { commandTasks.add(it) }
+    }
+
+    private fun cancelCommandTasks() {
+        val snapshot = synchronized(commandTasks) { commandTasks.toList() }
+        snapshot.forEach { it.cancel(false) }
+        commandTasks.clear()
     }
 
     private fun handleServerMessage(raw: String) {
@@ -246,7 +292,7 @@ class BandCueAdapterService : Service() {
         } else {
             scheduledDelayMs
         }
-        scheduler.schedule({
+        scheduleCommandTask({
             executeTransport(command)
         }, delayMs, TimeUnit.MILLISECONDS)
     }
@@ -665,5 +711,7 @@ class BandCueAdapterService : Service() {
         private const val NOTIFICATION_ID = 4731
         private const val SONGSTERR_PACKAGE = "com.songsterr"
         private const val SONGSTERR_OPEN_SETTLE_MS = 1500L
+        private const val PREFS_NAME = "bandcue-songsterr"
+        private const val PREF_AUTO_CONNECT = "autoConnect"
     }
 }

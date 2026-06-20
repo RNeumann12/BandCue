@@ -217,6 +217,8 @@ export class RoomController {
       source: trimText(status.source ?? client.status?.source ?? "", 500) || undefined,
       durationMs: sanitizeDurationMs(status.durationMs) ?? client.status?.durationMs,
       durationSource: sanitizeDurationSource(status.durationSource) ?? client.status?.durationSource,
+      catalog: sanitizeCatalog(status.catalog) ?? client.status?.catalog,
+      songMatch: sanitizeSongMatch(status.songMatch) ?? client.status?.songMatch,
       detail: status.detail ?? client.status?.detail,
       lastCommand: status.lastCommand ?? client.status?.lastCommand
     };
@@ -400,19 +402,18 @@ export class RoomController {
     if (client.role !== "host") {
       this.send(client, {
         type: "error",
-        message: "Only a host can ask adapters to open the current Songsterr song."
+        message: "Only a host can ask adapters to open the current song."
       });
       return;
     }
 
     if (
       !this.currentSong?.song ||
-      this.currentSong.song.sourceType !== "songsterr" ||
-      !this.currentSong.song.source
+      !["songsterr", "musescore"].includes(this.currentSong.song.sourceType)
     ) {
       this.send(client, {
         type: "error",
-        message: "Select a current setlist song with a Songsterr URL before opening it."
+        message: "Select a current Songsterr or MuseScore setlist song before opening it."
       });
       return;
     }
@@ -646,6 +647,68 @@ function sanitizeDurationMs(value: number | undefined): number | undefined {
 
 function sanitizeDurationSource(value: SongDurationSource | undefined): SongDurationSource | undefined {
   return value === "adapter" || value === "manual" ? value : undefined;
+}
+
+function sanitizeCatalog(value: AdapterStatus["catalog"]): AdapterStatus["catalog"] | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const entries = Array.isArray(value.entries)
+    ? value.entries
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry) && typeof entry === "object")
+      .map((entry) => ({
+        title: trimText(entry.title, 140),
+        relativePath: normalizeRelativeCatalogPath(entry.relativePath),
+        sourceId: trimText(entry.sourceId ?? "", 160) || undefined
+      }))
+      .filter((entry) => entry.title && entry.relativePath)
+      .slice(0, 500)
+    : undefined;
+  const total = Number.isFinite(value.total)
+    ? Math.max(0, Math.min(100_000, Math.round(value.total)))
+    : entries?.length ?? 0;
+
+  return {
+    entries,
+    total,
+    rootCount: Number.isFinite(value.rootCount)
+      ? Math.max(0, Math.min(100, Math.round(value.rootCount ?? 0)))
+      : undefined,
+    scannedAt: Number.isFinite(value.scannedAt)
+      ? Math.max(0, Math.round(value.scannedAt ?? 0))
+      : undefined,
+    detail: trimText(value.detail ?? "", 500) || undefined
+  };
+}
+
+function sanitizeSongMatch(value: AdapterStatus["songMatch"]): AdapterStatus["songMatch"] | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const status = ["matched", "ambiguous", "missing", "not-applicable"].includes(value.status)
+    ? value.status
+    : "not-applicable";
+
+  return {
+    status,
+    count: Number.isFinite(value.count)
+      ? Math.max(0, Math.min(1000, Math.round(value.count ?? 0)))
+      : undefined,
+    title: trimText(value.title ?? "", 140) || undefined,
+    relativePath: normalizeRelativeCatalogPath(value.relativePath ?? "") || undefined,
+    detail: trimText(value.detail ?? "", 500) || undefined
+  };
+}
+
+function normalizeRelativeCatalogPath(value: string): string {
+  const normalized = trimText(value, 260).replace(/\\/g, "/");
+  if (!normalized || normalized.startsWith("/") || /^[a-z]:\//i.test(normalized) || normalized.includes("../")) {
+    return "";
+  }
+
+  return normalized;
 }
 
 function adapterStatusMatchesSong(

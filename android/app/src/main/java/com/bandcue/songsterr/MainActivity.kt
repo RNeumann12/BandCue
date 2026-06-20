@@ -39,6 +39,12 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("bandcue-songsterr", MODE_PRIVATE)
         buildUi()
         requestNotificationPermissionIfNeeded()
+        // Resume automatically only when the user last left the adapter connected.
+        // A user-initiated Disconnect clears this intent, so reopening the app
+        // after Disconnect stays offline until Connect is pressed again.
+        if (prefs.getBoolean(PREF_AUTO_CONNECT, false)) {
+            connect()
+        }
     }
 
     override fun onStart() {
@@ -204,5 +210,6 @@ class MainActivity : Activity() {
     private companion object {
         const val PREF_ROOM = "room"
         const val PREF_NAME = "name"
+        const val PREF_AUTO_CONNECT = "autoConnect"
     }
 }

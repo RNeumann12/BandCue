@@ -123,7 +123,11 @@ wss.on("connection", (socket) => {
       if (!message || !clientId) {
         return;
       }
-      room.handleMessage(clientId, message);
+      try {
+        room.handleMessage(clientId, message);
+      } catch (error) {
+        console.error(`Failed to handle message from ${clientId}:`, error);
+      }
     });
   });
 
