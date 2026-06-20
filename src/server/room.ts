@@ -723,13 +723,19 @@ function adapterStatusMatchesSong(
     return true;
   }
 
-  const statusTitle = normalizeSongIdentity(status.title ?? "");
-  const songTitle = normalizeSongIdentity(song.title);
-  return Boolean(
-    statusTitle &&
-      songTitle &&
-      (statusTitle.includes(songTitle) || songTitle.includes(statusTitle))
-  );
+  // Fall back to title only on a full match. A loose substring overlap would
+  // wrongly bind, e.g. a song titled "Black" absorbing the duration reported
+  // for "Black Dog". Songsterr titles look like "Song Name Tab by Artist", so
+  // strip that trailing descriptor before requiring exact normalized equality.
+  const statusTitle = stripTabSuffix(normalizeSongIdentity(status.title ?? ""));
+  const songTitle = stripTabSuffix(normalizeSongIdentity(song.title));
+  return Boolean(statusTitle && songTitle && statusTitle === songTitle);
+}
+
+function stripTabSuffix(value: string): string {
+  return value
+    .replace(/\s+(bass |rhythm |lead |acoustic |electric |guitar |drum )?(tab|tabs|chords)( by .*)?$/i, "")
+    .trim();
 }
 
 function sameNormalizedSource(left: string, right: string): boolean {

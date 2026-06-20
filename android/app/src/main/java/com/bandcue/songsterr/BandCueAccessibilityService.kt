@@ -22,6 +22,7 @@ class BandCueAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         activeService = this
+        cachedResetControl = loadCachedResetControl()
     }
 
     override fun onDestroy() {
@@ -78,9 +79,11 @@ class BandCueAccessibilityService : AccessibilityService() {
                         candidate,
                         clickTarget
                     ) {
-                        cachedResetControl = CachedResetControl(
-                            signature = resetTarget.signature,
-                            bounds = resetTarget.candidate.bounds.toUiRect()
+                        rememberResetControl(
+                            CachedResetControl(
+                                signature = resetTarget.signature,
+                                bounds = resetTarget.candidate.bounds.toUiRect()
+                            )
                         )
                     }
                     return if (dispatched) {
@@ -223,11 +226,16 @@ class BandCueAccessibilityService : AccessibilityService() {
     ): TransportCandidate? {
         val candidates = mutableListOf<TransportCandidate>()
         collectTransportCandidates(root, action, candidates)
+        val labelled = candidates.maxByOrNull { it.score }
+
+        // Stop must never fall back to structured/geometry guesses: tapping an
+        // unlabeled control could resume toggle-style playback. Only Play is
+        // allowed to use the positional fallbacks.
         if (action == "stop") {
-            return candidates.maxByOrNull { it.score }
+            return labelled
         }
 
-        return candidates.maxByOrNull { it.score }
+        return labelled
             ?: findStructuredTransportCandidate(root)
             ?: findGeometryTransportCandidate(root)
     }
@@ -508,6 +516,31 @@ class BandCueAccessibilityService : AccessibilityService() {
         val subtreeLabel: String = ""
     )
 
+    // A confidently detected reset geometry is remembered per layout signature so
+    // it survives accessibility-service process death, app updates, and reboots.
+    // It only adds stability for a layout that was already confidently detected at
+    // least once; it never lets the scorer tap an unconfirmed control.
+    private fun rememberResetControl(control: CachedResetControl) {
+        cachedResetControl = control
+        try {
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(PREF_RESET_CACHE, serializeResetControl(control))
+                .apply()
+        } catch (_: Throwable) {
+            // A failed persist must never break the reset/play gesture.
+        }
+    }
+
+    private fun loadCachedResetControl(): CachedResetControl? {
+        return try {
+            val raw = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(PREF_RESET_CACHE, null)
+            raw?.let { deserializeResetControl(it) }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     private sealed class ResetCandidate {
         data class Found(
             val candidate: TransportCandidate,
@@ -523,6 +556,8 @@ class BandCueAccessibilityService : AccessibilityService() {
     companion object {
         private const val SONGSTERR_PACKAGE = "com.songsterr"
         private const val TOOLBAR_ROW_BUCKET_PX = 180
+        private const val PREFS_NAME = "bandcue-songsterr"
+        private const val PREF_RESET_CACHE = "resetControlCache"
         // Let the reset tap land and Songsterr settle before the play tap fires.
         private const val PLAY_AFTER_RESET_DELAY_MS = 220L
         private val IGNORED_CONTROL_WORDS = listOf(
@@ -564,3 +599,23 @@ class BandCueAccessibilityService : AccessibilityService() {
 }
 
 private fun Rect.toUiRect(): UiRect = UiRect(left, top, right, bottom)
+
+// Compact "screenW,screenH,playCX,playCY|left,top,right,bottom" form for persistence.
+private fun serializeResetControl(control: CachedResetControl): String {
+    val sig = control.signature
+    val b = control.bounds
+    return "${sig.screenWidth},${sig.screenHeight},${sig.playCenterX},${sig.playCenterY}|" +
+        "${b.left},${b.top},${b.right},${b.bottom}"
+}
+
+private fun deserializeResetControl(raw: String): CachedResetControl? {
+    val parts = raw.split("|")
+    if (parts.size != 2) return null
+    val sig = parts[0].split(",").mapNotNull { it.toIntOrNull() }
+    val bounds = parts[1].split(",").mapNotNull { it.toIntOrNull() }
+    if (sig.size != 4 || bounds.size != 4) return null
+    return CachedResetControl(
+        signature = ResetLayoutSignature(sig[0], sig[1], sig[2], sig[3]),
+        bounds = UiRect(bounds[0], bounds[1], bounds[2], bounds[3])
+    )
+}

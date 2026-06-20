@@ -1,5 +1,8 @@
 export const DEFAULT_ROOM_PORT = 4173;
 export const DEFAULT_LOCAL_DISCOVERY_HOSTS = ["127.0.0.1", "localhost"];
+// Canonical LAN scan subnet list. Platforms that cannot import this module keep
+// their own copy and MUST stay in sync: extension/songsterr/background.js
+// (LAN_SCAN_SUBNETS) and android/.../RoomLocator.kt (LAN_SCAN_SUBNETS).
 export const DEFAULT_LAN_SCAN_SUBNETS = [
   "192.168.0",
   "192.168.1",

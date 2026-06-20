@@ -12,6 +12,8 @@ import java.util.concurrent.TimeUnit
 
 const val DEFAULT_ROOM_PORT = 4173
 val DISCOVERY_LOCAL_HOSTS = listOf("10.0.2.2", "127.0.0.1", "localhost")
+// Keep in sync with DEFAULT_LAN_SCAN_SUBNETS in src/shared/room-locator.ts
+// (the canonical list) and LAN_SCAN_SUBNETS in extension/songsterr/background.js.
 val LAN_SCAN_SUBNETS = listOf(
     "192.168.0",
     "192.168.1",

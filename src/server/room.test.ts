@@ -512,6 +512,77 @@ describe("RoomController", () => {
     });
   });
 
+  it("does not bind adapter duration to a song with a loose substring title overlap", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    // Current song "Black" must not absorb the duration reported for "Black Dog".
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1200,
+      song: { id: "song-1", title: "Black", sourceType: "songsterr" }
+    }, 1200);
+
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus",
+      app: "songsterr",
+      ready: true,
+      title: "Black Dog Tab by Led Zeppelin",
+      durationMs: 296_000,
+      durationSource: "adapter"
+    }, 1300);
+
+    expect(room.getState(1400).currentSong?.song?.durationMs).toBeUndefined();
+  });
+
+  it("binds adapter duration by title when only the tab descriptor differs", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1200,
+      song: { id: "song-1", title: "Black Dog", sourceType: "songsterr" }
+    }, 1200);
+
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus",
+      app: "songsterr",
+      ready: true,
+      title: "Black Dog Bass Tab by Led Zeppelin",
+      durationMs: 296_000,
+      durationSource: "adapter"
+    }, 1300);
+
+    expect(room.getState(1400).currentSong?.song?.durationMs).toBe(296_000);
+  });
+
   it("auto-stops the room state after a known duration without broadcasting stop", async () => {
     vi.useFakeTimers();
     try {

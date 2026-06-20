@@ -30,6 +30,8 @@ const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
 const LAN_SCAN_BATCH_SIZE = 64;
 const LAN_SCAN_TIMEOUT_MS = 350;
+// Keep in sync with DEFAULT_LAN_SCAN_SUBNETS in src/shared/room-locator.ts
+// (the canonical list) and LAN_SCAN_SUBNETS in android/.../RoomLocator.kt.
 const LAN_SCAN_SUBNETS = [
   "192.168.0",
   "192.168.1",
