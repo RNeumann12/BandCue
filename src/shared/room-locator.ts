@@ -1,4 +1,20 @@
 export const DEFAULT_ROOM_PORT = 4173;
+export const DEFAULT_LOCAL_DISCOVERY_HOSTS = ["127.0.0.1", "localhost"];
+export const DEFAULT_LAN_SCAN_SUBNETS = [
+  "192.168.0",
+  "192.168.1",
+  "192.168.2",
+  "192.168.4",
+  "192.168.86",
+  "192.168.178",
+  "10.0.0",
+  "10.0.1",
+  "10.0.2",
+  "172.16.0",
+  "172.20.10"
+];
+export const LAN_SCAN_HOST_MIN = 1;
+export const LAN_SCAN_HOST_MAX = 254;
 
 export interface RoomDiscoveryCandidate {
   apiUrl: string;
@@ -63,6 +79,48 @@ export function buildRoomDiscoveryCandidates(
   return explicitHost ? [roomDiscoveryCandidate(explicitHost.host, explicitHost.port)] : [];
 }
 
+export function buildLanScanCandidates(
+  locator: string,
+  defaultPort = DEFAULT_ROOM_PORT,
+  subnets = DEFAULT_LAN_SCAN_SUBNETS
+): RoomDiscoveryCandidate[] {
+  const value = normalizeRoomLocator(locator, defaultPort);
+  if (!isPort(value) && !isRoomCode(value)) {
+    return [];
+  }
+
+  const expectedRoomCode = isRoomCode(value) ? value.toUpperCase() : undefined;
+  const port = isPort(value) ? Number.parseInt(value, 10) : defaultPort;
+  return subnets.flatMap((subnet) => (
+    Array.from(
+      { length: LAN_SCAN_HOST_MAX - LAN_SCAN_HOST_MIN + 1 },
+      (_unused, index) => roomDiscoveryCandidate(
+        `${subnet}.${LAN_SCAN_HOST_MIN + index}`,
+        port,
+        expectedRoomCode
+      )
+    )
+  ));
+}
+
+export function discoveryPortForLocator(locator: string, defaultPort = DEFAULT_ROOM_PORT): number {
+  const value = normalizeRoomLocator(locator, defaultPort);
+  return isPort(value) ? Number.parseInt(value, 10) : defaultPort;
+}
+
+export function expectedRoomCodeForLocator(locator: string): string | undefined {
+  const value = normalizeRoomLocator(locator);
+  return isRoomCode(value) ? value.toUpperCase() : undefined;
+}
+
+export function describeLanScanSubnets(subnets = DEFAULT_LAN_SCAN_SUBNETS): string {
+  return subnets.map((subnet) => `${subnet}.${LAN_SCAN_HOST_MIN}-${LAN_SCAN_HOST_MAX}`).join(", ");
+}
+
+export function roomDiscoveryFallbackHint(port: number): string {
+  return `If discovery is blocked by Wi-Fi isolation, firewall, VPN, or a different subnet, enter the host:port shown on the host page, such as 192.168.1.12:${port}, or paste the full room URL.`;
+}
+
 export function roomUrlFromDiscovery(
   state: RoomDiscoveryState,
   candidate: RoomDiscoveryCandidate
@@ -96,10 +154,7 @@ export function roomUrlFromDiscovery(
 }
 
 function localCandidates(port: number, expectedRoomCode?: string): RoomDiscoveryCandidate[] {
-  return [
-    roomDiscoveryCandidate("127.0.0.1", port, expectedRoomCode),
-    roomDiscoveryCandidate("localhost", port, expectedRoomCode)
-  ];
+  return DEFAULT_LOCAL_DISCOVERY_HOSTS.map((host) => roomDiscoveryCandidate(host, port, expectedRoomCode));
 }
 
 export function roomDiscoveryCandidate(

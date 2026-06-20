@@ -16,13 +16,19 @@ import {
 } from "../shared/clock.js";
 import {
   DEFAULT_ROOM_PORT,
+  DEFAULT_LAN_SCAN_SUBNETS,
+  buildLanScanCandidates,
   buildRoomDiscoveryCandidates,
+  describeLanScanSubnets,
+  discoveryPortForLocator,
+  expectedRoomCodeForLocator,
   isAbsoluteRoomUrl,
   isPort,
   isRoomCode,
   isPlaceholderRoom,
   normalizeRoomLocator,
   roomDiscoveryCandidate,
+  roomDiscoveryFallbackHint,
   roomUrlFromDiscovery,
   roomUrlToWebSocket,
   type RoomDiscoveryState
@@ -239,8 +245,9 @@ async function resolveRoomEndpoint(): Promise<{ roomUrl: string; wsUrl: string }
   const errors: string[] = [];
   errors.push(...localResult.errors);
   if (isRoomCode(locator) || isPort(locator)) {
-    const expectedRoomCode = isRoomCode(locator) ? locator.toUpperCase() : undefined;
-    const discoveryPort = isPort(locator) ? Number.parseInt(locator, 10) : args.discoveryPort;
+    const expectedRoomCode = expectedRoomCodeForLocator(locator);
+    const scanPort = discoveryPortForLocator(locator, args.port);
+    const discoveryPort = isPort(locator) ? scanPort : args.discoveryPort;
     const rooms = await discoverBandCueRooms({
       roomCode: expectedRoomCode,
       discoveryPort,
@@ -260,9 +267,17 @@ async function resolveRoomEndpoint(): Promise<{ roomUrl: string; wsUrl: string }
         : `No LAN discovery response on UDP ${discoveryPort}`);
     }
     errors.push(...lanResult.errors);
+
+    const scanCandidates = buildLanScanCandidates(locator, args.port);
+    const scanResult = await resolveFromCandidateBatches(scanCandidates, 64, 450);
+    if (scanResult.endpoint) {
+      return scanResult.endpoint;
+    }
+
+    errors.push(`Scanned common HTTP ranges ${describeLanScanSubnets(DEFAULT_LAN_SCAN_SUBNETS)} on port ${scanPort}`);
   }
 
-  throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}`);
+  throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}. ${roomDiscoveryFallbackHint(discoveryPortForLocator(locator, args.port))}`);
 }
 
 async function resolveFromCandidates(
@@ -300,6 +315,55 @@ async function resolveFromCandidates(
   }
 
   return { errors };
+}
+
+async function resolveFromCandidateBatches(
+  candidates: ReturnType<typeof buildRoomDiscoveryCandidates>,
+  batchSize: number,
+  timeoutMs: number
+): Promise<{ endpoint?: { roomUrl: string; wsUrl: string } }> {
+  for (let index = 0; index < candidates.length; index += batchSize) {
+    const batch = candidates.slice(index, index + batchSize);
+    const results = await Promise.all(batch.map((candidate) => resolveCandidate(candidate, timeoutMs)));
+    const match = results.find((result) => result.endpoint);
+    if (match?.endpoint) {
+      return { endpoint: match.endpoint };
+    }
+  }
+
+  return {};
+}
+
+async function resolveCandidate(
+  candidate: ReturnType<typeof buildRoomDiscoveryCandidates>[number],
+  timeoutMs: number
+): Promise<{ endpoint?: { roomUrl: string; wsUrl: string }; error?: string }> {
+  try {
+    const response = await fetch(candidate.apiUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) {
+      return { error: `${candidate.label} returned HTTP ${response.status}` };
+    }
+
+    const state = await response.json() as RoomDiscoveryState;
+    const discoveredRoomUrl = roomUrlFromDiscovery(state, candidate);
+    if (!discoveredRoomUrl) {
+      return {
+        error: candidate.expectedRoomCode
+          ? `${candidate.label} did not match an active room`
+          : `${candidate.label} did not return a usable room`
+      };
+    }
+
+    return {
+      endpoint: {
+        roomUrl: discoveredRoomUrl,
+        wsUrl: roomUrlToWebSocket(discoveredRoomUrl)
+      }
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { error: `${candidate.label}: ${message}` };
+  }
 }
 
 function startClockSync(): void {

@@ -44,4 +44,24 @@ class RoomLocatorTest {
         assertEquals(1, candidates.size)
         assertEquals("http://192.168.1.12:5000/api/room", candidates.first().apiUrl)
     }
+
+    @Test
+    fun buildsDocumentedLanScanCandidates() {
+        val candidates = buildRoomDiscoveryCandidates("A1B2C3", 5000)
+
+        assertTrue(candidates.any { it.apiUrl == "http://192.168.1.1:5000/api/room" })
+        assertTrue(candidates.any { it.apiUrl == "http://172.20.10.254:5000/api/room" })
+        assertTrue(candidates.all { it.expectedRoomCode == "A1B2C3" })
+        assertTrue(formatLanScanSubnets().contains("192.168.86.1-254"))
+    }
+
+    @Test
+    fun discoveryFailureMessageNamesTriedRangesAndFallback() {
+        val message = roomDiscoveryFailureMessage("A1B2C3", 5000)
+
+        assertTrue(message.contains("Tried local hosts 10.0.2.2, 127.0.0.1, localhost"))
+        assertTrue(message.contains("scanned 192.168.0.1-254"))
+        assertTrue(message.contains("host:port shown on the host page"))
+        assertTrue(message.contains("192.168.1.12:5000"))
+    }
 }

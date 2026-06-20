@@ -11,6 +11,20 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 const val DEFAULT_ROOM_PORT = 4173
+val DISCOVERY_LOCAL_HOSTS = listOf("10.0.2.2", "127.0.0.1", "localhost")
+val LAN_SCAN_SUBNETS = listOf(
+    "192.168.0",
+    "192.168.1",
+    "192.168.2",
+    "192.168.4",
+    "192.168.86",
+    "192.168.178",
+    "10.0.0",
+    "10.0.1",
+    "10.0.2",
+    "172.16.0",
+    "172.20.10"
+)
 
 data class RoomDiscoveryCandidate(
     val apiUrl: String,
@@ -121,8 +135,28 @@ fun resolveRoomEndpoint(locator: String, defaultPort: Int = DEFAULT_ROOM_PORT): 
         return endpoint
     }
 
-    throw IllegalStateException("No BandCue room found for \"$normalized\".")
+    throw IllegalStateException(roomDiscoveryFailureMessage(normalized, defaultPort))
 }
+
+fun roomDiscoveryFailureMessage(locator: String, defaultPort: Int = DEFAULT_ROOM_PORT): String {
+    val normalized = normalizeRoomLocator(locator, defaultPort)
+    if (isPort(normalized) || isRoomCode(normalized)) {
+        val port = if (isPort(normalized)) normalized.toInt() else defaultPort
+        return "No BandCue room found for \"$normalized\". Tried local hosts ${DISCOVERY_LOCAL_HOSTS.joinToString(", ")} and scanned ${formatLanScanSubnets()} on port $port. ${manualDiscoveryFallback(port)}"
+    }
+
+    val explicitHost = parseHostAndPort(normalized, defaultPort)
+    if (explicitHost != null) {
+        return "No BandCue room found for \"$normalized\". Tried ${explicitHost.first}:${explicitHost.second}. ${manualDiscoveryFallback(explicitHost.second)}"
+    }
+
+    return "No BandCue room found for \"$normalized\". Use a room URL, room code, port, or host:port."
+}
+
+fun formatLanScanSubnets(): String = LAN_SCAN_SUBNETS.joinToString(", ") { "$it.1-254" }
+
+fun manualDiscoveryFallback(port: Int): String =
+    "If discovery is blocked by Wi-Fi isolation, firewall, VPN, or a different subnet, enter the host:port shown on the host page, such as 192.168.1.12:$port, or paste the full room URL."
 
 private fun resolveCandidates(candidates: List<RoomDiscoveryCandidate>): RoomEndpoint? {
     val pool = Executors.newFixedThreadPool(32)
@@ -171,15 +205,10 @@ private fun tryResolveRoomCandidate(candidate: RoomDiscoveryCandidate): RoomEndp
 }
 
 private fun localCandidates(port: Int, expectedRoomCode: String? = null): List<RoomDiscoveryCandidate> =
-    listOf(
-        roomDiscoveryCandidate("10.0.2.2", port, expectedRoomCode),
-        roomDiscoveryCandidate("127.0.0.1", port, expectedRoomCode),
-        roomDiscoveryCandidate("localhost", port, expectedRoomCode)
-    )
+    DISCOVERY_LOCAL_HOSTS.map { host -> roomDiscoveryCandidate(host, port, expectedRoomCode) }
 
 private fun lanScanCandidates(port: Int, expectedRoomCode: String? = null): List<RoomDiscoveryCandidate> {
-    val subnets = listOf("192.168.0", "192.168.1", "192.168.178", "10.0.0", "10.0.1", "172.16.0")
-    return subnets.flatMap { subnet ->
+    return LAN_SCAN_SUBNETS.flatMap { subnet ->
         (1..254).map { host -> roomDiscoveryCandidate("$subnet.$host", port, expectedRoomCode) }
     }
 }

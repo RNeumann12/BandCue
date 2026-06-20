@@ -31,10 +31,15 @@ const LAN_SCAN_TIMEOUT_MS = 350;
 const LAN_SCAN_SUBNETS = [
   "192.168.0",
   "192.168.1",
+  "192.168.2",
+  "192.168.4",
+  "192.168.86",
   "192.168.178",
   "10.0.0",
   "10.0.1",
-  "172.16.0"
+  "10.0.2",
+  "172.16.0",
+  "172.20.10"
 ];
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -765,9 +770,17 @@ async function scanLanForRoom(roomCode) {
 
   return {
     error: expectedRoomCode
-      ? `No room ${expectedRoomCode} found on common local networks at port ${port}`
-      : `No BandCue room found on common local networks at port ${port}`
+      ? `No room ${expectedRoomCode} found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
+      : `No BandCue room found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
   };
+}
+
+function formatLanScanSubnets() {
+  return LAN_SCAN_SUBNETS.map((subnet) => `${subnet}.1-254`).join(", ");
+}
+
+function manualDiscoveryFallback(port) {
+  return `If discovery is blocked by Wi-Fi isolation, firewall, VPN, or a different subnet, enter the host:port shown on the host page, such as 192.168.1.12:${port}, or paste the full room URL.`;
 }
 
 function normalizeRoomLocator(value) {

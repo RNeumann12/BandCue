@@ -17,6 +17,7 @@ const elements = {
   warnings: document.querySelector("#warnings"),
   devices: document.querySelector("#devices"),
   companionUrl: document.querySelector("#companionUrl"),
+  adapterHostPort: document.querySelector("#adapterHostPort"),
   hostPanel: document.querySelector("#hostPanel"),
   hostWarning: document.querySelector("#hostWarning"),
   armButton: document.querySelector("#armButton"),
@@ -278,6 +279,7 @@ function renderState(state) {
   document.body.dataset.transport = state.transport.status;
   setText(elements.roomCode, state.roomCode);
   setText(elements.companionUrl, state.companionUrl);
+  setText(elements.adapterHostPort, hostPortFromRoomUrl(state.companionUrl));
   setText(elements.transportBadge, formatStatus(state.transport.status));
   setText(elements.leaderName, leader ? leader.deviceName : "None");
   setText(elements.readySummary, `${readyAdapters.length} / ${desktopAdapters.length}`);
@@ -318,6 +320,7 @@ function getStableRoomSignature(state) {
   return JSON.stringify({
     roomCode: state.roomCode,
     companionUrl: state.companionUrl,
+    hostUrl: state.hostUrl,
     transport: state.transport,
     currentSong: state.currentSong,
     setlist: state.setlist,
@@ -326,6 +329,14 @@ function getStableRoomSignature(state) {
       .map(getStableClientSignature)
       .sort((a, b) => a.id.localeCompare(b.id))
   });
+}
+
+function hostPortFromRoomUrl(value) {
+  try {
+    return new URL(value).host;
+  } catch {
+    return "Unavailable";
+  }
 }
 
 function getStableClientSignature(client) {

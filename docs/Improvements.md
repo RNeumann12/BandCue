@@ -73,7 +73,7 @@ Stop is being treated like a transport command that must always touch the client
 
 ## 2. More Reliable Auto Discovery
 
-Status: `Open`
+Status: `In Progress`
 
 ### Problem
 
@@ -85,6 +85,8 @@ Some clients have problems connecting by room code or port. Auto discovery needs
 - Browser extension cannot use raw UDP discovery, so it checks local candidates and scans a fixed set of common LAN subnets.
 - Android builds local candidates plus a fixed LAN scan list.
 - Different clients have different discovery behavior, timeout windows, diagnostics, and subnet coverage.
+- 2026-06-20 implementation update: MuseScore now falls back from UDP discovery to the same common HTTP subnet scan style used by browser/Android clients; browser, Android, and shared TypeScript helpers use the same documented default subnet list; failure messages now name local/UDP/scan attempts and recommend host:port or full room URL fallback.
+- The host join panel now shows a copyable `host:port` adapter fallback next to the room QR/full URL.
 
 ### Suspected Cause
 
@@ -110,6 +112,7 @@ Discovery is split across platform-specific implementations with different netwo
 
 - Unit test shared candidate generation and room-code matching.
 - Add tests for timeout/error message composition.
+- 2026-06-20 automated checks: TypeScript room-locator tests cover LAN scan candidate generation and fallback diagnostics; Android RoomLocator tests cover documented LAN scan ranges and fallback message composition.
 - Manual test on at least: same machine, typical home Wi-Fi, phone hotspot, and Wi-Fi network with client isolation or blocked broadcast if available.
 - Record whether VPN, firewall, or multiple NICs were present for each failed repro.
 

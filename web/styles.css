@@ -452,6 +452,27 @@ select:focus {
   border: 2px solid var(--ink);
 }
 
+.join-fallback {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  border-left: 4px solid var(--accent);
+  padding-left: 10px;
+}
+
+.join-fallback span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.join-fallback strong {
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 1.08rem;
+  overflow-wrap: anywhere;
+}
+
 .mono {
   margin: 14px 0 0;
   overflow-wrap: anywhere;
