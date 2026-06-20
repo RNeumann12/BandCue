@@ -167,7 +167,7 @@ The reset button is unlabeled in Songsterr's accessibility tree, so the implemen
 
 ## 4. Setlist Duration And Host Auto-Stop
 
-Status: `Open`
+Status: `In Progress`
 
 ### Problem
 
@@ -179,6 +179,7 @@ The setlist is a good start, but BandCue has no way to track how long songs are.
 - Host UI displays elapsed time while transport is running.
 - Clients can report playback status, but no duration is currently part of the protocol.
 - The coordinator only returns to stopped state when a Stop request is accepted or a leader disconnect triggers Stop.
+- 2026-06-20 implementation update: protocol now accepts optional adapter-reported `durationMs`; the Songsterr browser extension reports finite media duration and current tab URL when available; the coordinator associates matching adapter duration with the current setlist song and auto-stops BandCue room state after the known duration without broadcasting Stop.
 
 ### Suspected Cause
 
@@ -205,6 +206,7 @@ BandCue has transport state but no song-length model. The coordinator cannot kno
 - Protocol/server tests for duration-driven auto-stop without broadcasting a Stop command.
 - UI tests or manual checks for elapsed display, end-of-song transition, and unknown-duration behavior.
 - Adapter tests for publishing duration only when it belongs to the current song.
+- 2026-06-20 automated checks: TypeScript room tests cover matching adapter-reported duration into current song/setlist metadata and duration-driven room auto-stop without broadcasting a Stop command.
 
 ### Open Questions
 

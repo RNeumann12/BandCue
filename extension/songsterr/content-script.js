@@ -6,6 +6,8 @@ function reportStatus() {
     type: "songsterrStatus",
     ready: true,
     title: document.title,
+    source: location.href,
+    durationMs: readSongDurationMs(),
     detail: lastControlDetail
   });
 }
@@ -134,6 +136,14 @@ function inferPlaybackState() {
   }
 
   return "unknown";
+}
+
+function readSongDurationMs() {
+  const durations = [...document.querySelectorAll("audio, video")]
+    .map((media) => media.duration)
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+  const durationSeconds = Math.max(0, ...durations);
+  return durationSeconds > 0 ? Math.round(durationSeconds * 1000) : undefined;
 }
 
 async function controlMediaElement(action) {

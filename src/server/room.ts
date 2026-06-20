@@ -15,6 +15,7 @@ import type {
   SafetyUpdate,
   ServerMessage,
   SetlistSong,
+  SongDurationSource,
   SetlistState,
   SetlistUpdate,
   TransportCommand,
@@ -55,6 +56,7 @@ export class RoomController {
     updatedAt: 0
   };
   private runningTimer?: NodeJS.Timeout;
+  private autoStopTimer?: NodeJS.Timeout;
   private pendingClockBroadcast?: NodeJS.Timeout;
 
   constructor(
@@ -212,13 +214,20 @@ export class RoomController {
       playback: status.playback ?? client.status?.playback,
       playbackDetail: status.playbackDetail ?? client.status?.playbackDetail,
       title: status.title ?? client.status?.title,
+      source: trimText(status.source ?? client.status?.source ?? "", 500) || undefined,
+      durationMs: sanitizeDurationMs(status.durationMs) ?? client.status?.durationMs,
+      durationSource: sanitizeDurationSource(status.durationSource) ?? client.status?.durationSource,
       detail: status.detail ?? client.status?.detail,
       lastCommand: status.lastCommand ?? client.status?.lastCommand
     };
+    const songDurationChanged = this.applyAdapterDurationToCurrentSong(client, nextStatus, now);
     const statusChanged = JSON.stringify(client.status ?? null) !== JSON.stringify(nextStatus);
     client.status = nextStatus;
     client.lastSeenAt = now;
-    if (statusChanged) {
+    if (songDurationChanged) {
+      this.scheduleAutoStopForCurrentSong();
+    }
+    if (statusChanged || songDurationChanged) {
       this.broadcastState();
     }
   }
@@ -272,6 +281,7 @@ export class RoomController {
       leaderId: client.id,
       updatedAt: update.updatedAt || now
     };
+    this.scheduleAutoStopForCurrentSong();
     this.broadcastState();
   }
 
@@ -304,6 +314,7 @@ export class RoomController {
       } else {
         this.currentSong = undefined;
       }
+      this.scheduleAutoStopForCurrentSong();
     }
 
     this.broadcastState();
@@ -350,6 +361,9 @@ export class RoomController {
     }
 
     this.transport = decision.nextState;
+    if (request.action === "stop") {
+      this.clearAutoStopTimer();
+    }
     const command: Omit<TransportCommand, "manualOffsetMs"> = {
       type: "transportCommand",
       action: request.action,
@@ -430,8 +444,98 @@ export class RoomController {
         status: "running",
         startedServerTime: scheduledServerTime
       };
+      this.scheduleAutoStopForCurrentSong();
       this.broadcastState();
     }, delayMs);
+  }
+
+  private scheduleAutoStopForCurrentSong(): void {
+    this.clearAutoStopTimer();
+
+    const durationMs = this.currentSong?.song?.durationMs;
+    const startedServerTime = this.transport.startedServerTime;
+    if (
+      this.transport.status !== "running" ||
+      this.transport.action !== "play" ||
+      !startedServerTime ||
+      !durationMs
+    ) {
+      return;
+    }
+
+    const sequenceId = this.transport.sequenceId;
+    const leaderId = this.transport.leaderId;
+    const delayMs = Math.max(0, startedServerTime + durationMs - Date.now());
+    this.autoStopTimer = setTimeout(() => {
+      if (
+        this.transport.status !== "running" ||
+        this.transport.action !== "play" ||
+        this.transport.sequenceId !== sequenceId
+      ) {
+        return;
+      }
+
+      const now = Date.now();
+      this.transport = {
+        status: "stopped",
+        leaderId,
+        action: "stop",
+        sequenceId: this.transport.sequenceId + 1,
+        scheduledServerTime: now
+      };
+      this.broadcastState();
+    }, delayMs);
+  }
+
+  private clearAutoStopTimer(): void {
+    if (!this.autoStopTimer) {
+      return;
+    }
+
+    clearTimeout(this.autoStopTimer);
+    this.autoStopTimer = undefined;
+  }
+
+  private applyAdapterDurationToCurrentSong(
+    client: RoomClientSummary,
+    status: Omit<AdapterStatus, "type">,
+    now: number
+  ): boolean {
+    const durationMs = sanitizeDurationMs(status.durationMs);
+    const currentSong = this.currentSong?.song;
+    if (!durationMs || !currentSong || !adapterStatusMatchesSong(status, currentSong)) {
+      return false;
+    }
+
+    if (
+      currentSong.durationMs === durationMs &&
+      currentSong.durationSource === "adapter"
+    ) {
+      return false;
+    }
+
+    const nextSong: SetlistSong = {
+      ...currentSong,
+      durationMs,
+      durationSource: "adapter"
+    };
+    this.currentSong = {
+      ...this.currentSong,
+      song: nextSong,
+      leaderId: this.currentSong?.leaderId ?? client.id,
+      updatedAt: now
+    };
+
+    const setlistIndex = this.setlist.songs.findIndex((song) => song.id === nextSong.id);
+    if (setlistIndex >= 0) {
+      this.setlist = {
+        ...this.setlist,
+        songs: this.setlist.songs.map((song, index) => index === setlistIndex ? nextSong : song),
+        updatedAt: now
+      };
+    }
+
+    return true;
   }
 
   private broadcastState(): void {
@@ -525,8 +629,70 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     title,
     sourceType,
     source: trimText(song.source ?? "", 500) || undefined,
+    durationMs: sanitizeDurationMs(song.durationMs),
+    durationSource: sanitizeDurationSource(song.durationSource),
     notes: trimText(song.notes ?? "", 500) || undefined
   };
+}
+
+function sanitizeDurationMs(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
+}
+
+function sanitizeDurationSource(value: SongDurationSource | undefined): SongDurationSource | undefined {
+  return value === "adapter" || value === "manual" ? value : undefined;
+}
+
+function adapterStatusMatchesSong(
+  status: Omit<AdapterStatus, "type">,
+  song: SetlistSong
+): boolean {
+  if (status.app !== song.sourceType) {
+    return false;
+  }
+
+  if (song.source && status.source && sameNormalizedSource(status.source, song.source)) {
+    return true;
+  }
+
+  const statusTitle = normalizeSongIdentity(status.title ?? "");
+  const songTitle = normalizeSongIdentity(song.title);
+  return Boolean(
+    statusTitle &&
+      songTitle &&
+      (statusTitle.includes(songTitle) || songTitle.includes(statusTitle))
+  );
+}
+
+function sameNormalizedSource(left: string, right: string): boolean {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    return (
+      leftUrl.hostname.toLowerCase() === rightUrl.hostname.toLowerCase() &&
+      normalizeSourcePath(leftUrl.pathname) === normalizeSourcePath(rightUrl.pathname)
+    );
+  } catch {
+    return normalizeSongIdentity(left) === normalizeSongIdentity(right);
+  }
+}
+
+function normalizeSourcePath(pathname: string): string {
+  return pathname.replace(/\/+$/, "").toLowerCase();
+}
+
+function normalizeSongIdentity(value: string): string {
+  return value
+    .replace(/\.(mscz|mscx)$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 function trimText(value: string, maxLength: number): string {

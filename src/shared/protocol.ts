@@ -23,6 +23,8 @@ export type AdapterCommandStatus = "pending" | "succeeded" | "failed";
 
 export type AdapterPlaybackState = "playing" | "stopped" | "unknown";
 
+export type SongDurationSource = "adapter" | "manual";
+
 export interface AdapterCapability {
   app: AppType;
   canPlay: boolean;
@@ -77,6 +79,9 @@ export interface AdapterStatus {
   playback?: AdapterPlaybackState;
   playbackDetail?: string;
   title?: string;
+  source?: string;
+  durationMs?: number;
+  durationSource?: SongDurationSource;
   detail?: string;
   lastCommand?: {
     action: AdapterCommandAction;
@@ -123,6 +128,8 @@ export interface SetlistSong {
   title: string;
   sourceType: SongSourceType;
   source?: string;
+  durationMs?: number;
+  durationSource?: SongDurationSource;
   notes?: string;
 }
 

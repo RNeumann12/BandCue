@@ -70,6 +70,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ready: Boolean(message.ready),
       app: "songsterr",
       title: selectStableTitle(message.title, tabIdentity),
+      source: message.source,
+      durationMs: message.durationMs,
+      durationSource: message.durationMs ? "adapter" : undefined,
       state: message.ready ? "ready" : "not-ready",
       detail: message.detail,
       lastCommand: latestCommand
@@ -368,6 +371,9 @@ async function reportActiveTabStatus() {
       ready,
       app: "songsterr",
       title: tab ? selectStableTitle(tab.title, tabIdentity) : lastStatus.title,
+      source: tab?.url || lastStatus.source,
+      durationMs: hasFreshContentScriptStatus ? lastStatus.durationMs : undefined,
+      durationSource: hasFreshContentScriptStatus ? lastStatus.durationSource : undefined,
       state: ready ? normalizeReadyState(lastStatus.state) : "not-ready",
       detail: ready
         ? getStableReadyDetail()
@@ -429,6 +435,9 @@ function normalizeAdapterStatus(status) {
     ready: Boolean(status.ready),
     app: "songsterr",
     title: status.title,
+    source: status.source,
+    durationMs: sanitizeDurationMs(status.durationMs),
+    durationSource: sanitizeDurationMs(status.durationMs) ? "adapter" : undefined,
     state: status.state ?? (status.ready ? "ready" : "not-ready"),
     detail: status.detail,
     lastCommand: status.lastCommand
@@ -439,10 +448,22 @@ function getAdapterStatusSignature(status) {
   return JSON.stringify({
     ready: status.ready,
     title: status.title || "",
+    source: status.source || "",
+    durationMs: status.durationMs || 0,
+    durationSource: status.durationSource || "",
     state: status.state || "",
     detail: status.detail || "",
     lastCommand: status.lastCommand || null
   });
+}
+
+function sanitizeDurationMs(value) {
+  if (!Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
 }
 
 function scheduleActiveTabStatusReport(delayMs = TAB_STATUS_DEBOUNCE_MS) {

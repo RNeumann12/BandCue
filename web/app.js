@@ -1168,7 +1168,10 @@ function formatSongMeta(song, index, total) {
   const position = index && total ? `${index} / ${total}` : "setlist";
   const source = formatSongSource(song.sourceType);
   const reference = song.source ? ` - ${song.source}` : "";
-  return `${position} - ${source}${reference}`;
+  const duration = song.durationMs
+    ? ` - ${formatElapsed(song.durationMs)} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
+    : "";
+  return `${position} - ${source}${duration}${reference}`;
 }
 
 function formatSongSource(sourceType) {
@@ -1187,6 +1190,8 @@ function normalizeSong(song) {
     title: song.title,
     sourceType: song.sourceType,
     source: song.source || undefined,
+    durationMs: sanitizeDurationMs(song.durationMs),
+    durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
     notes: song.notes || undefined
   };
 }
@@ -1232,6 +1237,8 @@ function normalizeStoredSong(song) {
     title: song.title.trim(),
     sourceType,
     source: typeof song.source === "string" ? song.source.trim() : "",
+    durationMs: sanitizeDurationMs(song.durationMs),
+    durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
     notes: typeof song.notes === "string" ? song.notes.trim() : ""
   };
 }
@@ -1288,6 +1295,20 @@ function clampManualOffset(value) {
   }
 
   return Math.max(-1000, Math.min(1000, Math.round(value)));
+}
+
+function sanitizeDurationMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(number);
+  return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
+}
+
+function normalizeDurationSource(value) {
+  return value === "adapter" || value === "manual" ? value : "manual";
 }
 
 function createId() {

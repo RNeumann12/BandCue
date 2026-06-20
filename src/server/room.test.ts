@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 import { RoomController } from "./room.js";
 
@@ -366,6 +366,130 @@ describe("RoomController", () => {
         }
       }
     });
+  });
+
+  it("associates matching adapter-reported duration with the current setlist song", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "setlistUpdate",
+      updatedAt: 1100,
+      songs: [{
+        id: "song-1",
+        title: "Correct Song",
+        sourceType: "songsterr",
+        source: "https://www.songsterr.com/a/wsa/correct-song-tab-s1"
+      }]
+    }, 1100);
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1200,
+      song: {
+        id: "song-1",
+        title: "Correct Song",
+        sourceType: "songsterr",
+        source: "https://www.songsterr.com/a/wsa/correct-song-tab-s1"
+      }
+    }, 1200);
+
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus",
+      app: "songsterr",
+      ready: true,
+      title: "Correct Song Tab by Artist",
+      source: "https://www.songsterr.com/a/wsa/correct-song-tab-s1?track=1",
+      durationMs: 184_500,
+      durationSource: "adapter"
+    }, 1300);
+
+    expect(room.getState(1400).currentSong?.song).toMatchObject({
+      id: "song-1",
+      durationMs: 184_500,
+      durationSource: "adapter"
+    });
+    expect(room.getState(1400).setlist.songs[0]).toMatchObject({
+      id: "song-1",
+      durationMs: 184_500,
+      durationSource: "adapter"
+    });
+  });
+
+  it("auto-stops the room state after a known duration without broadcasting stop", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const adapterMessages: string[] = [];
+      const room = new RoomController("ABC123", "http://room", "http://host", 100);
+      const host = room.addClient(undefined, {
+        type: "clientHello",
+        deviceName: "Host",
+        role: "host",
+        capabilities: []
+      }, 1000);
+      room.addClient(fakeSocket(adapterMessages), {
+        type: "clientHello",
+        deviceName: "Songsterr",
+        role: "desktop-adapter",
+        capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+      }, 1000);
+
+      room.handleMessage(host.id, {
+        type: "currentSongUpdate",
+        index: 1,
+        total: 1,
+        updatedAt: 1000,
+        song: {
+          id: "song-1",
+          title: "Short Song",
+          sourceType: "songsterr",
+          durationMs: 2_000,
+          durationSource: "adapter"
+        }
+      }, 1000);
+      room.handleMessage(host.id, {
+        type: "safetyUpdate",
+        armed: true,
+        updatedAt: 1000
+      }, 1000);
+      adapterMessages.length = 0;
+
+      room.handleMessage(host.id, {
+        type: "transportRequest",
+        action: "play",
+        requestedAt: 1000
+      }, 1000);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(room.getState(1100).transport.status).toBe("running");
+
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(room.getState(3100).transport).toMatchObject({
+        status: "stopped",
+        action: "stop",
+        sequenceId: 2
+      });
+      const stopCommands = adapterMessages
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === "transportCommand" && message.action === "stop");
+      expect(stopCommands).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects current song updates from companions", () => {
