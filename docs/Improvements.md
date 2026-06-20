@@ -26,7 +26,7 @@ This document tracks active reliability and workflow improvements for BandCue. K
 
 ## 1. Idempotent Stop
 
-Status: `Open`
+Status: `In Progress`
 
 ### Problem
 
@@ -37,6 +37,7 @@ For some clients, especially the browser extension and Android Songsterr app, pr
 - Browser extension stop currently pauses active media elements, then may fall through to clicking a detected transport button or dispatching a Space shortcut fallback when it cannot prove playback is active.
 - Android Songsterr stop uses the Android media session when available and accessibility fallback otherwise. Some Songsterr controls are toggle-like, so tapping the visible transport control after the app has already stopped can restart playback.
 - The coordinator marks transport stopped immediately after accepting a Stop request, but clients may already have auto-stopped before the command arrives.
+- 2026-06-20 implementation update: browser Stop now no-ops when playback appears stopped and never uses Space fallback for Stop; Android Stop now no-ops when media-session playback is stopped, and accessibility Stop only taps labelled pause/stop controls.
 
 ### Suspected Cause
 
@@ -61,7 +62,9 @@ Stop is being treated like a transport command that must always touch the client
 ### Test And Repro Notes
 
 - Unit test browser content-script stop logic with: active media, already-paused media, missing controls, and ambiguous toggle fallback.
-- Add Android JVM tests around stop decision logic where media session state is playing, paused, stopped, and unknown.
+- Android JVM tests cover stop decision logic where playback is playing, stopped, unknown with accessibility fallback, and unknown without a safe fallback.
+- Real-device check on 2026-06-20 with Samsung SM-F946B in large/foldable landscape layout: patched Android APK connected through ADB reverse to room `47B06D`; with Songsterr foreground but no active media session and accessibility disabled, a BandCue Stop command reported `failed` with `controlPath: none` and did not tap Songsterr.
+- Real-device check on 2026-06-20 with Samsung SM-F946B and BandCue Accessibility Fallback enabled: opened Songsterr `Bad Moon Rising` song screen in large/foldable layout, connected patched Android APK to room `FB1FCA`, issued BandCue Play then repeated Stop; Stop reported `failed` with `controlPath: android-accessibility` and detail `Accessibility fallback could not find a visible Songsterr pause control.`, confirming it did not tap unlabeled geometry/toggle controls.
 - Manual repro: start a Songsterr song, let Songsterr stop by itself, then press BandCue Stop twice. Playback must remain stopped.
 
 ### Open Questions

@@ -8,6 +8,13 @@ data class ScheduledCommand(
     val dueLocalAt: Long
 )
 
+enum class StopControlPlan {
+    NoOpAlreadyStopped,
+    MediaSessionPause,
+    AccessibilityConfidentPauseOnly,
+    FailClosed
+}
+
 fun scheduleTransportCommand(
     action: String,
     sequenceId: Int,
@@ -25,4 +32,17 @@ fun scheduleTransportCommand(
         manualOffsetMs = manualOffsetMs,
         dueLocalAt = localNow + delayMs
     )
+}
+
+fun decideStopControlPlan(
+    playbackState: String,
+    hasMediaController: Boolean,
+    accessibilityEnabled: Boolean
+): StopControlPlan {
+    return when {
+        playbackState == "stopped" -> StopControlPlan.NoOpAlreadyStopped
+        hasMediaController -> StopControlPlan.MediaSessionPause
+        accessibilityEnabled -> StopControlPlan.AccessibilityConfidentPauseOnly
+        else -> StopControlPlan.FailClosed
+    }
 }

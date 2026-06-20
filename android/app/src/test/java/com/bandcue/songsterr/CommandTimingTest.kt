@@ -19,4 +19,48 @@ class CommandTimingTest {
         assertEquals(7, command.sequenceId)
         assertEquals(9_500, command.dueLocalAt)
     }
+
+    @Test
+    fun stopIsNoOpWhenPlaybackAlreadyStopped() {
+        val plan = decideStopControlPlan(
+            playbackState = "stopped",
+            hasMediaController = true,
+            accessibilityEnabled = true
+        )
+
+        assertEquals(StopControlPlan.NoOpAlreadyStopped, plan)
+    }
+
+    @Test
+    fun stopUsesMediaSessionPauseWhenControllerCanReceivePause() {
+        val plan = decideStopControlPlan(
+            playbackState = "playing",
+            hasMediaController = true,
+            accessibilityEnabled = false
+        )
+
+        assertEquals(StopControlPlan.MediaSessionPause, plan)
+    }
+
+    @Test
+    fun stopAllowsOnlyConfidentAccessibilityFallbackWithoutController() {
+        val plan = decideStopControlPlan(
+            playbackState = "unknown",
+            hasMediaController = false,
+            accessibilityEnabled = true
+        )
+
+        assertEquals(StopControlPlan.AccessibilityConfidentPauseOnly, plan)
+    }
+
+    @Test
+    fun stopFailsClosedWhenPlaybackStateIsUnknownAndNoFallbackIsAvailable() {
+        val plan = decideStopControlPlan(
+            playbackState = "unknown",
+            hasMediaController = false,
+            accessibilityEnabled = false
+        )
+
+        assertEquals(StopControlPlan.FailClosed, plan)
+    }
 }

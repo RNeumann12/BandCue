@@ -56,6 +56,16 @@ async function controlSongsterr(action, resetBeforePlay = false) {
   const resetDetail = action === "play" && resetBeforePlay
     ? resetSongsterrPosition()
     : "";
+  const playbackState = inferPlaybackState();
+  if (action === "stop" && playbackState === "stopped") {
+    lastControlDetail = "Songsterr playback is already stopped; Stop was a no-op";
+    return {
+      ok: true,
+      detail: lastControlDetail,
+      controlPath: "no-op"
+    };
+  }
+
   const mediaControlled = await controlMediaElement(action);
   if (mediaControlled) {
     lastControlDetail = joinControlDetails(resetDetail, `Used native media ${action}`);
@@ -63,6 +73,15 @@ async function controlSongsterr(action, resetBeforePlay = false) {
       ok: true,
       detail: lastControlDetail,
       controlPath: "media-element"
+    };
+  }
+
+  if (action === "stop" && playbackState === "unknown") {
+    lastControlDetail = "Could not confirm Songsterr is playing; Stop did not use a toggle fallback";
+    return {
+      ok: false,
+      detail: lastControlDetail,
+      controlPath: "none"
     };
   }
 
@@ -76,7 +95,7 @@ async function controlSongsterr(action, resetBeforePlay = false) {
     };
   }
 
-  if (dispatchSpaceFallback()) {
+  if (action === "play" && dispatchSpaceFallback()) {
     lastControlDetail = joinControlDetails(resetDetail, `Used safe Space shortcut fallback for ${action}`);
     return {
       ok: true,
@@ -91,6 +110,30 @@ async function controlSongsterr(action, resetBeforePlay = false) {
     detail: lastControlDetail,
     controlPath: "none"
   };
+}
+
+function inferPlaybackState() {
+  const mediaElements = [...document.querySelectorAll("audio, video")];
+  if (mediaElements.some((media) => !media.paused && !media.ended)) {
+    return "playing";
+  }
+
+  if (mediaElements.length) {
+    return "stopped";
+  }
+
+  const visibleControls = [...document.querySelectorAll("button, [role='button']")]
+    .filter(isVisible)
+    .map(getControlLabel)
+    .filter(Boolean);
+  if (visibleControls.some((label) => /\b(pause|stop)\b/i.test(label))) {
+    return "playing";
+  }
+  if (visibleControls.some((label) => /\b(play|resume|start)\b/i.test(label))) {
+    return "stopped";
+  }
+
+  return "unknown";
 }
 
 async function controlMediaElement(action) {

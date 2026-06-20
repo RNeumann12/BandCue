@@ -161,6 +161,10 @@ class BandCueAccessibilityService : AccessibilityService() {
     ): TransportCandidate? {
         val candidates = mutableListOf<TransportCandidate>()
         collectTransportCandidates(root, action, candidates)
+        if (action == "stop") {
+            return candidates.maxByOrNull { it.score }
+        }
+
         return candidates.maxByOrNull { it.score }
             ?: findStructuredTransportCandidate(root)
             ?: findGeometryTransportCandidate(root)

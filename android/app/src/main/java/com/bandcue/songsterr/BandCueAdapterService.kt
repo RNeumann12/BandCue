@@ -316,6 +316,43 @@ class BandCueAdapterService : Service() {
         val canSeek = controller != null && controllerSupportsSeek(controller)
         val resetNeedsAccessibility = wantsReset && !canSeek && BandCueAccessibilityService.isEnabled()
 
+        if (command.action == "stop") {
+            val stopPlan = decideStopControlPlan(
+                playbackState = playbackFromController(controller),
+                hasMediaController = controller != null,
+                accessibilityEnabled = BandCueAccessibilityService.isEnabled()
+            )
+            when (stopPlan) {
+                StopControlPlan.NoOpAlreadyStopped -> {
+                    latestCommand = AdapterCommandStatus(
+                        action = command.action,
+                        sequenceId = command.sequenceId,
+                        status = "succeeded",
+                        at = now,
+                        detail = "Songsterr playback is already stopped; Stop was a no-op.",
+                        controlPath = "no-op"
+                    )
+                    publishAdapterStatus(
+                        stateOverride = "last-command-succeeded",
+                        playbackOverride = "stopped"
+                    )
+                    publishUiStatus()
+                    return
+                }
+                StopControlPlan.FailClosed -> {
+                    reportCommandResult(
+                        command = command,
+                        status = "failed",
+                        detail = "Could not confirm Songsterr is playing and no safe pause/stop control is available.",
+                        controlPath = "none"
+                    )
+                    return
+                }
+                StopControlPlan.MediaSessionPause,
+                StopControlPlan.AccessibilityConfidentPauseOnly -> Unit
+            }
+        }
+
         if (controller != null && !resetNeedsAccessibility) {
             try {
                 if (command.action == "play") {
