@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("assembleDebug", "test", "clean")]
+  [ValidateSet("assembleDebug", "assembleRelease", "test", "clean")]
   [string]$Task = "assembleDebug",
   [string]$GradleVersion = "8.10.2"
 )
@@ -102,6 +102,13 @@ try {
 
 if ($Task -eq "assembleDebug") {
   $apk = Join-Path $AndroidDir "app\build\outputs\apk\debug\app-debug.apk"
+  if (Test-Path $apk) {
+    Write-Host "APK: $apk"
+  }
+}
+
+if ($Task -eq "assembleRelease") {
+  $apk = Join-Path $AndroidDir "app\build\outputs\apk\release\app-release.apk"
   if (Test-Path $apk) {
     Write-Host "APK: $apk"
   }

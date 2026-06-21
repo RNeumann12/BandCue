@@ -1,6 +1,6 @@
 {
   "name": "bandcue",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "preflight": "tsx src/tools/preflight.ts",
     "package:extension": "tsx src/tools/package-extension.ts",
     "build:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1",
+    "build:android:release": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Task assembleRelease",
     "test:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Task test",
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit",
