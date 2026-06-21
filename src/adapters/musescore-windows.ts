@@ -15,6 +15,7 @@ import {
   scanMuseScoreCatalog,
   type LocalScoreCatalog
 } from "./musescore-catalog.js";
+import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
 import {
   calculateClockSample,
   calculateJitterMs,
@@ -867,17 +868,18 @@ function playbackDetail(): string {
 }
 
 function scoreMismatchDetail(status: MuseScoreStatus | undefined): string | undefined {
-  if (!status?.ready || currentSong?.sourceType !== "musescore") {
+  if (!status?.ready || !appliesToMuseScore(currentSong)) {
     return undefined;
   }
 
-  const expected = normalizeTitle(currentSong.source || currentSong.title);
+  const reference = museScoreReference(currentSong) || currentSong?.title || "";
+  const expected = normalizeTitle(reference);
   const actual = normalizeTitle(status.title || status.windowTitle || "");
   if (!expected || !actual || actual.includes(expected) || expected.includes(actual)) {
     return undefined;
   }
 
-  return `MuseScore is ready, but active score "${status.title || status.windowTitle}" does not match current song "${currentSong.source || currentSong.title}"`;
+  return `MuseScore is ready, but active score "${status.title || status.windowTitle}" does not match current song "${reference}"`;
 }
 
 function normalizeTitle(value: string): string {

@@ -358,7 +358,7 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
 }
 
 async function openSongsterrFromRoom(currentSong, sequenceId) {
-  if (currentSong?.sourceType !== "songsterr" || !normalizeSongsterrUrl(currentSong.source)) {
+  if (!normalizeSongsterrUrl(songsterrReference(currentSong))) {
     reportCommandStatus({
       action: "open-song",
       sequenceId,
@@ -599,8 +599,8 @@ function getSongsterrTabIdentity(tab) {
 }
 
 async function ensureSongsterrTabs(currentSong, options = {}) {
-  const url = normalizeSongsterrUrl(currentSong?.source);
-  if (currentSong?.sourceType === "songsterr") {
+  const url = normalizeSongsterrUrl(songsterrReference(currentSong));
+  if (songsterrReference(currentSong)) {
     if (!url) {
       return [];
     }
@@ -677,7 +677,7 @@ async function requestSongsterrStatusFromTabs(tabs) {
 }
 
 async function findSongsterrTabs(currentSong) {
-  const targetUrl = normalizeSongsterrUrl(currentSong?.source);
+  const targetUrl = normalizeSongsterrUrl(songsterrReference(currentSong));
   const tabs = (await chrome.tabs.query({}))
     .filter((tab) => isSongsterrUrl(tab.url || ""));
   if (!targetUrl) {
@@ -696,6 +696,18 @@ async function findSongsterrTabs(currentSong) {
   });
 
   return matching.length ? matching : tabs;
+}
+
+// Resolve the Songsterr URL for a song, mirroring src/shared/song-sources.ts:
+// the dedicated songsterrUrl field wins, otherwise the primary source is used
+// when sourceType is "songsterr". Lets a single setlist entry target both
+// Songsterr and MuseScore at once.
+function songsterrReference(song) {
+  const dedicated = song?.songsterrUrl?.trim();
+  if (dedicated) {
+    return dedicated;
+  }
+  return song?.sourceType === "songsterr" ? (song.source?.trim() ?? "") : "";
 }
 
 function normalizeSongsterrUrl(value) {

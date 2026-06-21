@@ -6,8 +6,19 @@ import org.json.JSONObject
 data class CurrentSong(
     val title: String,
     val sourceType: String,
-    val source: String?
-)
+    val source: String?,
+    val songsterrUrl: String? = null
+) {
+    /**
+     * Resolve the Songsterr URL for this song, mirroring
+     * src/shared/song-sources.ts: the dedicated songsterrUrl field wins,
+     * otherwise the primary source is used when sourceType is "songsterr". Lets
+     * a single setlist entry target both Songsterr and MuseScore at once.
+     */
+    val songsterrReference: String?
+        get() = songsterrUrl?.takeIf { it.isNotBlank() }
+            ?: source?.takeIf { sourceType == "songsterr" && it.isNotBlank() }
+}
 
 data class TransportCommand(
     val action: String,
@@ -104,13 +115,7 @@ object ProtocolJson {
         val song = message
             .optJSONObject("currentSong")
             ?.optJSONObject("song")
-            ?.let {
-                CurrentSong(
-                    title = it.optString("title"),
-                    sourceType = it.optString("sourceType"),
-                    source = it.optString("source").takeIf { source -> source.isNotBlank() }
-                )
-            }
+            ?.let { parseSong(it) }
 
         return TransportCommand(
             action = message.optString("action"),
@@ -130,13 +135,7 @@ object ProtocolJson {
         val song = message
             .optJSONObject("currentSong")
             ?.optJSONObject("song")
-            ?.let {
-                CurrentSong(
-                    title = it.optString("title"),
-                    sourceType = it.optString("sourceType"),
-                    source = it.optString("source").takeIf { source -> source.isNotBlank() }
-                )
-            }
+            ?.let { parseSong(it) }
 
         return OpenSongCommand(
             sequenceId = message.optInt("sequenceId"),
@@ -150,10 +149,13 @@ object ProtocolJson {
             else -> null
         } ?: return null
 
-        return CurrentSong(
-            title = song.optString("title"),
-            sourceType = song.optString("sourceType"),
-            source = song.optString("source").takeIf { it.isNotBlank() }
-        )
+        return parseSong(song)
     }
+
+    private fun parseSong(song: JSONObject): CurrentSong = CurrentSong(
+        title = song.optString("title"),
+        sourceType = song.optString("sourceType"),
+        source = song.optString("source").takeIf { it.isNotBlank() },
+        songsterrUrl = song.optString("songsterrUrl").takeIf { it.isNotBlank() }
+    )
 }

@@ -279,7 +279,7 @@ class BandCueAdapterService : Service() {
         publishAdapterStatus(stateOverride = "command-pending")
         publishUiStatus()
 
-        val songUrl = command.currentSong?.source?.takeIf { command.currentSong.sourceType == "songsterr" }
+        val songUrl = command.currentSong?.songsterrReference
         val openedSongForCommand = if (!songUrl.isNullOrBlank() && findSongsterrController() == null && shouldOpenSongForCommand()) {
             openSongsterrUrl(songUrl)
         } else {
@@ -310,8 +310,8 @@ class BandCueAdapterService : Service() {
         publishAdapterStatus(stateOverride = "command-pending")
         publishUiStatus()
 
-        val songUrl = song?.source
-        if (song?.sourceType != "songsterr" || songUrl.isNullOrBlank()) {
+        val songUrl = song?.songsterrReference
+        if (songUrl.isNullOrBlank()) {
             latestCommand = AdapterCommandStatus(
                 action = "open-song",
                 sequenceId = command.sequenceId,
@@ -500,7 +500,7 @@ class BandCueAdapterService : Service() {
         val notificationEnabled = isNotificationListenerEnabled()
         val controller = if (notificationEnabled) findSongsterrController() else null
         val playback = playbackOverride ?: playbackFromController(controller)
-        val songUrl = currentSong?.source?.takeIf { currentSong?.sourceType == "songsterr" }
+        val songUrl = currentSong?.songsterrReference
         val songOpenable = !songUrl.isNullOrBlank() && canOpenSongsterrUrl(songUrl)
         val title = mediaTitle(controller) ?: currentSong?.title
 
@@ -567,7 +567,7 @@ class BandCueAdapterService : Service() {
     }
 
     private fun openCurrentSong() {
-        val source = currentSong?.source?.takeIf { currentSong?.sourceType == "songsterr" }
+        val source = currentSong?.songsterrReference
         if (source.isNullOrBlank()) {
             connectionDetail = "No current Songsterr URL to open."
             publishUiStatus()

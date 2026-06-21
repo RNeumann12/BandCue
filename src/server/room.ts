@@ -23,6 +23,7 @@ import type {
   TransportState
 } from "../shared/protocol.js";
 import { DEFAULT_SCHEDULE_DELAY_MS, decideTransportRequest } from "../shared/transport.js";
+import { appliesToMuseScore, appliesToSongsterr } from "../shared/song-sources.js";
 
 interface RoomClient extends RoomClientSummary {
   socket?: WebSocket;
@@ -407,10 +408,9 @@ export class RoomController {
       return;
     }
 
-    if (
-      !this.currentSong?.song ||
-      !["songsterr", "musescore"].includes(this.currentSong.song.sourceType)
-    ) {
+    const currentSong = this.currentSong;
+    const song = currentSong?.song;
+    if (!currentSong || !song || (!appliesToSongsterr(song) && !appliesToMuseScore(song))) {
       this.send(client, {
         type: "error",
         message: "Select a current Songsterr or MuseScore setlist song before opening it."
@@ -424,7 +424,7 @@ export class RoomController {
       leaderId: client.id,
       sequenceId: this.openSongSequence,
       requestedAt: request.requestedAt || now,
-      currentSong: this.currentSong
+      currentSong
     };
     this.broadcast(command);
   }
@@ -630,6 +630,8 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     title,
     sourceType,
     source: trimText(song.source ?? "", 500) || undefined,
+    songsterrUrl: trimText(song.songsterrUrl ?? "", 500) || undefined,
+    museScoreSource: trimText(song.museScoreSource ?? "", 500) || undefined,
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationSource(song.durationSource),
     notes: trimText(song.notes ?? "", 500) || undefined

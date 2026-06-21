@@ -154,6 +154,19 @@ export interface SetlistSong {
   title: string;
   sourceType: SongSourceType;
   source?: string;
+  /**
+   * Optional Songsterr tab URL for this song. Lets a single setlist entry be
+   * opened in Songsterr (e.g. by band mates) independently of its primary
+   * source. When unset, a Songsterr adapter falls back to `source` if
+   * `sourceType` is "songsterr".
+   */
+  songsterrUrl?: string;
+  /**
+   * Optional local MuseScore score reference (relative path or title) for this
+   * song. Lets the same entry also be opened in MuseScore. When unset, the
+   * MuseScore adapter falls back to `source` if `sourceType` is "musescore".
+   */
+  museScoreSource?: string;
   durationMs?: number;
   durationSource?: SongDurationSource;
   notes?: string;

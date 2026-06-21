@@ -32,6 +32,8 @@ const elements = {
   songTitleInput: document.querySelector("#songTitleInput"),
   songSourceTypeInput: document.querySelector("#songSourceTypeInput"),
   songSourceInput: document.querySelector("#songSourceInput"),
+  songSongsterrUrlInput: document.querySelector("#songSongsterrUrlInput"),
+  songMuseScoreSourceInput: document.querySelector("#songMuseScoreSourceInput"),
   songNotesInput: document.querySelector("#songNotesInput"),
   previousSongButton: document.querySelector("#previousSongButton"),
   nextSongButton: document.querySelector("#nextSongButton"),
@@ -724,6 +726,8 @@ function addSetlistSong() {
     title,
     sourceType: elements.songSourceTypeInput.value,
     source: elements.songSourceInput.value.trim(),
+    songsterrUrl: elements.songSongsterrUrlInput.value.trim(),
+    museScoreSource: elements.songMuseScoreSourceInput.value.trim(),
     notes: elements.songNotesInput.value.trim()
   };
 
@@ -842,39 +846,42 @@ function publishSafety(update) {
 function openCurrentSong() {
   const song = getCurrentOpenableSong();
   if (!song) {
-    setText(elements.hostWarning, "Current song must be a Songsterr URL or MuseScore setlist item.");
+    setText(elements.hostWarning, "Current song needs a Songsterr URL or a MuseScore score.");
     return;
   }
 
+  // The room broadcasts the open request to every adapter; each adapter resolves
+  // its own reference (Songsterr URL or MuseScore score), so a single song can
+  // open on both at once. We only inspect connected adapters here for feedback
+  // and for the local Songsterr browser-tab fallback.
   const requestSent = send({ type: "openSongRequest", requestedAt: Date.now() });
   const songTitle = song.title || "current song";
-  const targetAdapters = lastState?.clients.filter(
-    (device) => device.role === "desktop-adapter" && device.status?.app === song.sourceType
-  ) ?? [];
+  const songsterrUrl = getSongsterrUrl(song);
+  const opensMuseScore = appliesToMuseScore(song);
 
-  if (song.sourceType === "songsterr" && (!requestSent || !targetAdapters.length)) {
-    const url = getSongsterrUrl(song);
-    window.open(url, "_blank", "noopener,noreferrer");
-    setText(
-      elements.hostWarning,
-      requestSent
-        ? `No Songsterr adapter connected; opened ${songTitle} locally.`
-        : `Room connection is not ready; opened ${songTitle} locally.`
-    );
-    return;
+  const adapters = lastState?.clients.filter((device) => device.role === "desktop-adapter") ?? [];
+  const songsterrAdapters = adapters.filter((device) => device.status?.app === "songsterr");
+  const museScoreAdapters = adapters.filter((device) => device.status?.app === "musescore");
+  const messages = [];
+
+  if (songsterrUrl) {
+    if (requestSent && songsterrAdapters.length) {
+      messages.push(`asked ${songsterrAdapters.length} Songsterr adapter${songsterrAdapters.length === 1 ? "" : "s"}`);
+    } else {
+      window.open(songsterrUrl, "_blank", "noopener,noreferrer");
+      messages.push(requestSent ? "opened Songsterr locally (no adapter)" : "opened Songsterr locally (room not ready)");
+    }
   }
 
-  if (!requestSent) {
-    setText(elements.hostWarning, `Room connection is not ready; cannot ask MuseScore adapters to open ${songTitle}.`);
-    return;
+  if (opensMuseScore) {
+    if (requestSent && museScoreAdapters.length) {
+      messages.push(`asked ${museScoreAdapters.length} MuseScore adapter${museScoreAdapters.length === 1 ? "" : "s"}`);
+    } else {
+      messages.push(requestSent ? "MuseScore skipped (no adapter connected)" : "MuseScore skipped (room not ready)");
+    }
   }
 
-  if (!targetAdapters.length) {
-    setText(elements.hostWarning, `No ${formatSongSource(song.sourceType)} adapter connected for ${songTitle}.`);
-    return;
-  }
-
-  setText(elements.hostWarning, `Asked ${targetAdapters.length} ${formatSongSource(song.sourceType)} adapter${targetAdapters.length === 1 ? "" : "s"} to open ${songTitle}.`);
+  setText(elements.hostWarning, `Open ${songTitle}: ${messages.join("; ")}.`);
 }
 
 function getCurrentOpenableSong() {
@@ -883,23 +890,42 @@ function getCurrentOpenableSong() {
     return undefined;
   }
 
-  if (song.sourceType === "musescore") {
-    return song;
-  }
-
-  if (song.sourceType === "songsterr" && getSongsterrUrl(song)) {
+  if (appliesToMuseScore(song) || getSongsterrUrl(song)) {
     return song;
   }
 
   return undefined;
 }
 
+// Per-app reference resolvers, mirroring src/shared/song-sources.ts: a dedicated
+// field wins, otherwise the primary source is used when its type matches.
+function songsterrReference(song) {
+  const dedicated = song?.songsterrUrl?.trim();
+  if (dedicated) {
+    return dedicated;
+  }
+  return song?.sourceType === "songsterr" ? (song.source?.trim() ?? "") : "";
+}
+
+function museScoreReference(song) {
+  const dedicated = song?.museScoreSource?.trim();
+  if (dedicated) {
+    return dedicated;
+  }
+  return song?.sourceType === "musescore" ? (song.source?.trim() ?? "") : "";
+}
+
+function appliesToMuseScore(song) {
+  return Boolean(song) && (song.sourceType === "musescore" || Boolean(song.museScoreSource?.trim()));
+}
+
 function getSongsterrUrl(song) {
-  if (song?.sourceType !== "songsterr" || !song.source) {
+  const reference = songsterrReference(song);
+  if (!reference) {
     return "";
   }
   try {
-    const url = new URL(song.source);
+    const url = new URL(reference);
     return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : "";
   } catch {
     return "";
@@ -1211,7 +1237,11 @@ function defaultDeviceName() {
 function formatSongMeta(song, index, total) {
   const position = index && total ? `${index} / ${total}` : "setlist";
   const source = formatSongSource(song.sourceType);
-  const reference = song.source ? ` - ${song.source}` : "";
+  const references = [];
+  if (song.source) references.push(song.source);
+  if (song.songsterrUrl) references.push(`Songsterr: ${song.songsterrUrl}`);
+  if (song.museScoreSource) references.push(`MuseScore: ${song.museScoreSource}`);
+  const reference = references.length ? ` - ${references.join(" | ")}` : "";
   const duration = song.durationMs
     ? ` - ${formatElapsed(song.durationMs)} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
     : "";
@@ -1234,6 +1264,8 @@ function normalizeSong(song) {
     title: song.title,
     sourceType: song.sourceType,
     source: song.source || undefined,
+    songsterrUrl: song.songsterrUrl || undefined,
+    museScoreSource: song.museScoreSource || undefined,
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
     notes: song.notes || undefined
@@ -1281,6 +1313,8 @@ function normalizeStoredSong(song) {
     title: song.title.trim(),
     sourceType,
     source: typeof song.source === "string" ? song.source.trim() : "",
+    songsterrUrl: typeof song.songsterrUrl === "string" ? song.songsterrUrl.trim() : "",
+    museScoreSource: typeof song.museScoreSource === "string" ? song.museScoreSource.trim() : "",
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
     notes: typeof song.notes === "string" ? song.notes.trim() : ""

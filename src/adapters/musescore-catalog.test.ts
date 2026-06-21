@@ -61,4 +61,38 @@ describe("MuseScore catalog", () => {
       count: 2
     });
   });
+
+  it("matches a Songsterr-primary song via its dedicated museScoreSource", () => {
+    const entries: LocalScoreCatalogEntry[] = [
+      {
+        title: "Creep",
+        relativePath: "Radiohead/Creep.mscz",
+        absolutePath: "C:/Scores/Radiohead/Creep.mscz"
+      }
+    ];
+
+    // The song's primary source is a Songsterr URL (for band mates), but it also
+    // carries a MuseScore reference so this adapter can still open it.
+    const match = matchMuseScoreSong({
+      id: "song-3",
+      title: "Creep",
+      sourceType: "songsterr",
+      source: "https://www.songsterr.com/a/wsa/radiohead-creep-tab-s12",
+      museScoreSource: "Radiohead/Creep"
+    }, entries);
+
+    expect(match.status).toBe("matched");
+    expect(matchedCatalogEntry(match, entries)?.relativePath).toBe("Radiohead/Creep.mscz");
+  });
+
+  it("is not-applicable when a song has neither a MuseScore type nor reference", () => {
+    const match = matchMuseScoreSong({
+      id: "song-4",
+      title: "Creep",
+      sourceType: "songsterr",
+      source: "https://www.songsterr.com/a/wsa/radiohead-creep-tab-s12"
+    }, []);
+
+    expect(match.status).toBe("not-applicable");
+  });
 });

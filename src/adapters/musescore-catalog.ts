@@ -1,6 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { basename, extname, relative, resolve, sep } from "node:path";
 import type { SetlistSong, SongCatalogEntry, SongCatalogMatch } from "../shared/protocol.js";
+import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
 
 export interface LocalScoreCatalogEntry extends SongCatalogEntry {
   absolutePath: string;
@@ -56,16 +57,17 @@ export function matchMuseScoreSong(
   song: SetlistSong | undefined,
   entries: LocalScoreCatalogEntry[]
 ): SongCatalogMatch {
-  if (!song || song.sourceType !== "musescore") {
+  if (!appliesToMuseScore(song)) {
     return {
       status: "not-applicable",
       detail: "No current MuseScore song is selected."
     };
   }
 
-  const expectedSource = normalizeIdentity(song.source ?? "");
-  const expectedTitle = normalizeIdentity(song.title);
-  const sourceLooksLikePath = Boolean(song.source && /[\\/]/.test(song.source));
+  const reference = museScoreReference(song);
+  const expectedSource = normalizeIdentity(reference);
+  const expectedTitle = normalizeIdentity(song?.title ?? "");
+  const sourceLooksLikePath = Boolean(reference && /[\\/]/.test(reference));
   const sourceMatches = expectedSource
     ? entries.filter((entry) => {
       const relativePath = normalizeIdentity(entry.relativePath);
@@ -109,7 +111,7 @@ export function matchMuseScoreSong(
   return {
     status: "missing",
     count: 0,
-    detail: `No local MuseScore file matched "${song.source || song.title}".`
+    detail: `No local MuseScore file matched "${reference || song?.title}".`
   };
 }
 
