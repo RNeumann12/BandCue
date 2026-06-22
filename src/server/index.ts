@@ -8,6 +8,7 @@ import { WebSocketServer } from "ws";
 import type { ClientHello, ClientMessage } from "../shared/protocol.js";
 import { RoomController } from "./room.js";
 import { startDiscoveryResponder } from "./discovery.js";
+import { selectLanCandidates } from "../shared/lan-address.js";
 
 const PORT = Number(process.env.PORT ?? 4173);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -17,19 +18,8 @@ const ROOM_CODE = randomBytes(3).toString("hex").toUpperCase();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, "../../web");
 
-function getLanAddress(): string {
-  for (const addresses of Object.values(networkInterfaces())) {
-    for (const address of addresses ?? []) {
-      if (address.family === "IPv4" && !address.internal) {
-        return address.address;
-      }
-    }
-  }
-
-  return "127.0.0.1";
-}
-
-const lanAddress = process.env.PUBLIC_HOST ?? getLanAddress();
+const lanCandidates = selectLanCandidates(networkInterfaces());
+const lanAddress = process.env.PUBLIC_HOST ?? lanCandidates[0] ?? "127.0.0.1";
 const baseUrl = `http://${lanAddress}:${PORT}`;
 const localBaseUrl = `http://127.0.0.1:${PORT}`;
 const companionUrl = `${baseUrl}/?token=${encodeURIComponent(ROOM_TOKEN)}`;
@@ -158,6 +148,11 @@ server.listen(PORT, HOST, () => {
   console.log(`Same-machine room:  ${localCompanionUrl}`);
   console.log(`Room code:          ${ROOM_CODE}`);
   console.log(`WebSocket endpoint: ws://${lanAddress}:${PORT}/ws?token=${ROOM_TOKEN}`);
+  const otherLans = lanCandidates.filter((address) => address !== lanAddress);
+  if (otherLans.length) {
+    console.log(`Other LAN IPs:      ${otherLans.join(", ")}`);
+    console.log(`  If clients can't reach ${lanAddress}, set PUBLIC_HOST=<ip> to one of these.`);
+  }
   console.log(`Adapter locator:    ${ROOM_CODE} or ${PORT}`);
   console.log("");
   console.log("Startup checks:");

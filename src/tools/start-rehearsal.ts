@@ -17,11 +17,23 @@ const coordinatorPort = process.env.BANDCUE_PORT || process.env.PORT || "4173";
 // extension from auto-opening tabs on this machine.
 const bridgePort = resolveBridgePort(process.argv.slice(2));
 
+// Pin the LAN IP advertised in the room URL/QR from one place. Use this when
+// auto-detection picks the wrong interface (multiple physical LANs, or a virtual
+// adapter that slips through): `npm run dev:all -- --public-host 192.168.178.38`,
+// `--public-host=192.168.178.38`, or the BANDCUE_PUBLIC_HOST env var. It flows
+// to the coordinator as PUBLIC_HOST, which src/server/index.ts honors.
+const publicHost = resolvePublicHost(process.argv.slice(2));
+
 let coordinator: ChildProcess | undefined;
 let museScore: ChildProcess | undefined;
 
+if (publicHost) {
+  console.log(`Pinning advertised LAN address to ${publicHost} (PUBLIC_HOST).`);
+}
+
 coordinator = spawnNpm(["run", "dev"], {
-  stdio: ["inherit", "pipe", "pipe"]
+  stdio: ["inherit", "pipe", "pipe"],
+  env: publicHost ? { ...process.env, PUBLIC_HOST: publicHost } : process.env
 });
 
 startMuseScore();
@@ -73,11 +85,15 @@ function startMuseScore(): void {
 // shell — otherwise `spawn` throws EINVAL. When running through a shell we must
 // also quote arguments ourselves, since args containing spaces (e.g. the
 // MuseScore name) would otherwise be split into separate tokens.
-function spawnNpm(args: string[], options: { stdio: SpawnOptions["stdio"] }): ChildProcess {
+function spawnNpm(
+  args: string[],
+  options: { stdio: SpawnOptions["stdio"]; env?: SpawnOptions["env"] }
+): ChildProcess {
   const useShell = process.platform === "win32";
   const finalArgs = useShell ? args.map(quoteArg) : args;
   return spawn(npmCommand, finalArgs, {
     stdio: options.stdio,
+    env: options.env,
     shell: useShell
   });
 }
@@ -109,6 +125,23 @@ function resolveBridgePort(argv: string[]): string {
     return "";
   }
   return normalizeBridgePort(fromEnv) || DEFAULT_BRIDGE_PORT;
+}
+
+// Resolves the LAN IP/host to advertise, or "" when unset. Accepts
+// `--public-host 192.168.178.38`, `--public-host=192.168.178.38`, or the
+// BANDCUE_PUBLIC_HOST env var.
+function resolvePublicHost(argv: string[]): string {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--public-host") {
+      return (argv[index + 1] ?? "").trim();
+    }
+    if (arg?.startsWith("--public-host=")) {
+      return arg.slice("--public-host=".length).trim();
+    }
+  }
+
+  return process.env.BANDCUE_PUBLIC_HOST?.trim() ?? "";
 }
 
 function normalizeBridgePort(value: string | undefined): string {
