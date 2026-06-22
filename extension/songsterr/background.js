@@ -255,6 +255,14 @@ async function connect() {
         detail: `Songsterr ${message.action} command scheduled${formatManualOffset(manualOffsetMs)}`,
         at: Date.now()
       });
+      // Get the tab onto the right song when the count-in *starts*, not when it
+      // reaches zero. Loading/navigating a tab takes longer than the count-in, so
+      // doing it at play time reloads the page on the downbeat and throws the band
+      // out of sync. ensureSongsterrTabs is a no-op when the tab is already on the
+      // song, so an already-open tab is never reloaded.
+      if (message.action === "play") {
+        ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
+      }
       setTimeout(() => {
         sendTransportToSongsterr(
           message.action,
@@ -637,6 +645,17 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
       return [];
     }
 
+    // No tab is on this exact song. Prefer reusing an already-open Songsterr tab
+    // by navigating it to the new song -- spawning a fresh tab is slow and resets
+    // the clock/status handshake, throwing the room out of sync. Only fall back
+    // to opening a new tab when no Songsterr tab exists yet.
+    const reusable = (await findSongsterrTabs())[0];
+    if (reusable?.id) {
+      const navigated = await navigateSongsterrTab(reusable, url, Boolean(options.active));
+      const loaded = navigated.id ? await waitForTabReady(navigated.id, 7000) : undefined;
+      return [loaded || navigated];
+    }
+
     const tab = await chrome.tabs.create({ url, active: Boolean(options.active) });
     const loaded = tab.id ? await waitForTabReady(tab.id, 7000) : undefined;
     return loaded ? [loaded] : tab.id ? [tab] : [];
@@ -657,6 +676,17 @@ async function activateSongsterrTab(tab) {
 
   const updated = await chrome.tabs.update(tab.id, { active: true }).catch(() => tab);
   if (tab.windowId) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+  }
+
+  return updated || tab;
+}
+
+// Point an existing Songsterr tab at a new song instead of opening a new tab,
+// optionally bringing it to the foreground.
+async function navigateSongsterrTab(tab, url, active) {
+  const updated = await chrome.tabs.update(tab.id, { url, active }).catch(() => tab);
+  if (active && tab.windowId) {
     await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
   }
 
