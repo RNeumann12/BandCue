@@ -2,7 +2,9 @@ package com.bandcue.songsterr
 
 import org.json.JSONObject
 import java.net.HttpURLConnection
+import java.net.NetworkInterface
 import java.net.URL
+import java.util.Collections
 import java.util.Locale
 import java.util.concurrent.Callable
 import java.util.concurrent.CompletionService
@@ -210,9 +212,49 @@ private fun localCandidates(port: Int, expectedRoomCode: String? = null): List<R
     DISCOVERY_LOCAL_HOSTS.map { host -> roomDiscoveryCandidate(host, port, expectedRoomCode) }
 
 private fun lanScanCandidates(port: Int, expectedRoomCode: String? = null): List<RoomDiscoveryCandidate> {
-    return LAN_SCAN_SUBNETS.flatMap { subnet ->
+    return prioritizeScanSubnets(localScanSubnets()).flatMap { subnet ->
         (1..254).map { host -> roomDiscoveryCandidate("$subnet.$host", port, expectedRoomCode) }
     }
+}
+
+// Extracts the /24 subnet prefix ("a.b.c") from a private-LAN IPv4 address, or
+// null for public, loopback, link-local, or non-IPv4 input. Keep in sync with
+// lanSubnetPrefix in src/shared/room-locator.ts.
+fun lanSubnetPrefix(address: String?): String? {
+    val match = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$")
+        .matchEntire(address?.trim().orEmpty()) ?: return null
+    val octets = match.groupValues.drop(1).map { it.toInt() }
+    if (octets.any { it > 255 }) return null
+    val (a, b) = octets
+    val isPrivate = a == 10 || (a == 192 && b == 168) || (a == 172 && b in 16..31)
+    return if (isPrivate) "${octets[0]}.${octets[1]}.${octets[2]}" else null
+}
+
+// Reads this device's own LAN subnets so discovery scans the local network
+// first instead of brute-forcing every documented default.
+fun localScanSubnets(): List<String> {
+    return try {
+        Collections.list(NetworkInterface.getNetworkInterfaces())
+            .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+            .flatMap { Collections.list(it.inetAddresses) }
+            .mapNotNull { lanSubnetPrefix(it.hostAddress) }
+            .distinct()
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+// Returns the scan subnet list with this device's own subnets first (deduped),
+// then the documented defaults. Keep in sync with prioritizeScanSubnets in
+// src/shared/room-locator.ts.
+fun prioritizeScanSubnets(
+    localSubnets: List<String>,
+    subnets: List<String> = LAN_SCAN_SUBNETS
+): List<String> {
+    val ordered = LinkedHashSet<String>()
+    ordered.addAll(localSubnets)
+    ordered.addAll(subnets)
+    return ordered.toList()
 }
 
 fun roomDiscoveryCandidate(

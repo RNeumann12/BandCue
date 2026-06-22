@@ -853,7 +853,8 @@ async function tryResolveRoomCandidate(candidate, timeoutMs) {
 }
 
 async function scanLanForRoom(roomCode) {
-  const candidates = buildLanScanCandidates(roomCode);
+  const subnets = prioritizeScanSubnets(await getLocalScanSubnets());
+  const candidates = buildLanScanCandidates(roomCode, subnets);
   const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
   const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
   let checked = 0;
@@ -874,13 +875,58 @@ async function scanLanForRoom(roomCode) {
 
   return {
     error: expectedRoomCode
-      ? `No room ${expectedRoomCode} found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
-      : `No BandCue room found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
+      ? `No room ${expectedRoomCode} found after scanning ${formatLanScanSubnets(subnets)} on port ${port}. ${manualDiscoveryFallback(port)}`
+      : `No BandCue room found after scanning ${formatLanScanSubnets(subnets)} on port ${port}. ${manualDiscoveryFallback(port)}`
   };
 }
 
-function formatLanScanSubnets() {
-  return LAN_SCAN_SUBNETS.map((subnet) => `${subnet}.1-254`).join(", ");
+// Reads this machine's own LAN subnets so discovery scans the local network
+// first. Requires the "system.network" permission; if it is unavailable the
+// catch returns [] and prioritizeScanSubnets falls back to the fixed list.
+async function getLocalScanSubnets() {
+  try {
+    const interfaces = await chrome.system.network.getNetworkInterfaces();
+    const subnets = [];
+    for (const iface of interfaces || []) {
+      const prefix = lanSubnetPrefix(iface?.address);
+      if (prefix && !subnets.includes(prefix)) {
+        subnets.push(prefix);
+      }
+    }
+    return subnets;
+  } catch {
+    return [];
+  }
+}
+
+// Keep in sync with lanSubnetPrefix in src/shared/room-locator.ts.
+function lanSubnetPrefix(address) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(address || "").trim());
+  if (!match) {
+    return undefined;
+  }
+  const octets = match.slice(1, 5).map(Number);
+  if (octets.some((octet) => octet > 255)) {
+    return undefined;
+  }
+  const [a, b] = octets;
+  const isPrivate = a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  return isPrivate ? `${octets[0]}.${octets[1]}.${octets[2]}` : undefined;
+}
+
+// Keep in sync with prioritizeScanSubnets in src/shared/room-locator.ts.
+function prioritizeScanSubnets(localSubnets) {
+  const ordered = [];
+  for (const subnet of [...localSubnets, ...LAN_SCAN_SUBNETS]) {
+    if (subnet && !ordered.includes(subnet)) {
+      ordered.push(subnet);
+    }
+  }
+  return ordered;
+}
+
+function formatLanScanSubnets(subnets = LAN_SCAN_SUBNETS) {
+  return subnets.map((subnet) => `${subnet}.1-254`).join(", ");
 }
 
 function manualDiscoveryFallback(port) {
@@ -913,11 +959,11 @@ function buildRoomDiscoveryCandidates(locator) {
   return explicitHost ? [discoveryCandidate(explicitHost.host, explicitHost.port)] : [];
 }
 
-function buildLanScanCandidates(roomCode) {
+function buildLanScanCandidates(roomCode, subnets = LAN_SCAN_SUBNETS) {
   const candidates = [];
   const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
   const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
-  for (const subnet of LAN_SCAN_SUBNETS) {
+  for (const subnet of subnets) {
     for (let host = 1; host <= 254; host += 1) {
       candidates.push(discoveryCandidate(`${subnet}.${host}`, port, expectedRoomCode));
     }

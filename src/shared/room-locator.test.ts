@@ -6,7 +6,9 @@ import {
   describeLanScanSubnets,
   discoveryPortForLocator,
   expectedRoomCodeForLocator,
+  lanSubnetPrefix,
   normalizeRoomLocator,
+  prioritizeScanSubnets,
   roomDiscoveryFallbackHint,
   roomUrlFromDiscovery,
   roomUrlToWebSocket
@@ -81,6 +83,29 @@ describe("room locator", () => {
       expectedRoomCode: "ABC123"
     });
     expect(candidates.at(-1)?.apiUrl).toBe("http://192.168.1.254:5000/api/room");
+  });
+
+  it("derives the /24 prefix only from private LAN IPv4 addresses", () => {
+    expect(lanSubnetPrefix("192.168.178.47")).toBe("192.168.178");
+    expect(lanSubnetPrefix("10.0.5.9")).toBe("10.0.5");
+    expect(lanSubnetPrefix("172.16.4.2")).toBe("172.16.4");
+    expect(lanSubnetPrefix("172.32.0.1")).toBeUndefined();
+    expect(lanSubnetPrefix("8.8.8.8")).toBeUndefined();
+    expect(lanSubnetPrefix("169.254.1.1")).toBeUndefined();
+    expect(lanSubnetPrefix("192.168.0.300")).toBeUndefined();
+    expect(lanSubnetPrefix(undefined)).toBeUndefined();
+  });
+
+  it("scans local subnets first, then deduped defaults", () => {
+    const prioritized = prioritizeScanSubnets(["192.168.178", "192.168.0"]);
+
+    expect(prioritized.slice(0, 2)).toEqual(["192.168.178", "192.168.0"]);
+    expect(prioritized.filter((subnet) => subnet === "192.168.0")).toHaveLength(1);
+    expect(prioritized).toContain("172.20.10");
+  });
+
+  it("falls back to the defaults when no local subnet is known", () => {
+    expect(prioritizeScanSubnets([])).toEqual(DEFAULT_LAN_SCAN_SUBNETS);
   });
 
   it("describes room discovery diagnostics and fallback", () => {

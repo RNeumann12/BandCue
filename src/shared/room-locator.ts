@@ -110,6 +110,39 @@ export function buildLanScanCandidates(
   ));
 }
 
+// Extracts the /24 subnet prefix ("a.b.c") from a private-LAN IPv4 address, or
+// undefined for public, loopback, link-local, or non-IPv4 input. Lets a client
+// scan its own network first instead of brute-forcing every documented default.
+export function lanSubnetPrefix(address: string | undefined): string | undefined {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address?.trim() ?? "");
+  if (!match) {
+    return undefined;
+  }
+  const octets = match.slice(1, 5).map(Number);
+  if (octets.some((octet) => octet > 255)) {
+    return undefined;
+  }
+  const [a, b] = octets;
+  const isPrivate = a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  return isPrivate ? `${octets[0]}.${octets[1]}.${octets[2]}` : undefined;
+}
+
+// Returns the scan subnet list with the client's own subnets first (deduped),
+// then the documented defaults, so discovery reaches the local network at once
+// and only falls back to brute force when the local IP is unknown.
+export function prioritizeScanSubnets(
+  localSubnets: string[],
+  subnets = DEFAULT_LAN_SCAN_SUBNETS
+): string[] {
+  const ordered: string[] = [];
+  for (const subnet of [...localSubnets, ...subnets]) {
+    if (subnet && !ordered.includes(subnet)) {
+      ordered.push(subnet);
+    }
+  }
+  return ordered;
+}
+
 export function discoveryPortForLocator(locator: string, defaultPort = DEFAULT_ROOM_PORT): number {
   const value = normalizeRoomLocator(locator, defaultPort);
   return isPort(value) ? Number.parseInt(value, 10) : defaultPort;
