@@ -28,8 +28,10 @@ let autoConnectEnabled = false;
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
-const LAN_SCAN_BATCH_SIZE = 64;
-const LAN_SCAN_TIMEOUT_MS = 350;
+// Number of LAN probes in flight at once. High enough to cover a /24 quickly
+// while staying under Chrome's ~256 total socket budget for the service worker.
+const LAN_SCAN_CONCURRENCY = 150;
+const LAN_SCAN_TIMEOUT_MS = 400;
 // Keep in sync with DEFAULT_LAN_SCAN_SUBNETS in src/shared/room-locator.ts
 // (the canonical list) and LAN_SCAN_SUBNETS in android/.../RoomLocator.kt.
 const LAN_SCAN_SUBNETS = [
@@ -852,31 +854,68 @@ async function tryResolveRoomCandidate(candidate, timeoutMs) {
   }
 }
 
+// Scans the candidate hosts with a fixed pool of concurrent probes and resolves
+// the moment any host answers as the room, instead of waiting for whole batches
+// of dead hosts to time out. A sequential batch scan made the service worker
+// spend several seconds (and sometimes get killed) before reaching the room's
+// subnet; first-success-wins returns as soon as the real server responds.
 async function scanLanForRoom(roomCode) {
   const candidates = buildLanScanCandidates(roomCode);
   const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
   const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
-  let checked = 0;
-  for (let index = 0; index < candidates.length; index += LAN_SCAN_BATCH_SIZE) {
-    const batch = candidates.slice(index, index + LAN_SCAN_BATCH_SIZE);
-    checked += batch.length;
-    connectionDetail = expectedRoomCode
-      ? `Scanning local network for room ${expectedRoomCode} (${checked}/${candidates.length})`
-      : `Scanning local network on port ${port} (${checked}/${candidates.length})`;
-    const results = await Promise.all(
-      batch.map((candidate) => tryResolveRoomCandidate(candidate, LAN_SCAN_TIMEOUT_MS))
-    );
-    const match = results.find((result) => result.endpoint);
-    if (match?.endpoint) {
-      return { endpoint: match.endpoint };
-    }
-  }
+  const total = candidates.length;
+  const concurrency = Math.min(LAN_SCAN_CONCURRENCY, total);
 
-  return {
-    error: expectedRoomCode
-      ? `No room ${expectedRoomCode} found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
-      : `No BandCue room found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
-  };
+  return new Promise((resolve) => {
+    let next = 0;
+    let active = 0;
+    let checked = 0;
+    let settled = false;
+
+    const finish = (value) => {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    };
+
+    const pump = () => {
+      if (settled) {
+        return;
+      }
+      while (active < concurrency && next < total) {
+        const candidate = candidates[next++];
+        active += 1;
+        tryResolveRoomCandidate(candidate, LAN_SCAN_TIMEOUT_MS).then((result) => {
+          active -= 1;
+          checked += 1;
+          if (settled) {
+            return;
+          }
+          if (result.endpoint) {
+            finish({ endpoint: result.endpoint });
+            return;
+          }
+          if (checked % concurrency === 0) {
+            connectionDetail = expectedRoomCode
+              ? `Scanning local network for room ${expectedRoomCode} (${checked}/${total})`
+              : `Scanning local network on port ${port} (${checked}/${total})`;
+          }
+          if (active === 0 && next >= total) {
+            finish({
+              error: expectedRoomCode
+                ? `No room ${expectedRoomCode} found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
+                : `No BandCue room found after scanning ${formatLanScanSubnets()} on port ${port}. ${manualDiscoveryFallback(port)}`
+            });
+            return;
+          }
+          pump();
+        });
+      }
+    };
+
+    pump();
+  });
 }
 
 function formatLanScanSubnets() {
