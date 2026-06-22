@@ -6,7 +6,9 @@ import {
   describeLanScanSubnets,
   discoveryPortForLocator,
   expectedRoomCodeForLocator,
+  buildMdnsDiscoveryCandidates,
   lanSubnetPrefix,
+  mdnsRoomHosts,
   normalizeRoomLocator,
   prioritizeScanSubnets,
   roomDiscoveryFallbackHint,
@@ -106,6 +108,27 @@ describe("room locator", () => {
 
   it("falls back to the defaults when no local subnet is known", () => {
     expect(prioritizeScanSubnets([])).toEqual(DEFAULT_LAN_SCAN_SUBNETS);
+  });
+
+  it("builds mDNS hostnames and candidates for room-code and port locators", () => {
+    expect(mdnsRoomHosts("ab12cd")).toEqual(["bandcue-ab12cd.local", "bandcue.local"]);
+    expect(mdnsRoomHosts("AB12CD")).toEqual(["bandcue-ab12cd.local", "bandcue.local"]);
+    expect(mdnsRoomHosts()).toEqual(["bandcue.local"]);
+
+    const byCode = buildMdnsDiscoveryCandidates("ab12cd");
+    expect(byCode.map((candidate) => candidate.apiUrl)).toEqual([
+      "http://bandcue-ab12cd.local:4173/api/room",
+      "http://bandcue.local:4173/api/room"
+    ]);
+    expect(byCode[0]?.expectedRoomCode).toBe("AB12CD");
+
+    const byPort = buildMdnsDiscoveryCandidates("5000");
+    expect(byPort.map((candidate) => candidate.apiUrl)).toEqual([
+      "http://bandcue.local:5000/api/room"
+    ]);
+    expect(byPort[0]?.expectedRoomCode).toBeUndefined();
+
+    expect(buildMdnsDiscoveryCandidates("http://192.168.1.5:4173")).toEqual([]);
   });
 
   it("describes room discovery diagnostics and fallback", () => {

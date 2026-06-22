@@ -110,6 +110,40 @@ export function buildLanScanCandidates(
   ));
 }
 
+// Hostname stem the server advertises over mDNS. The OS mDNS resolver
+// (Windows 10 1703+, macOS, Linux+Avahi) resolves "<stem>.local" to the
+// server's LAN IP, so a browser/extension can reach the room with a plain
+// fetch instead of brute-forcing the LAN. Keep in sync with the server
+// (src/server/mdns.ts) and the extension copy (extension/songsterr/background.js).
+export const MDNS_HOST_STEM = "bandcue";
+
+// mDNS hostnames advertised for a room, most-specific first. The room-code name
+// disambiguates multiple rooms on one LAN; the generic name covers the common
+// single-room case (and port-only locators).
+export function mdnsRoomHosts(roomCode?: string): string[] {
+  const hosts = [`${MDNS_HOST_STEM}.local`];
+  if (roomCode && isRoomCode(roomCode)) {
+    hosts.unshift(`${MDNS_HOST_STEM}-${roomCode.toLowerCase()}.local`);
+  }
+  return hosts;
+}
+
+// Discovery candidates that resolve via the OS mDNS resolver, for room-code or
+// port locators (an explicit host/URL locator already names its own host).
+export function buildMdnsDiscoveryCandidates(
+  locator: string,
+  defaultPort = DEFAULT_ROOM_PORT
+): RoomDiscoveryCandidate[] {
+  const value = normalizeRoomLocator(locator, defaultPort);
+  if (!isPort(value) && !isRoomCode(value)) {
+    return [];
+  }
+  const expectedRoomCode = isRoomCode(value) ? value.toUpperCase() : undefined;
+  const port = isPort(value) ? Number.parseInt(value, 10) : defaultPort;
+  const roomCode = isRoomCode(value) ? value : undefined;
+  return mdnsRoomHosts(roomCode).map((host) => roomDiscoveryCandidate(host, port, expectedRoomCode));
+}
+
 // Extracts the /24 subnet prefix ("a.b.c") from a private-LAN IPv4 address, or
 // undefined for public, loopback, link-local, or non-IPv4 input. Lets a client
 // scan its own network first instead of brute-forcing every documented default.

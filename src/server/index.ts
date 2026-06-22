@@ -8,6 +8,7 @@ import { WebSocketServer } from "ws";
 import type { ClientHello, ClientMessage } from "../shared/protocol.js";
 import { RoomController } from "./room.js";
 import { startDiscoveryResponder } from "./discovery.js";
+import { startMdnsResponder } from "./mdns.js";
 import { selectLanCandidates } from "../shared/lan-address.js";
 
 const PORT = Number(process.env.PORT ?? 4173);
@@ -141,6 +142,11 @@ server.listen(PORT, HOST, () => {
     roomCode: ROOM_CODE,
     port: PORT,
     discoveryPort: DISCOVERY_PORT
+  });
+  startMdnsResponder({
+    roomCode: ROOM_CODE,
+    port: PORT,
+    address: lanAddress
   });
   console.log("BandCue coordinator running");
   console.log(`Host controls:      ${hostUrl}`);

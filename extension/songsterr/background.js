@@ -36,6 +36,14 @@ const DEFAULT_ROOM_PORT = 4173;
 // while staying under Chrome's ~256 total socket budget for the service worker.
 const LAN_SCAN_CONCURRENCY = 150;
 const LAN_SCAN_TIMEOUT_MS = 400;
+// First-time mDNS resolution can take a beat longer than a direct host hit, so
+// give the .local probes a bit more headroom than the 1000 ms direct probes.
+const MDNS_PROBE_TIMEOUT_MS = 1500;
+// Hostname stem the server advertises over mDNS. The OS resolver (Windows 10
+// 1703+, macOS, Linux+Avahi) resolves "<stem>[-<roomcode>].local" to the
+// server's IP, so a single fetch reaches the room on any subnet -- no LAN scan.
+// Keep in sync with MDNS_HOST_STEM in src/shared/room-locator.ts.
+const MDNS_HOST_STEM = "bandcue";
 // Keep in sync with DEFAULT_LAN_SCAN_SUBNETS in src/shared/room-locator.ts
 // (the canonical list) and LAN_SCAN_SUBNETS in android/.../RoomLocator.kt.
 const LAN_SCAN_SUBNETS = [
@@ -812,10 +820,20 @@ async function resolveRoomEndpoint(input) {
     throw new Error(`Use a room URL, room code, port, or host:port.`);
   }
 
-  // Try previously-successful hosts first, then localhost, then the LAN scan.
+  // Try previously-successful hosts first, then localhost, then the mDNS name
+  // the server advertises, then (last) the LAN brute-force scan.
   const errors = [];
   for (const candidate of [...knownHostCandidates(locator), ...candidates]) {
     const result = await tryResolveRoomCandidate(candidate, 1000);
+    if (result.endpoint) {
+      rememberHost(hostFromUrl(result.endpoint.roomUrl));
+      return result.endpoint;
+    }
+    errors.push(result.error);
+  }
+
+  for (const candidate of mdnsCandidates(locator)) {
+    const result = await tryResolveRoomCandidate(candidate, MDNS_PROBE_TIMEOUT_MS);
     if (result.endpoint) {
       rememberHost(hostFromUrl(result.endpoint.roomUrl));
       return result.endpoint;
@@ -845,6 +863,27 @@ function knownHostCandidates(locator) {
   const port = isPort(locator) ? Number.parseInt(locator, 10) : DEFAULT_ROOM_PORT;
   const expectedRoomCode = isRoomCode(locator) ? locator.toUpperCase() : undefined;
   return knownHosts.map((host) => discoveryCandidate(host, port, expectedRoomCode));
+}
+
+// mDNS hostnames the server advertises for a room, most-specific first. Keep in
+// sync with mdnsRoomHosts in src/shared/room-locator.ts.
+function mdnsRoomHosts(roomCode) {
+  const hosts = [`${MDNS_HOST_STEM}.local`];
+  if (isRoomCode(roomCode)) {
+    hosts.unshift(`${MDNS_HOST_STEM}-${roomCode.toLowerCase()}.local`);
+  }
+  return hosts;
+}
+
+// Discovery candidates resolved via the OS mDNS resolver, for room-code/port
+// locators (an explicit host/URL locator already names its own host).
+function mdnsCandidates(locator) {
+  if (!isPort(locator) && !isRoomCode(locator)) {
+    return [];
+  }
+  const port = isPort(locator) ? Number.parseInt(locator, 10) : DEFAULT_ROOM_PORT;
+  const expectedRoomCode = isRoomCode(locator) ? locator.toUpperCase() : undefined;
+  return mdnsRoomHosts(locator).map((host) => discoveryCandidate(host, port, expectedRoomCode));
 }
 
 function rememberHost(host) {
