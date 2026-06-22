@@ -18,13 +18,11 @@ if (existsSync(outFile)) {
   rmSync(outFile);
 }
 
+// Package every top-level item (recursing into any subfolders) except test
+// files, which live beside the source but must not ship in the extension.
 const command = [
-  "Compress-Archive",
-  "-Path",
-  `"${extensionDir}\\*"`,
-  "-DestinationPath",
-  `"${outFile}"`,
-  "-Force"
+  `$items = Get-ChildItem -Path "${extensionDir}\\*" -Exclude "*.test.*";`,
+  `Compress-Archive -Path $items -DestinationPath "${outFile}" -Force`
 ].join(" ");
 
 const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", command], {
