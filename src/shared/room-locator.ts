@@ -3,13 +3,17 @@ export const DEFAULT_LOCAL_DISCOVERY_HOSTS = ["127.0.0.1", "localhost"];
 // Canonical LAN scan subnet list. Platforms that cannot import this module keep
 // their own copy and MUST stay in sync: extension/songsterr/background.js
 // (LAN_SCAN_SUBNETS) and android/.../RoomLocator.kt (LAN_SCAN_SUBNETS).
+// Ordered most-likely-first so an HTTP scan reaches common home networks early:
+// 192.168.0/1 are the most common router defaults and 192.168.178 is the
+// Fritz!Box default. A scan that finds the room in the first subnet avoids
+// probing ~250 dead hosts per later subnet.
 export const DEFAULT_LAN_SCAN_SUBNETS = [
   "192.168.0",
   "192.168.1",
+  "192.168.178",
   "192.168.2",
   "192.168.4",
   "192.168.86",
-  "192.168.178",
   "10.0.0",
   "10.0.1",
   "10.0.2",
