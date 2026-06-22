@@ -10,8 +10,17 @@ const connectionDot = document.querySelector("#connectionDot");
 const adapterState = document.querySelector("#adapterState");
 const commandState = document.querySelector("#commandState");
 
+// Once the user edits the room field, stop auto-filling it from saved state so
+// they can clear it and type a different room without it being overwritten by
+// the 1s refresh. Resets each time the popup reopens, so the last room is still
+// prefilled for convenience.
+let userEditedRoom = false;
+roomUrl.addEventListener("input", () => {
+  userEditedRoom = true;
+});
+
 chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
-  if (state?.roomInput || state?.roomUrl) {
+  if (!userEditedRoom && (state?.roomInput || state?.roomUrl)) {
     roomUrl.value = state.roomInput || state.roomUrl;
   }
   suppressAutoOpen.checked = Boolean(state?.suppressAutoOpen);
@@ -71,7 +80,7 @@ function formatConnectionState(value) {
 
 function refreshState() {
   chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
-    if ((state?.roomInput || state?.roomUrl) && !roomUrl.value) {
+    if (!userEditedRoom && (state?.roomInput || state?.roomUrl) && !roomUrl.value) {
       roomUrl.value = state.roomInput || state.roomUrl;
     }
     renderState(state);
