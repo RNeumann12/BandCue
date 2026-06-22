@@ -24,6 +24,10 @@ let lastContentScriptStatusAt = 0;
 // that plays from MuseScore so transport/open commands don't pop Songsterr.
 let suppressAutoOpen = false;
 let autoConnectEnabled = false;
+// Hosts that have served a room before (e.g. one entered as a URL/host:port).
+// Probed directly ahead of the LAN scan, since Chrome can't reliably brute-force
+// the whole LAN but a direct hit on a known host connects instantly.
+let knownHosts = [];
 
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
@@ -109,9 +113,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
   autoConnectEnabled = Boolean(stored.autoConnectEnabled);
+  knownHosts = Array.isArray(stored.knownHosts) ? stored.knownHosts : [];
+  // Seed from a previously successful room URL so a known host is probed first
+  // even on the first connect after this feature shipped.
+  if (!knownHosts.length && stored.roomUrl) {
+    const seededHost = hostFromUrl(stored.roomUrl);
+    if (isRememberableHost(seededHost)) {
+      knownHosts = [seededHost];
+    }
+  }
   const storedInput = stored.roomInput || stored.roomUrl;
   if (storedInput) {
     roomInput = storedInput;
@@ -787,6 +800,7 @@ function toWsUrl(value) {
 async function resolveRoomEndpoint(input) {
   const locator = normalizeRoomLocator(input);
   if (isAbsoluteRoomUrl(locator)) {
+    rememberHost(hostFromUrl(locator));
     return {
       roomUrl: locator,
       wsUrl: toWsUrl(locator)
@@ -798,10 +812,12 @@ async function resolveRoomEndpoint(input) {
     throw new Error(`Use a room URL, room code, port, or host:port.`);
   }
 
+  // Try previously-successful hosts first, then localhost, then the LAN scan.
   const errors = [];
-  for (const candidate of candidates) {
+  for (const candidate of [...knownHostCandidates(locator), ...candidates]) {
     const result = await tryResolveRoomCandidate(candidate, 1000);
     if (result.endpoint) {
+      rememberHost(hostFromUrl(result.endpoint.roomUrl));
       return result.endpoint;
     }
     errors.push(result.error);
@@ -810,6 +826,7 @@ async function resolveRoomEndpoint(input) {
   if (isRoomCode(locator) || isPort(locator)) {
     const scanResult = await scanLanForRoom(locator);
     if (scanResult.endpoint) {
+      rememberHost(hostFromUrl(scanResult.endpoint.roomUrl));
       return scanResult.endpoint;
     }
 
@@ -817,6 +834,59 @@ async function resolveRoomEndpoint(input) {
   }
 
   throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}`);
+}
+
+// Direct candidates for hosts known to have served a room, for room-code/port
+// locators (an explicit host locator is already its own direct candidate).
+function knownHostCandidates(locator) {
+  if (!isPort(locator) && !isRoomCode(locator)) {
+    return [];
+  }
+  const port = isPort(locator) ? Number.parseInt(locator, 10) : DEFAULT_ROOM_PORT;
+  const expectedRoomCode = isRoomCode(locator) ? locator.toUpperCase() : undefined;
+  return knownHosts.map((host) => discoveryCandidate(host, port, expectedRoomCode));
+}
+
+function rememberHost(host) {
+  if (!isRememberableHost(host)) {
+    return;
+  }
+  knownHosts = [host, ...knownHosts.filter((existing) => existing !== host)].slice(0, 8);
+  chrome.storage.local.set({ knownHosts });
+}
+
+function isRememberableHost(host) {
+  return Boolean(host) && host !== "localhost" && host !== "127.0.0.1";
+}
+
+function hostFromUrl(value) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function subnetPrefix(host) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(host || "");
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : undefined;
+}
+
+// LAN scan subnet order with the subnets of known hosts first.
+function scanSubnetsWithKnownFirst() {
+  const ordered = [];
+  for (const host of knownHosts) {
+    const prefix = subnetPrefix(host);
+    if (prefix && !ordered.includes(prefix)) {
+      ordered.push(prefix);
+    }
+  }
+  for (const subnet of LAN_SCAN_SUBNETS) {
+    if (!ordered.includes(subnet)) {
+      ordered.push(subnet);
+    }
+  }
+  return ordered;
 }
 
 async function tryResolveRoomCandidate(candidate, timeoutMs) {
@@ -860,7 +930,7 @@ async function tryResolveRoomCandidate(candidate, timeoutMs) {
 // spend several seconds (and sometimes get killed) before reaching the room's
 // subnet; first-success-wins returns as soon as the real server responds.
 async function scanLanForRoom(roomCode) {
-  const candidates = buildLanScanCandidates(roomCode);
+  const candidates = buildLanScanCandidates(roomCode, scanSubnetsWithKnownFirst());
   const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
   const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
   const total = candidates.length;
@@ -952,11 +1022,11 @@ function buildRoomDiscoveryCandidates(locator) {
   return explicitHost ? [discoveryCandidate(explicitHost.host, explicitHost.port)] : [];
 }
 
-function buildLanScanCandidates(roomCode) {
+function buildLanScanCandidates(roomCode, subnets = LAN_SCAN_SUBNETS) {
   const candidates = [];
   const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
   const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
-  for (const subnet of LAN_SCAN_SUBNETS) {
+  for (const subnet of subnets) {
     for (let host = 1; host <= 254; host += 1) {
       candidates.push(discoveryCandidate(`${subnet}.${host}`, port, expectedRoomCode));
     }
