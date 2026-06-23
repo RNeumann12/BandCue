@@ -221,6 +221,29 @@ export function playBlockedReason(state) {
   return "Play is not available yet.";
 }
 
+// Decide what the setlist auto-runner should do while a song is loading on the
+// adapters. Kept pure so the timing branches can be unit tested without a DOM.
+//   - "wait":    keep waiting (transport busy, adapter not ready, or still settling)
+//   - "play":    the song is loaded enough to arm and start
+//   - "timeout": no adapter ever became ready; the caller should abort the run
+// `needsAdapter` is false for songs nothing can open (e.g. plain "other" notes),
+// in which case there is nothing to load and playback can start immediately.
+export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, timeoutMs }) {
+  if (state?.transport?.status && state.transport.status !== "stopped") {
+    return "wait";
+  }
+
+  if (!needsAdapter) {
+    return "play";
+  }
+
+  if (!getReadyAdapters(state).length) {
+    return elapsedMs >= timeoutMs ? "timeout" : "wait";
+  }
+
+  return elapsedMs >= settleMs ? "play" : "wait";
+}
+
 export function collectWarnings(state, readyAdapters, desktopAdapters) {
   const warnings = [];
 

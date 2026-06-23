@@ -138,6 +138,13 @@
             <button class="secondary compact" id="importSetlistButton" type="button">Import</button>
             <input id="importSetlistInput" type="file" accept="application/json,.json" hidden />
           </div>
+          <div class="setlist-mode-row">
+            <label class="setlist-mode">
+              <input id="setlistModeToggle" type="checkbox" />
+              <span>Setlist mode: auto-load &amp; play each song, advance at the end</span>
+            </label>
+            <span class="small" id="setlistModeStatus"></span>
+          </div>
           <div id="setlistItems" class="setlist-items"></div>
         </article>
       </section>

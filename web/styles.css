@@ -337,6 +337,27 @@ select:focus {
   padding: 14px 0 4px;
 }
 
+.setlist-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding: 10px 0 14px;
+}
+
+.setlist-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.setlist-mode input {
+  width: 18px;
+  height: 18px;
+}
+
 .setlist-items {
   display: grid;
 }

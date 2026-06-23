@@ -167,6 +167,13 @@ MuseScore songs open automatically when the MuseScore helper has a configured sc
 exactly one local catalog entry matches the current item. The helper warns on a title mismatch,
 or when the local match is missing or ambiguous.
 
+**Setlist mode** plays the whole list hands-free. Enable the **Setlist mode** toggle and the host
+loads the current song on every adapter, arms, and starts playback; when a song reaches its end
+the room auto-advances to the next entry, loads it, and plays it, until the list is finished. End
+detection relies on the song's duration — Songsterr reports it automatically once a song is
+loaded, and any song can carry a manually entered time. A song with no known duration plays until
+you press **Next** or **Stop**. A manual **Stop** (or turning the toggle off) ends the run.
+
 ### Safety Controls
 
 The host must press **Arm** before **Play** is available. Play auto-disarms after a request is

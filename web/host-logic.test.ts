@@ -25,6 +25,7 @@ import {
   playBlockedReason,
   previousSongIndex,
   sanitizeDurationMs,
+  setlistLoadDecision,
   summarizeClock
 } from "./host-logic.js";
 
@@ -277,6 +278,32 @@ describe("transport and safety decisions", () => {
     expect(playBlockedReason(armedStoppedState([]))).toMatch(/No ready desktop adapter/);
     expect(playBlockedReason({ ...armedStoppedState([readyAdapter()]), safety: { armed: false } }))
       .toMatch(/Arm playback/);
+  });
+});
+
+describe("setlistLoadDecision", () => {
+  const options = { needsAdapter: true, elapsedMs: 0, settleMs: 4500, timeoutMs: 20000 };
+  const readyState = { transport: { status: "stopped" }, clients: [readyAdapter()] };
+
+  it("waits while the transport is still active", () => {
+    expect(setlistLoadDecision({ transport: { status: "running" }, clients: [readyAdapter()] }, { ...options, elapsedMs: 9999 }))
+      .toBe("wait");
+  });
+
+  it("plays immediately when the song needs no adapter", () => {
+    expect(setlistLoadDecision({ transport: { status: "stopped" }, clients: [] }, { ...options, needsAdapter: false }))
+      .toBe("play");
+  });
+
+  it("waits, then times out, when no adapter becomes ready", () => {
+    const noAdapters = { transport: { status: "stopped" }, clients: [] };
+    expect(setlistLoadDecision(noAdapters, { ...options, elapsedMs: 5000 })).toBe("wait");
+    expect(setlistLoadDecision(noAdapters, { ...options, elapsedMs: 20000 })).toBe("timeout");
+  });
+
+  it("waits for the settle window once an adapter is ready, then plays", () => {
+    expect(setlistLoadDecision(readyState, { ...options, elapsedMs: 1000 })).toBe("wait");
+    expect(setlistLoadDecision(readyState, { ...options, elapsedMs: 4500 })).toBe("play");
   });
 });
 

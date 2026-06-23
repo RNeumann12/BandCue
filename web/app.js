@@ -17,6 +17,7 @@ import {
   getReadyAdapters,
   canHostPlay,
   playBlockedReason,
+  setlistLoadDecision,
   collectWarnings,
   formatElapsed,
   formatMs,
@@ -70,6 +71,8 @@ const elements = {
   exportSetlistButton: document.querySelector("#exportSetlistButton"),
   importSetlistButton: document.querySelector("#importSetlistButton"),
   importSetlistInput: document.querySelector("#importSetlistInput"),
+  setlistModeToggle: document.querySelector("#setlistModeToggle"),
+  setlistModeStatus: document.querySelector("#setlistModeStatus"),
   timingPanel: document.querySelector("#timingPanel"),
   timingRows: document.querySelector("#timingRows")
 };
@@ -91,11 +94,22 @@ let currentSongIndex = -1;
 let calibrations = loadCalibrations();
 let appliedCalibrationByClientId = {};
 let transportRequestPending = false;
+let setlistMode = false;
+// Auto-runner phase: "idle" | "loading" (waiting for the next song to load on
+// adapters) | "playing" (a song is on; we advance when it auto-stops).
+let setlistRunPhase = "idle";
+let setlistLoadStartedAt = 0;
+let setlistAbort = false;
+let prevTransportStatus = "stopped";
 let lastStableRoomSignature = "";
 let pendingTimingState;
 let timingRenderTimer;
 
 const TIMING_RENDER_INTERVAL_MS = 1200;
+// Setlist mode: how long to let the next song's tab/score load before starting,
+// and how long to wait for a ready adapter before giving up on the run.
+const SETLIST_LOAD_SETTLE_MS = 4500;
+const SETLIST_LOAD_TIMEOUT_MS = 20000;
 
 if (!token) {
   setText(elements.roomCode, "Missing token");
@@ -130,8 +144,23 @@ elements.stopButton?.addEventListener("click", () => {
     return;
   }
 
+  // A manual Stop ends any auto-run: don't treat the resulting stop as a song
+  // finishing and advance into the next song.
+  abortSetlistRunner("Setlist mode off (stopped).");
   transportRequestPending = true;
   send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
+});
+
+elements.setlistModeToggle?.addEventListener("change", () => {
+  if (elements.setlistModeToggle.checked) {
+    startSetlistRun();
+  } else {
+    const wasActive = lastState && lastState.transport.status !== "stopped";
+    abortSetlistRunner("Setlist mode off.");
+    if (wasActive) {
+      send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
+    }
+  }
 });
 
 elements.armButton?.addEventListener("click", () => {
@@ -220,6 +249,9 @@ elements.timingRows?.addEventListener("change", (event) => {
 });
 
 setInterval(updateCountdown, 60);
+// Re-evaluate the loading->play settle on a timer: once an adapter is stably
+// ready it stops sending status, so room-state events alone may not fire again.
+setInterval(tickSetlistLoading, 250);
 
 function connect() {
   socket = new WebSocket(wsUrl);
@@ -320,6 +352,8 @@ function renderState(state) {
   renderTimingRows(state);
   renderWarnings(warnings);
   renderHostControls(state, readyAdapters);
+  driveSetlistRun(state);
+  prevTransportStatus = state.transport.status;
 }
 
 function renderVolatileState(state) {
@@ -783,6 +817,159 @@ function selectCurrentSong(index) {
   currentSongIndex = index;
   publishCurrentSong();
   renderSetlist();
+}
+
+// --- Setlist mode (auto-advance runner) -----------------------------------
+
+function startSetlistRun() {
+  if (!setlist.length) {
+    elements.setlistModeToggle.checked = false;
+    setSetlistModeStatus("Add songs to the setlist first.");
+    return;
+  }
+
+  setlistMode = true;
+  setlistAbort = false;
+
+  if (currentSongIndex < 0) {
+    selectCurrentSong(0);
+  }
+
+  // Adopt an already-playing song so its end still triggers an advance;
+  // otherwise load the current song and start it.
+  if (lastState?.transport?.status === "running") {
+    setlistRunPhase = "playing";
+    setSetlistModeStatus(`Playing ${currentSongLabel()} - will auto-advance.`);
+  } else {
+    beginLoadingCurrentSong();
+  }
+}
+
+function beginLoadingCurrentSong() {
+  setlistRunPhase = "loading";
+  setlistLoadStartedAt = Date.now();
+
+  // Ask every adapter to load the song now (navigates the Songsterr tab / opens
+  // the MuseScore score) so it is ready by the time we start playback.
+  if (isOpenableSong(setlist[currentSongIndex])) {
+    send({ type: "openSongRequest", requestedAt: Date.now() });
+  }
+
+  setSetlistModeStatus(`Loading ${currentSongLabel()}...`);
+}
+
+// Stop the auto-runner without sending a transport command (the caller decides
+// whether a stop is also needed).
+function abortSetlistRunner(reason) {
+  if (!setlistMode && setlistRunPhase === "idle") {
+    return;
+  }
+
+  setlistMode = false;
+  setlistRunPhase = "idle";
+  setlistAbort = true;
+  if (elements.setlistModeToggle) {
+    elements.setlistModeToggle.checked = false;
+  }
+  if (reason) {
+    setSetlistModeStatus(reason);
+  }
+}
+
+function driveSetlistRun(state) {
+  if (!isHost || !setlistMode || setlistRunPhase === "idle") {
+    return;
+  }
+
+  const status = state.transport.status;
+
+  if (setlistRunPhase === "loading") {
+    const song = setlist[currentSongIndex];
+    if (!song) {
+      abortSetlistRunner("Setlist mode stopped: no current song.");
+      return;
+    }
+
+    const decision = setlistLoadDecision(state, {
+      needsAdapter: isOpenableSong(song),
+      elapsedMs: Date.now() - setlistLoadStartedAt,
+      settleMs: SETLIST_LOAD_SETTLE_MS,
+      timeoutMs: SETLIST_LOAD_TIMEOUT_MS
+    });
+
+    if (decision === "timeout") {
+      abortSetlistRunner("Setlist mode stopped: no ready adapter for the next song.");
+    } else if (decision === "play") {
+      playCurrentSongForRun();
+    } else {
+      setSetlistModeStatus(`Loading ${currentSongLabel()}...`);
+    }
+    return;
+  }
+
+  // setlistRunPhase === "playing": advance when the song ends on its own.
+  if (status === "stopped") {
+    if (setlistAbort) {
+      setlistRunPhase = "idle";
+    } else if (prevTransportStatus === "running") {
+      handleSongFinished();
+    } else if (prevTransportStatus === "scheduled") {
+      abortSetlistRunner("Setlist mode stopped: playback was cancelled.");
+    }
+  }
+}
+
+function playCurrentSongForRun() {
+  const song = setlist[currentSongIndex];
+  if (!song) {
+    abortSetlistRunner("Setlist mode stopped: no current song.");
+    return;
+  }
+
+  // Arm and play in the same tick: the server processes the safety update before
+  // the transport request, so play is accepted without waiting a round trip.
+  transportRequestPending = true;
+  publishSafety({ armed: true });
+  send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
+  setlistRunPhase = "playing";
+
+  // Songsterr reports a duration once loaded, so the server can auto-stop even
+  // without a manual time; warn when nothing can supply one.
+  const durationKnown = Boolean(song.durationMs) || Boolean(getSongsterrUrl(song)) || song.sourceType === "songsterr";
+  setSetlistModeStatus(durationKnown
+    ? `Playing ${currentSongLabel()} - auto-advances at the end.`
+    : `Playing ${currentSongLabel()} - no known duration; use Next or Stop to advance.`);
+}
+
+function handleSongFinished() {
+  if (currentSongIndex >= setlist.length - 1) {
+    setlistMode = false;
+    setlistRunPhase = "idle";
+    if (elements.setlistModeToggle) {
+      elements.setlistModeToggle.checked = false;
+    }
+    setSetlistModeStatus("Setlist finished.");
+    return;
+  }
+
+  selectCurrentSong(nextSongIndex(currentSongIndex, setlist.length));
+  beginLoadingCurrentSong();
+}
+
+// Drives only the loading branch (which is time-based); the playing branch is
+// event-driven from renderState so the run never advances twice for one stop.
+function tickSetlistLoading() {
+  if (isHost && setlistMode && setlistRunPhase === "loading" && lastState) {
+    driveSetlistRun(lastState);
+  }
+}
+
+function currentSongLabel() {
+  return setlist[currentSongIndex]?.title || "song";
+}
+
+function setSetlistModeStatus(text) {
+  setText(elements.setlistModeStatus, text);
 }
 
 function removeSetlistSong(index) {
