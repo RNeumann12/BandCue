@@ -1,6 +1,6 @@
 # BandCue Living Improvements Tracker
 
-Last updated: 2026-06-20
+Last updated: 2026-06-23
 
 This document tracks active reliability and workflow improvements for BandCue. Keep it current as bugs are reproduced, implementation choices change, or work moves from investigation to done.
 
@@ -73,7 +73,7 @@ Stop is being treated like a transport command that must always touch the client
 
 ## 2. More Reliable Auto Discovery
 
-Status: `In Progress`
+Status: `Done`
 
 ### Problem
 
@@ -118,7 +118,7 @@ Discovery is split across platform-specific implementations with different netwo
 
 ### Open Questions
 
-- Should the coordinator expose a small copyable `host:port` value in the host UI next to the room code for faster manual fallback?
+- Resolved (2026-06-23): the host join panel exposes a copyable `host:port` adapter fallback next to the room QR/full URL, and discovery failure messages name the local/UDP/scan attempts and recommend the `host:port` or full room URL fallback. Item is `Done`.
 
 ## 3. Android Songsterr Reset-To-Start
 
@@ -167,7 +167,7 @@ The reset button is unlabeled in Songsterr's accessibility tree, so the implemen
 
 ## 4. Setlist Duration And Host Auto-Stop
 
-Status: `In Progress`
+Status: `Done`
 
 ### Problem
 
@@ -210,7 +210,7 @@ BandCue has transport state but no song-length model. The coordinator cannot kno
 
 ### Open Questions
 
-- Which client is most likely to report reliable duration first: Songsterr browser extension, Android media session, or MuseScore Bridge?
+- Resolved (2026-06-23): the Songsterr browser extension reports finite media `durationMs` first; the coordinator matches it to the current setlist song and auto-stops room/UI state after the known duration without broadcasting a Stop. Android media session and MuseScore Bridge duration remain optional future sources. Item is `Done`.
 
 ## 5. MuseScore Bridge Local Song Publishing And Auto-Open
 

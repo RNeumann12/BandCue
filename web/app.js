@@ -1,3 +1,29 @@
+import {
+  createId,
+  normalizeSong,
+  normalizeStoredSong,
+  nextSongIndex,
+  previousSongIndex,
+  adjustCurrentIndexAfterRemoval,
+  appliesToMuseScore,
+  getSongsterrUrl,
+  isOpenableSong,
+  calculateClockSample,
+  summarizeClock,
+  calculateJitterMs,
+  clampManualOffset,
+  getCalibrationKey,
+  getTimingQuality,
+  getReadyAdapters,
+  canHostPlay,
+  playBlockedReason,
+  collectWarnings,
+  formatElapsed,
+  formatMs,
+  formatSignedMs,
+  formatSongMeta
+} from "./host-logic.js";
+
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
 const isHost = location.pathname === "/host" || params.get("host") === "1";
@@ -143,12 +169,12 @@ elements.setlistItems?.addEventListener("click", (event) => {
 
 elements.previousSongButton?.addEventListener("click", () => {
   if (!setlist.length) return;
-  selectCurrentSong(currentSongIndex <= 0 ? setlist.length - 1 : currentSongIndex - 1);
+  selectCurrentSong(previousSongIndex(currentSongIndex, setlist.length));
 });
 
 elements.nextSongButton?.addEventListener("click", () => {
   if (!setlist.length) return;
-  selectCurrentSong(currentSongIndex < 0 ? 0 : (currentSongIndex + 1) % setlist.length);
+  selectCurrentSong(nextSongIndex(currentSongIndex, setlist.length));
 });
 
 elements.clearSongButton?.addEventListener("click", () => {
@@ -760,12 +786,7 @@ function removeSetlistSong(index) {
   }
 
   setlist.splice(index, 1);
-
-  if (currentSongIndex === index) {
-    currentSongIndex = -1;
-  } else if (currentSongIndex > index) {
-    currentSongIndex -= 1;
-  }
+  currentSongIndex = adjustCurrentIndexAfterRemoval(currentSongIndex, index);
 
   persistSetlist();
   publishSetlist();
@@ -886,50 +907,7 @@ function openCurrentSong() {
 
 function getCurrentOpenableSong() {
   const song = currentSongIndex >= 0 ? setlist[currentSongIndex] : lastState?.currentSong?.song;
-  if (!song) {
-    return undefined;
-  }
-
-  if (appliesToMuseScore(song) || getSongsterrUrl(song)) {
-    return song;
-  }
-
-  return undefined;
-}
-
-// Per-app reference resolvers, mirroring src/shared/song-sources.ts: a dedicated
-// field wins, otherwise the primary source is used when its type matches.
-function songsterrReference(song) {
-  const dedicated = song?.songsterrUrl?.trim();
-  if (dedicated) {
-    return dedicated;
-  }
-  return song?.sourceType === "songsterr" ? (song.source?.trim() ?? "") : "";
-}
-
-function museScoreReference(song) {
-  const dedicated = song?.museScoreSource?.trim();
-  if (dedicated) {
-    return dedicated;
-  }
-  return song?.sourceType === "musescore" ? (song.source?.trim() ?? "") : "";
-}
-
-function appliesToMuseScore(song) {
-  return Boolean(song) && (song.sourceType === "musescore" || Boolean(song.museScoreSource?.trim()));
-}
-
-function getSongsterrUrl(song) {
-  const reference = songsterrReference(song);
-  if (!reference) {
-    return "";
-  }
-  try {
-    const url = new URL(reference);
-    return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : "";
-  } catch {
-    return "";
-  }
+  return isOpenableSong(song) ? song : undefined;
 }
 
 function exportSetlist() {
@@ -1028,61 +1006,6 @@ function updateCountdown() {
   setText(elements.subline, "Waiting for a transport command");
 }
 
-function collectWarnings(state, readyAdapters, desktopAdapters) {
-  const warnings = [];
-
-  if (!desktopAdapters.length) {
-    warnings.push("No desktop adapters connected. Play will not control MuseScore or Songsterr yet.");
-  } else if (!readyAdapters.length) {
-    warnings.push("Desktop adapters are connected, but none are ready.");
-  }
-
-  for (const device of desktopAdapters) {
-    if (!device.status?.ready) {
-      warnings.push(`${device.deviceName}: ${device.status?.detail || "adapter not ready"}`);
-    }
-
-    if ((device.clock?.rttMs ?? 0) >= 180) {
-      warnings.push(`${device.deviceName}: high clock round trip (${Math.round(device.clock.rttMs)} ms)`);
-    }
-
-    if ((device.clock?.jitterMs ?? 0) >= 35) {
-      warnings.push(`${device.deviceName}: high clock jitter (${Math.round(device.clock.jitterMs)} ms)`);
-    }
-
-    if (device.status?.lastCommand?.status === "failed") {
-      warnings.push(`${device.deviceName}: ${device.status.lastCommand.detail || "last command failed"}`);
-    }
-  }
-
-  return [...new Set(warnings)];
-}
-
-function canHostPlay(state) {
-  return Boolean(
-    state &&
-      state.safety?.armed &&
-      state.transport.status === "stopped" &&
-      getReadyAdapters(state).length > 0
-  );
-}
-
-function playBlockedReason(state) {
-  if (!state) return "Room state is not ready yet.";
-  if (state.transport.status !== "stopped") return "Transport is already active.";
-  if (!state.safety?.armed) return "Arm playback before pressing Play.";
-  if (!getReadyAdapters(state).length) {
-    return "No ready desktop adapter yet. Connect MuseScore or Songsterr before starting.";
-  }
-  return "Play is not available yet.";
-}
-
-function getReadyAdapters(state) {
-  return state?.clients.filter(
-    (device) => device.role === "desktop-adapter" && device.status?.ready
-  ) ?? [];
-}
-
 function getDeviceBadge(device, state) {
   if (state === "command-pending") return { label: "pending", className: "pending" };
   if (state === "last-command-succeeded") return { label: "ok", className: "ready" };
@@ -1161,115 +1084,9 @@ function send(message) {
   return false;
 }
 
-function calculateClockSample(clientSentAt, clientReceivedAt, serverReceivedAt, serverSentAt) {
-  const rttMs = clientReceivedAt - clientSentAt - (serverSentAt - serverReceivedAt);
-  const offsetMs = (serverReceivedAt - clientSentAt + (serverSentAt - clientReceivedAt)) / 2;
-  return { rttMs: Math.max(0, rttMs), offsetMs };
-}
-
-function summarizeClock(clockSamples) {
-  const best = [...clockSamples].sort((a, b) => a.rttMs - b.rttMs).slice(0, 5);
-  return {
-    rttMs: median(best.map((sample) => sample.rttMs)),
-    offsetMs: median(best.map((sample) => sample.offsetMs))
-  };
-}
-
-function calculateJitterMs(clockSamples) {
-  if (clockSamples.length < 2) return 0;
-  const offsets = clockSamples.map((sample) => sample.offsetMs);
-  const center = median(offsets);
-  return median(offsets.map((offset) => Math.abs(offset - center)));
-}
-
-function median(values) {
-  if (!values.length) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
-function formatElapsed(ms) {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
-  const seconds = String(totalSeconds % 60).padStart(2, "0");
-  return `${minutes}:${seconds}`;
-}
-
-function formatMs(value) {
-  if (value === undefined) {
-    return "--";
-  }
-
-  return `${Math.round(value)} ms`;
-}
-
-function formatSignedMs(value) {
-  if (value === undefined) {
-    return "--";
-  }
-
-  const rounded = Math.round(value);
-  return `${rounded > 0 ? "+" : ""}${rounded} ms`;
-}
-
-function getTimingQuality(clock) {
-  if (!clock) {
-    return { label: "pending", className: "warn" };
-  }
-
-  if ((clock.rttMs ?? 0) >= 180 || (clock.jitterMs ?? 0) >= 35) {
-    return { label: "unstable", className: "bad" };
-  }
-
-  if ((clock.rttMs ?? 0) >= 100 || (clock.jitterMs ?? 0) >= 20) {
-    return { label: "watch", className: "warn" };
-  }
-
-  return { label: "tight", className: "good" };
-}
-
 function defaultDeviceName() {
   const mobile = matchMedia("(pointer: coarse)").matches ? "Phone" : "Browser";
   return `${mobile} companion`;
-}
-
-function formatSongMeta(song, index, total) {
-  const position = index && total ? `${index} / ${total}` : "setlist";
-  const source = formatSongSource(song.sourceType);
-  const references = [];
-  if (song.source) references.push(song.source);
-  if (song.songsterrUrl) references.push(`Songsterr: ${song.songsterrUrl}`);
-  if (song.museScoreSource) references.push(`MuseScore: ${song.museScoreSource}`);
-  const reference = references.length ? ` - ${references.join(" | ")}` : "";
-  const duration = song.durationMs
-    ? ` - ${formatElapsed(song.durationMs)} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
-    : "";
-  return `${position} - ${source}${duration}${reference}`;
-}
-
-function formatSongSource(sourceType) {
-  if (sourceType === "songsterr") return "Songsterr";
-  if (sourceType === "musescore") return "MuseScore";
-  return "Other";
-}
-
-function normalizeSong(song) {
-  if (!song) {
-    return undefined;
-  }
-
-  return {
-    id: song.id,
-    title: song.title,
-    sourceType: song.sourceType,
-    source: song.source || undefined,
-    songsterrUrl: song.songsterrUrl || undefined,
-    museScoreSource: song.museScoreSource || undefined,
-    durationMs: sanitizeDurationMs(song.durationMs),
-    durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
-    notes: song.notes || undefined
-  };
 }
 
 function loadSetlist() {
@@ -1297,28 +1114,6 @@ function migrateLegacyStorage() {
       localStorage.setItem(nextKey, localStorage.getItem(legacyKey));
     }
   }
-}
-
-function normalizeStoredSong(song) {
-  if (!song || typeof song.title !== "string" || !song.title.trim()) {
-    return undefined;
-  }
-
-  const sourceType = ["songsterr", "musescore", "other"].includes(song.sourceType)
-    ? song.sourceType
-    : "other";
-
-  return {
-    id: typeof song.id === "string" && song.id ? song.id : createId(),
-    title: song.title.trim(),
-    sourceType,
-    source: typeof song.source === "string" ? song.source.trim() : "",
-    songsterrUrl: typeof song.songsterrUrl === "string" ? song.songsterrUrl.trim() : "",
-    museScoreSource: typeof song.museScoreSource === "string" ? song.museScoreSource.trim() : "",
-    durationMs: sanitizeDurationMs(song.durationMs),
-    durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
-    notes: typeof song.notes === "string" ? song.notes.trim() : ""
-  };
 }
 
 function persistSetlist() {
@@ -1361,36 +1156,6 @@ function setDeviceCalibration(targetClientId, deviceName, manualOffsetMs) {
 
 function persistCalibrations() {
   localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(calibrations));
-}
-
-function getCalibrationKey(device) {
-  return String(device.deviceName || "").trim().toLowerCase();
-}
-
-function clampManualOffset(value) {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-
-  return Math.max(-1000, Math.min(1000, Math.round(value)));
-}
-
-function sanitizeDurationMs(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return undefined;
-  }
-
-  const rounded = Math.round(number);
-  return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
-}
-
-function normalizeDurationSource(value) {
-  return value === "adapter" || value === "manual" ? value : "manual";
-}
-
-function createId() {
-  return crypto.randomUUID?.() ?? `song-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function escapeHtml(value) {
