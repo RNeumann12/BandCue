@@ -48,6 +48,11 @@ Build a distributable zip with `npm run package:extension`.
 - **Auto-open** — when a transport command arrives and no matching Songsterr tab is open, the
   adapter opens the current song's Songsterr URL first. The extension reuses an already-open
   Songsterr tab and pre-opens it at count-in start.
+- **Per-member instrument** — Songsterr encodes the selected instrument in the song URL, but
+  songs are matched by a track-agnostic key, so a member already on the current song is **never**
+  reloaded onto the host's instrument. Each member simply picks their own instrument in their
+  Songsterr tab; the extension remembers it per song (persisted in `chrome.storage.local`) and
+  re-opens that song on their instrument the next time it comes up — no setup, no shared choice.
 - **Stop** is no-op when playback already appears stopped, and **never** uses a Space-key
   fallback (which on Songsterr is a toggle and could restart play). It only pauses active media
   elements or clicks a confidently-labelled pause/stop control.

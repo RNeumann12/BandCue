@@ -28,6 +28,14 @@ let autoConnectEnabled = false;
 // Probed directly ahead of the LAN scan, since Chrome can't reliably brute-force
 // the whole LAN but a direct hit on a known host connects instantly.
 let knownHosts = [];
+// Each member picks their own instrument inside their Songsterr tab; the track is
+// encoded in the URL. We remember the last instrument seen per song (keyed by the
+// track-agnostic songKey) so the next time that song is opened we re-open it on
+// this member's instrument instead of the host's. Persisted to survive restarts.
+let instrumentBySong = {};
+// Cap the remembered-instrument map so it can't grow without bound across many
+// rehearsals. Oldest entries are evicted first.
+const INSTRUMENT_MEMORY_LIMIT = 50;
 
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
@@ -90,6 +98,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "songsterrStatus") {
     lastContentScriptStatusAt = Date.now();
+    rememberInstrumentFromUrl(message.source);
     const tabIdentity = getSongsterrTabIdentity(sender.tab);
     publishAdapterStatus({
       ready: Boolean(message.ready),
@@ -121,10 +130,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrumentBySong"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
   autoConnectEnabled = Boolean(stored.autoConnectEnabled);
   knownHosts = Array.isArray(stored.knownHosts) ? stored.knownHosts : [];
+  instrumentBySong = restoreInstrumentMemory(stored.instrumentBySong);
   // Seed from a previously successful room URL so a known host is probed first
   // even on the first connect after this feature shipped.
   if (!knownHosts.length && stored.roomUrl) {
@@ -153,6 +163,9 @@ chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
     return;
   }
 
+  // Capture instrument switches the moment Songsterr's SPA rewrites the URL, so a
+  // member's choice is remembered without waiting for the next status report.
+  rememberInstrumentFromUrl(changeInfo.url || tab?.url);
   scheduleActiveTabStatusReport();
 });
 
@@ -627,12 +640,7 @@ function getSongsterrTabIdentity(tab) {
     return "";
   }
 
-  try {
-    const url = new URL(tab.url);
-    return `${tab.id}:${normalizePath(url.pathname)}`;
-  } catch {
-    return "";
-  }
+  return `${tab.id}:${songKey(tab.url)}`;
 }
 
 async function ensureSongsterrTabs(currentSong, options = {}) {
@@ -651,18 +659,24 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
       return [];
     }
 
-    // No tab is on this exact song. Prefer reusing an already-open Songsterr tab
-    // by navigating it to the new song -- spawning a fresh tab is slow and resets
-    // the clock/status handshake, throwing the room out of sync. Only fall back
-    // to opening a new tab when no Songsterr tab exists yet.
+    // No tab is on this song yet, so we're about to open/navigate fresh. Rewrite
+    // the host's URL to this member's remembered instrument for the song (if any)
+    // so they land on their own track rather than the host's pinned one. Tabs
+    // already on the song are handled above and left untouched.
+    const targetUrl = rememberedTargetUrl(url);
+
+    // Prefer reusing an already-open Songsterr tab by navigating it to the new
+    // song -- spawning a fresh tab is slow and resets the clock/status handshake,
+    // throwing the room out of sync. Only fall back to opening a new tab when no
+    // Songsterr tab exists yet.
     const reusable = (await findSongsterrTabs())[0];
     if (reusable?.id) {
-      const navigated = await navigateSongsterrTab(reusable, url, Boolean(options.active));
+      const navigated = await navigateSongsterrTab(reusable, targetUrl, Boolean(options.active));
       const loaded = navigated.id ? await waitForTabReady(navigated.id, 7000) : undefined;
       return [loaded || navigated];
     }
 
-    const tab = await chrome.tabs.create({ url, active: Boolean(options.active) });
+    const tab = await chrome.tabs.create({ url: targetUrl, active: Boolean(options.active) });
     const loaded = tab.id ? await waitForTabReady(tab.id, 7000) : undefined;
     return loaded ? [loaded] : tab.id ? [tab] : [];
   }
@@ -700,18 +714,10 @@ async function navigateSongsterrTab(tab, url, active) {
 }
 
 async function findSongsterrTabsForUrl(targetUrl) {
-  const target = new URL(targetUrl);
+  const targetKey = songKey(targetUrl);
   const tabs = (await chrome.tabs.query({}))
     .filter((tab) => isSongsterrUrl(tab.url || ""));
-  return tabs.filter((tab) => {
-    if (!tab.url) return false;
-    try {
-      const url = new URL(tab.url);
-      return normalizePath(url.pathname) === normalizePath(target.pathname);
-    } catch {
-      return false;
-    }
-  });
+  return tabs.filter((tab) => tab.url && songKey(tab.url) === targetKey);
 }
 
 async function requestSongsterrStatusFromTabs(tabs) {
@@ -743,16 +749,8 @@ async function findSongsterrTabs(currentSong) {
     return tabs;
   }
 
-  const target = new URL(targetUrl);
-  const matching = tabs.filter((tab) => {
-    if (!tab.url) return false;
-    try {
-      const url = new URL(tab.url);
-      return normalizePath(url.pathname) === normalizePath(target.pathname);
-    } catch {
-      return false;
-    }
-  });
+  const targetKey = songKey(targetUrl);
+  const matching = tabs.filter((tab) => tab.url && songKey(tab.url) === targetKey);
 
   return matching.length ? matching : tabs;
 }
@@ -802,6 +800,111 @@ function isSongsterrUrl(value) {
 
 function normalizePath(pathname) {
   return pathname.replace(/\/+$/, "").toLowerCase();
+}
+
+// Track-agnostic identity for a Songsterr song. Songsterr encodes the selected
+// instrument in the URL -- a "t<n>" suffix on the "-s<id>" song segment in the
+// path, or a "track" query param. Two URLs for the same song on different
+// instruments must compare equal so a member already on the song is never
+// reloaded onto someone else's instrument. Returns "" for non-Songsterr/invalid.
+function songKey(value) {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    // Strip the instrument suffix only when it directly follows the song id, so a
+    // slug that merely ends in "t<digits>" is left intact. The track query is
+    // ignored implicitly since we key on the path alone.
+    const path = normalizePath(url.pathname).replace(/(-s\d+)t\d+/i, "$1");
+    return path;
+  } catch {
+    return "";
+  }
+}
+
+// Read the selected instrument from a Songsterr URL. Prefers the canonical
+// path-suffix form ("-s<id>t<n>") over the "?track=" query when both appear.
+// Returns { kind: "path" | "query", value } or null when no instrument is pinned.
+function readTrack(value) {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    const pathMatch = /-s\d+t(\d+)/i.exec(url.pathname);
+    if (pathMatch) {
+      return { kind: "path", value: pathMatch[1] };
+    }
+    const query = url.searchParams.get("track");
+    if (query) {
+      return { kind: "query", value: query };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Rewrite a Songsterr URL to a specific instrument. Strips any existing instrument
+// (both forms) first so the result never carries two conflicting tokens, then
+// applies the descriptor in its own form. A null descriptor yields the cleaned,
+// instrument-free song URL.
+function applyTrack(value, descriptor) {
+  try {
+    const url = value instanceof URL ? value : new URL(value);
+    url.pathname = url.pathname.replace(/(-s\d+)t\d+/i, "$1");
+    url.searchParams.delete("track");
+    if (descriptor?.kind === "path") {
+      url.pathname = url.pathname.replace(/(-s\d+)/i, `$1t${descriptor.value}`);
+    } else if (descriptor?.kind === "query") {
+      url.searchParams.set("track", descriptor.value);
+    }
+    return url.toString();
+  } catch {
+    return typeof value === "string" ? value : "";
+  }
+}
+
+// Record the instrument a member is currently viewing for this song. Only stores
+// when an instrument is actually pinned, so the bare song URL seen transiently
+// while the SPA loads can't clobber a real choice. Oldest entries evict first.
+function rememberInstrumentFromUrl(value) {
+  if (!isSongsterrUrl(value)) {
+    return;
+  }
+  const key = songKey(value);
+  const descriptor = readTrack(value);
+  if (!key || !descriptor) {
+    return;
+  }
+
+  // Re-insert at the end so it counts as most-recently-used for eviction.
+  delete instrumentBySong[key];
+  instrumentBySong[key] = descriptor;
+  const keys = Object.keys(instrumentBySong);
+  if (keys.length > INSTRUMENT_MEMORY_LIMIT) {
+    for (const stale of keys.slice(0, keys.length - INSTRUMENT_MEMORY_LIMIT)) {
+      delete instrumentBySong[stale];
+    }
+  }
+  chrome.storage.local.set({ instrumentBySong });
+}
+
+// The URL to actually open/navigate to: the host's song URL rewritten to this
+// member's remembered instrument when we have one, otherwise the host URL as-is.
+function rememberedTargetUrl(value) {
+  const descriptor = instrumentBySong[songKey(value)];
+  return descriptor ? applyTrack(value, descriptor) : value;
+}
+
+// Restore the persisted instrument memory, tolerating absent/legacy data and
+// trimming to the cap (newest kept) in case a previous build stored more.
+function restoreInstrumentMemory(stored) {
+  if (!stored || typeof stored !== "object") {
+    return {};
+  }
+  const keys = Object.keys(stored);
+  const kept = keys.slice(Math.max(0, keys.length - INSTRUMENT_MEMORY_LIMIT));
+  const restored = {};
+  for (const key of kept) {
+    restored[key] = stored[key];
+  }
+  return restored;
 }
 
 function waitForTabReady(tabId, timeoutMs) {
