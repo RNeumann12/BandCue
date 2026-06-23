@@ -199,6 +199,14 @@ The extension can't use raw UDP, so room-code/port lookup checks the local machi
 name, and common LAN subnets. On an unusual subnet, enter `host:port`. **Disconnect** keeps the
 extension offline until you press **Connect** again — it will not silently reconnect.
 
+#### On iPad / iPhone
+
+Chrome extensions **do not** run in Chrome or Safari on iPadOS/iOS. Use the
+[Orion browser](https://browser.kagi.com/) instead — it supports loading Chrome/Firefox
+extensions, so the BandCue Songsterr extension works there. On iPad/iPhone, auto-discovery
+(room code, port, mDNS, LAN scan) does **not** work — you must connect with the full
+`host:port` (e.g. `192.168.1.23:4173`) or the full room URL.
+
 ### Songsterr on Android
 
 A native Android adapter lives in `android/`. Build the debug APK with `npm run build:android`,
