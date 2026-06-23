@@ -977,6 +977,17 @@ function startBridge(port: number): void {
     res.end("Not found");
   });
 
+  bridgeServer.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EADDRINUSE") {
+      console.error(`MuseScore bridge could not start: port ${port} is already in use.`);
+      console.error("Another MuseScore helper (or a leftover one) is probably still running.");
+      console.error(`Close it, or pass a different port with --bridge-port, e.g. --bridge-port ${port + 1}.`);
+    } else {
+      console.error(`MuseScore bridge failed to start: ${error.message}`);
+    }
+    bridgeServer = undefined;
+  });
+
   bridgeServer.listen(port, "127.0.0.1", () => {
     const address = bridgeServer?.address();
     const actualPort = typeof address === "object" && address ? address.port : port;

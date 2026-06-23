@@ -9,6 +9,15 @@ const extraMuseScoreArgs = splitArgs(
   process.env.BANDCUE_MUSESCORE_ARGS || process.env.PLAYSYNC_MUSESCORE_ARGS || ""
 );
 const coordinatorPort = process.env.BANDCUE_PORT || process.env.PORT || "4173";
+// Pin the locally-launched MuseScore helper to this machine's coordinator. The
+// helper starts before the coordinator's HTTP is listening, so a bare port
+// locator's 127.0.0.1 probe fails and discovery falls through to the LAN scan --
+// which can attach the helper to a *different* BandCue room running on another
+// device. A host:port locator keeps it on localhost (and simply retries until
+// the coordinator is up) instead of roaming the network. Override with
+// BANDCUE_MUSESCORE_ROOM when you really want it to join a remote room.
+const museScoreRoom =
+  process.env.BANDCUE_MUSESCORE_ROOM || process.env.PLAYSYNC_MUSESCORE_ROOM || `127.0.0.1:${coordinatorPort}`;
 
 // Bridge mode: run this host on the MuseScore bridge API instead of acting as a
 // Songsterr player. Enable with `npm run dev:all -- --musescore-bridge [port]`
@@ -69,6 +78,8 @@ function startMuseScore(): void {
     "run",
     "dev:musescore",
     "--",
+    "--room",
+    museScoreRoom,
     "--port",
     coordinatorPort,
     "--name",
