@@ -21,7 +21,8 @@ import {
   formatElapsed,
   formatMs,
   formatSignedMs,
-  formatSongMeta
+  formatSongMeta,
+  parseDurationInput
 } from "./host-logic.js";
 
 const params = new URLSearchParams(location.search);
@@ -60,6 +61,7 @@ const elements = {
   songSourceInput: document.querySelector("#songSourceInput"),
   songSongsterrUrlInput: document.querySelector("#songSongsterrUrlInput"),
   songMuseScoreSourceInput: document.querySelector("#songMuseScoreSourceInput"),
+  songDurationInput: document.querySelector("#songDurationInput"),
   songNotesInput: document.querySelector("#songNotesInput"),
   previousSongButton: document.querySelector("#previousSongButton"),
   nextSongButton: document.querySelector("#nextSongButton"),
@@ -747,6 +749,7 @@ function addSetlistSong() {
     return;
   }
 
+  const durationMs = parseDurationInput(elements.songDurationInput.value);
   const song = {
     id: createId(),
     title,
@@ -754,6 +757,8 @@ function addSetlistSong() {
     source: elements.songSourceInput.value.trim(),
     songsterrUrl: elements.songSongsterrUrlInput.value.trim(),
     museScoreSource: elements.songMuseScoreSourceInput.value.trim(),
+    durationMs,
+    durationSource: durationMs ? "manual" : undefined,
     notes: elements.songNotesInput.value.trim()
   };
 

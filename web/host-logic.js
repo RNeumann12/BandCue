@@ -260,6 +260,46 @@ export function formatElapsed(ms) {
   return `${minutes}:${seconds}`;
 }
 
+// Parse a manually entered duration into milliseconds. Accepts colon notation
+// ("mm:ss" or "h:mm:ss") or a bare number of seconds, and reuses
+// sanitizeDurationMs for range validation. Returns undefined for blank or
+// invalid input so callers can simply omit the duration.
+export function parseDurationInput(value) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  const text = String(value).trim();
+  if (!text) {
+    return undefined;
+  }
+
+  if (text.includes(":")) {
+    const parts = text.split(":");
+    if (parts.length > 3 || parts.some((part) => !/^\d+$/.test(part))) {
+      return undefined;
+    }
+
+    const numbers = parts.map(Number);
+    while (numbers.length < 3) {
+      numbers.unshift(0);
+    }
+
+    const [hours, minutes, seconds] = numbers;
+    if (minutes > 59 || seconds > 59) {
+      return undefined;
+    }
+
+    return sanitizeDurationMs((hours * 3600 + minutes * 60 + seconds) * 1000);
+  }
+
+  if (!/^\d+$/.test(text)) {
+    return undefined;
+  }
+
+  return sanitizeDurationMs(Number(text) * 1000);
+}
+
 export function formatMs(value) {
   if (value === undefined) {
     return "--";

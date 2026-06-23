@@ -21,6 +21,7 @@ import {
   nextSongIndex,
   normalizeSong,
   normalizeStoredSong,
+  parseDurationInput,
   playBlockedReason,
   previousSongIndex,
   sanitizeDurationMs,
@@ -131,6 +132,34 @@ describe("sanitizeDurationMs", () => {
     expect(sanitizeDurationMs(-5)).toBeUndefined();
     expect(sanitizeDurationMs("abc")).toBeUndefined();
     expect(sanitizeDurationMs(25 * 60 * 60 * 1000)).toBeUndefined();
+  });
+});
+
+describe("parseDurationInput", () => {
+  it("parses mm:ss and h:mm:ss notation", () => {
+    expect(parseDurationInput("3:45")).toBe(225_000);
+    expect(parseDurationInput("0:30")).toBe(30_000);
+    expect(parseDurationInput("1:02:03")).toBe(3_723_000);
+  });
+
+  it("parses a bare number as seconds", () => {
+    expect(parseDurationInput("90")).toBe(90_000);
+    expect(parseDurationInput(" 90 ")).toBe(90_000);
+  });
+
+  it("returns undefined for blank input", () => {
+    expect(parseDurationInput("")).toBeUndefined();
+    expect(parseDurationInput("   ")).toBeUndefined();
+    expect(parseDurationInput(undefined)).toBeUndefined();
+  });
+
+  it("rejects malformed, out-of-range, and overflowing values", () => {
+    expect(parseDurationInput("3:60")).toBeUndefined();
+    expect(parseDurationInput("3:75")).toBeUndefined();
+    expect(parseDurationInput("1:2:3:4")).toBeUndefined();
+    expect(parseDurationInput("abc")).toBeUndefined();
+    expect(parseDurationInput("3:4a")).toBeUndefined();
+    expect(parseDurationInput("0:00")).toBeUndefined();
   });
 });
 
