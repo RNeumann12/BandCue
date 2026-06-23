@@ -257,9 +257,9 @@ async function connect() {
       });
       // Get the tab onto the right song when the count-in *starts*, not when it
       // reaches zero. Loading/navigating a tab takes longer than the count-in, so
-      // doing it at play time reloads the page on the downbeat and throws the band
-      // out of sync. ensureSongsterrTabs is a no-op when the tab is already on the
-      // song, so an already-open tab is never reloaded.
+      // doing it at play time would reload the page on the downbeat and throw the
+      // band out of sync. This is the only place that navigates; the downbeat
+      // (sendTransportToSongsterr) only locates the already-loaded tab.
       if (message.action === "play") {
         ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
       }
@@ -342,7 +342,13 @@ function scheduleReconnect() {
 }
 
 async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false) {
-  const tabs = await ensureSongsterrTabs(currentSong);
+  // At the downbeat we only *locate* an existing Songsterr tab -- we never
+  // navigate or create one here. The eager pre-open at count-in start
+  // (ensureSongsterrTabs) is responsible for getting the right song loaded.
+  // Navigating at play time reloads the page on the downbeat (Songsterr's SPA
+  // rewrites the path with a track suffix, so an exact-URL match can miss even
+  // when the tab is already on the song) and throws the band out of sync.
+  const tabs = await findSongsterrTabs(currentSong);
   if (!tabs.length) {
     reportCommandStatus({
       action,

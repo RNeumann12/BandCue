@@ -186,4 +186,36 @@ describe("play count-in pre-opens the tab", () => {
     expect(created).toHaveLength(0);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
   });
+
+});
+
+describe("downbeat never navigates or reloads", () => {
+  // The downbeat dispatcher (sendTransportToSongsterr) only locates an existing
+  // tab. It must never navigate or create one -- the pre-open at count-in start
+  // owns that. Re-navigating here reloads the page on the downbeat and throws the
+  // band out of sync, even when the tab is technically a Songsterr tab.
+  it("dispatches play to an existing Songsterr tab without re-navigating it", async () => {
+    const { context, created, updated } = loadBackground([
+      { id: 1, url: SONG_A, windowId: 1 }
+    ]);
+
+    // The pre-open already handled SONG_B; the downbeat runs against whatever tab
+    // exists. Even though tab 1's URL does not exactly match SONG_B, it must not
+    // be reloaded.
+    await context.sendTransportToSongsterr("play", 1, { songsterrUrl: SONG_B });
+
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+
+  it("dispatches stop to an existing Songsterr tab without re-navigating it", async () => {
+    const { context, created, updated } = loadBackground([
+      { id: 1, url: SONG_A, windowId: 1 }
+    ]);
+
+    await context.sendTransportToSongsterr("stop", 2, { songsterrUrl: SONG_B });
+
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
 });
