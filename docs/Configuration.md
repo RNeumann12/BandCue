@@ -12,7 +12,9 @@ Every command-line flag and environment variable that BandCue understands. Defau
 | `npm run dev:all:bridge` | `dev:all` with MuseScore in bridge mode (`--musescore-bridge`). |
 | `npm run dev:musescore` | The MuseScore Windows helper ([`musescore-windows.ts`](../src/adapters/musescore-windows.ts)). |
 | `npm run preflight` | Pre-rehearsal environment checks. |
+| `npm run generate:icons` | Generate extension and Android launcher PNGs from the BandCue icon source. |
 | `npm run package:extension` | Zip the Chrome/Edge extension. |
+| `npm run package:release` | Build the public-beta release folder and zip. |
 | `npm run build:android` | Build the debug APK (bootstraps Gradle). |
 | `npm run build:android:release` | Build a signed release APK (`assembleRelease`). |
 | `npm run test:android` | Android JVM tests. |
@@ -22,6 +24,13 @@ Every command-line flag and environment variable that BandCue understands. Defau
 
 Pass flags through an npm script with `--`, e.g.
 `npm run dev:musescore -- --name "MuseScore laptop"`.
+
+Windows public-beta launchers:
+
+| Launcher | What it runs |
+| --- | --- |
+| `BandCue Host.cmd` | Checks Node/deps, runs preflight, starts `npm run dev`, and opens the host URL. |
+| `BandCue Host - MuseScore Bridge.cmd` | Same startup flow, but starts `npm run dev:all:bridge`. |
 
 ## Coordinator (`npm run dev`)
 

@@ -22,7 +22,9 @@ To run the Android JVM tests:
 npm run test:android
 ```
 
-This project is intended for sideload/debug APK use first. It has no Play Store packaging flow yet.
+This project is intended for sideload/public-beta APK use first. It has no Play Store packaging
+flow yet. The v1.0 public-beta bundle copies the release APK to
+`packages/bandcue-songsterr-1.0.0.apk`.
 
 ## Phone Setup
 

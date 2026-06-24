@@ -20,6 +20,16 @@ npm run preflight   # verify Node version, deps, and required files
 npm run dev         # start the coordinator
 ```
 
+On Windows, v1.0 also includes double-click launchers in the repo/release root:
+
+```text
+BandCue Host.cmd
+BandCue Host - MuseScore Bridge.cmd
+```
+
+They require Node.js 20+, install dependencies on first run when needed, run preflight, start the
+appropriate host command, and open the host URL when the coordinator prints it.
+
 ## TypeScript Workflow
 
 The server, shared library, adapters, and tools are TypeScript, run directly with `tsx` (no build
@@ -69,6 +79,9 @@ without a build. Package for distribution:
 ```powershell
 npm run package:extension
 ```
+
+The package script writes both `dist/packages/bandcue-songsterr-extension.zip` and a versioned
+`dist/packages/bandcue-songsterr-extension-<version>.zip`.
 
 ## Android Adapter
 
@@ -127,12 +140,28 @@ src/
     preflight.ts           Pre-rehearsal checks
     start-rehearsal.ts     dev:all orchestration
     package-extension.ts   Extension zip packaging
+    package-release.ts     Public beta release bundle packaging
+    generate-icons.ts      Browser/Android icon generation
 web/                Host + companion UI (static)
 extension/songsterr/  Chrome/Edge MV3 adapter
 android/            Native Kotlin adapter (+ its own README)
 scripts/build-android.ps1   Gradle-bootstrapping Android build
+scripts/Start-BandCueHost.ps1  Windows public-beta host launcher
 docs/               This documentation set
 ```
+
+## Public Beta Release Bundle
+
+Build the v1.0-style release folder and zip with:
+
+```powershell
+npm run package:release
+```
+
+The script regenerates icons, packages the extension, builds the Android release APK, and writes
+`dist/release/bandcue-v<version>/` plus `dist/release/bandcue-v<version>.zip`. Use
+`npm run package:release -- --skip-android` only for dry runs when the Android toolchain is not
+available.
 
 ## Coding Conventions
 

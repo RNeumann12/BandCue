@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0 - 2026-06-24
+
+### Added
+
+- Added BandCue public-beta branding with generated browser-extension and Android launcher icons.
+- Added double-click Windows host launchers for the standard coordinator and MuseScore bridge mode.
+- Added a v1.0 release packaging script that builds icons, packages the extension, collects the Android APK, writes checksums, and creates a public-beta zip.
+
+### Changed
+
+- Bumped the Node package, Songsterr extension, and Android adapter to version 1.0.0.
+- Android now declares launcher and round launcher icons.
+- Extension packaging now emits both stable and versioned zip filenames.
+
 ## 0.6.0 - 2026-06-24
 
 ### Added

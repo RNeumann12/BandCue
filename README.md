@@ -87,6 +87,21 @@ For the full picture, see [docs/Architecture.md](docs/Architecture.md).
 
 Requires **Node.js 20+** on the coordinator machine.
 
+For the v1.0 public-beta Windows flow, double-click:
+
+```text
+BandCue Host.cmd
+```
+
+The launcher checks Node/dependencies, runs preflight, starts the coordinator, and opens the host
+controls in your browser once the room is ready. For a MuseScore bridge host, use:
+
+```text
+BandCue Host - MuseScore Bridge.cmd
+```
+
+Developer/manual startup still works:
+
 ```powershell
 npm install
 npm run dev
@@ -112,6 +127,12 @@ Package the Chrome/Edge extension into a distributable zip:
 
 ```powershell
 npm run package:extension
+```
+
+Create the public-beta release bundle:
+
+```powershell
+npm run package:release
 ```
 
 See [docs/Development.md](docs/Development.md) for every script, environment variable, and the

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">BandCue icon</title>
+  <desc id="desc">A cue mark with a play triangle and beat dot.</desc>
+  <defs>
+    <linearGradient id="bg" x1="192" y1="96" x2="832" y2="928" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102331"/>
+      <stop offset="1" stop-color="#14171f"/>
+    </linearGradient>
+    <linearGradient id="cue" x1="256" y1="240" x2="792" y2="736" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7dd3c7"/>
+      <stop offset="1" stop-color="#45b3c7"/>
+    </linearGradient>
+  </defs>
+  <circle cx="512" cy="512" r="456" fill="url(#bg)"/>
+  <path
+    d="M280 646a298 298 0 0 1-8-259 300 300 0 0 1 180-164 299 299 0 0 1 242 14"
+    fill="none"
+    stroke="url(#cue)"
+    stroke-width="76"
+    stroke-linecap="round"/>
+  <circle cx="718" cy="268" r="46" fill="#ffd166"/>
+  <path d="M392 310v404l314-202z" fill="#f6f8f1"/>
+  <rect x="724" y="404" width="66" height="252" rx="33" fill="#ffd166"/>
+  <circle cx="757" cy="706" r="42" fill="#ffd166"/>
+</svg>
