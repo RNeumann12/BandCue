@@ -19,6 +19,7 @@ import {
   canHostPlay,
   playBlockedReason,
   setlistLoadDecision,
+  shouldAdvanceSetlistOnStop,
   collectWarnings,
   formatElapsed,
   formatMs,
@@ -916,9 +917,11 @@ function driveSetlistRun(state) {
   if (status === "stopped") {
     if (setlistAbort) {
       setlistRunPhase = "idle";
-    } else if (prevTransportStatus === "running") {
+    } else if (shouldAdvanceSetlistOnStop(state, prevTransportStatus)) {
       handleSongFinished();
     } else if (prevTransportStatus === "scheduled") {
+      abortSetlistRunner("Setlist mode stopped: playback was cancelled.");
+    } else if (prevTransportStatus === "running") {
       abortSetlistRunner("Setlist mode stopped: playback was cancelled.");
     }
   }
@@ -938,12 +941,12 @@ function playCurrentSongForRun() {
   send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
   setlistRunPhase = "playing";
 
-  // Songsterr reports a duration once loaded, so the server can auto-stop even
-  // without a manual time; warn when nothing can supply one.
+  // Auto-advance can come from a known duration or from adapters naturally
+  // reporting stopped after playback.
   const durationKnown = Boolean(song.durationMs) || appliesToSongsterr(song);
   setSetlistModeStatus(durationKnown
     ? `Playing ${currentSongLabel()} - auto-advances at the end.`
-    : `Playing ${currentSongLabel()} - no known duration; use Next or Stop to advance.`);
+    : `Playing ${currentSongLabel()} - auto-advances when adapters stop.`);
 }
 
 function handleSongFinished() {

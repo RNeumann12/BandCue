@@ -145,7 +145,7 @@ name locally and re-applies them on reconnect.
 | --- | --- |
 | `roomCode`, `serverTime` | Identity + the server's current time (anchors countdowns). |
 | `clients[]` | Every connected client: role, device name, capabilities, last adapter status, and clock (rtt/offset/jitter/manualOffset). |
-| `transport` | `{ status: stopped \| scheduled \| running, leaderId, action, sequenceId, scheduledServerTime, startedServerTime }`. |
+| `transport` | `{ status: stopped \| scheduled \| running, leaderId, action, sequenceId, scheduledServerTime, startedServerTime, stopReason }`. |
 | `currentSong` | The published current setlist song + index/total. |
 | `setlist` | The full ordered song list (host-owned). |
 | `safety` | `{ armed, controlMode }`. |
@@ -156,23 +156,31 @@ name locally and re-applies them on reconnect.
 ```
  stopped ──play accepted──► scheduled ──(scheduledServerTime reached)──► running
     ▲                                                                       │
-    └──────── stop accepted / leader disconnect / duration auto-stop ◄──────┘
+    └──── stop accepted / leader disconnect / automatic end detection ◄─────┘
 ```
 
 - **scheduled → running**: a server timer fires at `scheduledServerTime` and flips the state.
 - **Leader disconnect**: if the transport leader drops while not stopped, the server broadcasts a
   Stop and returns to stopped.
+- **Manual stop**: an accepted Stop request returns the room to stopped with
+  `stopReason: "manual"` and broadcasts Stop to adapters.
 - **Duration auto-stop**: if the current song has a known `durationMs`, the server schedules an
   auto-stop at `startedServerTime + durationMs`. This updates the room/UI state to **stopped**
   but deliberately **does not broadcast a Stop command** — clients that already auto-stopped
   shouldn't be toggled. (Stop on toggle-like players is fragile; see [Improvements.md](Improvements.md).)
+- **Playback auto-stop**: while running, the server tracks adapters that report `playback:
+  "playing"`. Once those observed players all report `playback: "stopped"` and stay that way
+  briefly, the server marks the room stopped with `stopReason: "auto-playback-ended"`, again
+  without broadcasting Stop.
 
 ### Song duration discovery
 
 Adapters may report `durationMs` in their `adapterStatus`. When a report matches the current song
 (by normalized source URL, or by exact normalized title after stripping a Songsterr "… Tab by …"
 suffix), the server records `durationSource: "adapter"` on the song and (re)arms the auto-stop
-timer. This is how the host UI knows when a song ends without anyone pressing Stop.
+timer. Setlist mode can also advance without a duration when adapter playback status naturally
+settles from playing to stopped. Manual room Stop still uses `stopReason: "manual"`, so the host
+knows to cancel the run instead of advancing.
 
 ## Safety & Permissions
 

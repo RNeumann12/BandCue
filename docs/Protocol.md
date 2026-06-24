@@ -36,6 +36,7 @@ client                                   server
 | `TransportAction` | `play` · `stop` |
 | `AdapterCommandAction` | `play` · `stop` · `open-song` |
 | `TransportStatus` | `stopped` · `scheduled` · `running` |
+| `StopReason` | `manual` · `auto-duration` · `auto-playback-ended` · `leader-disconnect` |
 | `SongSourceType` | `songsterr` · `musescore` · `other` |
 | `ControlMode` | `host-only` · `leader-stop` · `everyone-can-stop` |
 | `AdapterState` | `ready` · `not-ready` · `command-pending` · `last-command-succeeded` · `last-command-failed` |
@@ -205,7 +206,7 @@ See [Architecture.md → Room State](Architecture.md#room-state) for the field m
   "roomCode": "47B06D",
   "serverTime": 1718900000000,
   "clients": [ { "id": "…", "deviceName": "…", "role": "desktop-adapter", "capabilities": [], "status": {…}, "clock": {…} } ],
-  "transport": { "status": "running", "leaderId": "…", "action": "play", "sequenceId": 7, "scheduledServerTime": 1718900001500, "startedServerTime": 1718900001500 },
+  "transport": { "status": "stopped", "leaderId": "…", "action": "stop", "sequenceId": 8, "scheduledServerTime": 1718900140000, "stopReason": "auto-playback-ended" },
   "currentSong": { "song": {…}, "index": 2, "total": 8, "updatedAt": 1718900000000 },
   "setlist": { "songs": [], "updatedAt": 1718900000000 },
   "safety": { "armed": false, "controlMode": "leader-stop", "updatedAt": 1718900000000 },

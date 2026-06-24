@@ -288,6 +288,15 @@ export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, 
   return elapsedMs >= settleMs ? "play" : "wait";
 }
 
+export function shouldAdvanceSetlistOnStop(state, previousTransportStatus) {
+  if (state?.transport?.status !== "stopped" || previousTransportStatus !== "running") {
+    return false;
+  }
+
+  return state.transport.stopReason === "auto-duration" ||
+    state.transport.stopReason === "auto-playback-ended";
+}
+
 export function collectWarnings(state, readyAdapters, desktopAdapters) {
   const warnings = [];
 

@@ -27,6 +27,7 @@ import {
   previousSongIndex,
   sanitizeDurationMs,
   setlistLoadDecision,
+  shouldAdvanceSetlistOnStop,
   summarizeClock
 } from "./host-logic.js";
 
@@ -325,6 +326,26 @@ describe("setlistLoadDecision", () => {
   it("waits for the settle window once an adapter is ready, then plays", () => {
     expect(setlistLoadDecision(readyState, { ...options, elapsedMs: 1000 })).toBe("wait");
     expect(setlistLoadDecision(readyState, { ...options, elapsedMs: 4500 })).toBe("play");
+  });
+});
+
+describe("shouldAdvanceSetlistOnStop", () => {
+  it("advances only for automatic end-of-song stop reasons", () => {
+    expect(shouldAdvanceSetlistOnStop({
+      transport: { status: "stopped", stopReason: "auto-duration" }
+    }, "running")).toBe(true);
+    expect(shouldAdvanceSetlistOnStop({
+      transport: { status: "stopped", stopReason: "auto-playback-ended" }
+    }, "running")).toBe(true);
+    expect(shouldAdvanceSetlistOnStop({
+      transport: { status: "stopped", stopReason: "manual" }
+    }, "running")).toBe(false);
+    expect(shouldAdvanceSetlistOnStop({
+      transport: { status: "stopped", stopReason: "leader-disconnect" }
+    }, "running")).toBe(false);
+    expect(shouldAdvanceSetlistOnStop({
+      transport: { status: "stopped", stopReason: "auto-duration" }
+    }, "scheduled")).toBe(false);
   });
 });
 

@@ -172,9 +172,10 @@ or when the local match is missing or ambiguous.
 **Setlist mode** plays the whole list hands-free. Enable the **Setlist mode** toggle and the host
 loads the current song on every adapter, arms, and starts playback; when a song reaches its end
 the room auto-advances to the next entry, loads it, and plays it, until the list is finished. End
-detection relies on the song's duration — Songsterr reports it automatically once a song is
-loaded, and any song can carry a manually entered time. A song with no known duration plays until
-you press **Next** or **Stop**. A manual **Stop** (or turning the toggle off) ends the run.
+detection uses either the song's duration or adapter playback status: if every adapter observed
+playing reports stopped, the room treats that as the end of the song. Songsterr may also report a
+duration automatically once a song is loaded, and any song can carry a manually entered time. A
+manual **Stop** (or turning the toggle off) ends the run without advancing.
 
 ### Safety Controls
 

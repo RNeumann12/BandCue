@@ -695,7 +695,86 @@ describe("RoomController", () => {
       expect(room.getState(3100).transport).toMatchObject({
         status: "stopped",
         action: "stop",
-        sequenceId: 2
+        sequenceId: 2,
+        stopReason: "auto-duration"
+      });
+      const stopCommands = adapterMessages
+        .map((message) => JSON.parse(message))
+        .filter((message) => message.type === "transportCommand" && message.action === "stop");
+      expect(stopCommands).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("auto-stops the room when observed playback clients all report stopped", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const adapterMessages: string[] = [];
+      const room = new RoomController("ABC123", "http://room", "http://host", 100);
+      const host = room.addClient(undefined, {
+        type: "clientHello",
+        deviceName: "Host",
+        role: "host",
+        capabilities: []
+      }, 1000);
+      const adapter = room.addClient(fakeSocket(adapterMessages), {
+        type: "clientHello",
+        deviceName: "MuseScore",
+        role: "desktop-adapter",
+        capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+      }, 1000);
+
+      room.handleMessage(host.id, {
+        type: "currentSongUpdate",
+        index: 1,
+        total: 1,
+        updatedAt: 1000,
+        song: {
+          id: "song-1",
+          title: "Song Without Duration",
+          sourceType: "musescore"
+        }
+      }, 1000);
+      room.handleMessage(host.id, {
+        type: "safetyUpdate",
+        armed: true,
+        updatedAt: 1000
+      }, 1000);
+      adapterMessages.length = 0;
+
+      room.handleMessage(host.id, {
+        type: "transportRequest",
+        action: "play",
+        requestedAt: 1000
+      }, 1000);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(room.getState(1100).transport.status).toBe("running");
+
+      room.handleMessage(adapter.id, {
+        type: "adapterStatus",
+        app: "musescore",
+        ready: true,
+        playback: "playing"
+      }, 1100);
+      room.handleMessage(adapter.id, {
+        type: "adapterStatus",
+        app: "musescore",
+        ready: true,
+        playback: "stopped"
+      }, 1100);
+
+      await vi.advanceTimersByTimeAsync(749);
+      expect(room.getState(1849).transport.status).toBe("running");
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(room.getState(1850).transport).toMatchObject({
+        status: "stopped",
+        action: "stop",
+        sequenceId: 2,
+        stopReason: "auto-playback-ended"
       });
       const stopCommands = adapterMessages
         .map((message) => JSON.parse(message))
