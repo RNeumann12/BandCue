@@ -35,6 +35,8 @@ export function normalizeSong(song) {
     sourceType: song.sourceType,
     source: song.source || undefined,
     songsterrUrl: song.songsterrUrl || undefined,
+    songsterrBassUrl: song.songsterrBassUrl || undefined,
+    songsterrDrumUrl: song.songsterrDrumUrl || undefined,
     museScoreSource: song.museScoreSource || undefined,
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
@@ -59,6 +61,8 @@ export function normalizeStoredSong(song) {
     sourceType,
     source: typeof song.source === "string" ? song.source.trim() : "",
     songsterrUrl: typeof song.songsterrUrl === "string" ? song.songsterrUrl.trim() : "",
+    songsterrBassUrl: typeof song.songsterrBassUrl === "string" ? song.songsterrBassUrl.trim() : "",
+    songsterrDrumUrl: typeof song.songsterrDrumUrl === "string" ? song.songsterrDrumUrl.trim() : "",
     museScoreSource: typeof song.museScoreSource === "string" ? song.museScoreSource.trim() : "",
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
@@ -104,6 +108,15 @@ export function songsterrReference(song) {
   return song?.sourceType === "songsterr" ? (song.source?.trim() ?? "") : "";
 }
 
+export function songsterrReferences(song) {
+  const references = [
+    songsterrReference(song),
+    song?.songsterrBassUrl?.trim() ?? "",
+    song?.songsterrDrumUrl?.trim() ?? ""
+  ].filter(Boolean);
+  return [...new Set(references)];
+}
+
 export function museScoreReference(song) {
   const dedicated = song?.museScoreSource?.trim();
   if (dedicated) {
@@ -114,6 +127,15 @@ export function museScoreReference(song) {
 
 export function appliesToMuseScore(song) {
   return Boolean(song) && (song.sourceType === "musescore" || Boolean(song.museScoreSource?.trim()));
+}
+
+export function appliesToSongsterr(song) {
+  return Boolean(song) && (
+    song.sourceType === "songsterr" ||
+    Boolean(song.songsterrUrl?.trim()) ||
+    Boolean(song.songsterrBassUrl?.trim()) ||
+    Boolean(song.songsterrDrumUrl?.trim())
+  );
 }
 
 export function getSongsterrUrl(song) {
@@ -129,9 +151,31 @@ export function getSongsterrUrl(song) {
   }
 }
 
+export function getAnySongsterrUrl(song) {
+  for (const reference of songsterrReferences(song)) {
+    const url = normalizeOpenableUrl(reference);
+    if (url) {
+      return url;
+    }
+  }
+  return "";
+}
+
+function normalizeOpenableUrl(reference) {
+  if (!reference) {
+    return "";
+  }
+  try {
+    const url = new URL(reference);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
 // A song is openable when at least one adapter can resolve a reference for it.
 export function isOpenableSong(song) {
-  return Boolean(song) && (appliesToMuseScore(song) || Boolean(getSongsterrUrl(song)));
+  return Boolean(song) && (appliesToMuseScore(song) || Boolean(getAnySongsterrUrl(song)));
 }
 
 // --- Clock / timing math --------------------------------------------------
@@ -352,6 +396,8 @@ export function formatSongMeta(song, index, total) {
   const references = [];
   if (song.source) references.push(song.source);
   if (song.songsterrUrl) references.push(`Songsterr: ${song.songsterrUrl}`);
+  if (song.songsterrBassUrl) references.push(`Bass: ${song.songsterrBassUrl}`);
+  if (song.songsterrDrumUrl) references.push(`Drums: ${song.songsterrDrumUrl}`);
   if (song.museScoreSource) references.push(`MuseScore: ${song.museScoreSource}`);
   const reference = references.length ? ` - ${references.join(" | ")}` : "";
   const duration = song.durationMs

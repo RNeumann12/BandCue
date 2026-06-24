@@ -36,6 +36,7 @@ class BandCueAdapterService : Service() {
     private var currentSong: CurrentSong? = null
     private var roomLocator: String = DEFAULT_ROOM_PORT.toString()
     private var deviceName: String = "Android Songsterr"
+    private var memberInstrument: String = "auto"
     private var serverOffsetMs = 0.0
     @Volatile private var shouldReconnect = false
     @Volatile private var connectionState = "not connected"
@@ -53,9 +54,11 @@ class BandCueAdapterService : Service() {
                 roomLocator = intent.getStringExtra(EXTRA_ROOM_LOCATOR) ?: DEFAULT_ROOM_PORT.toString()
                 deviceName = intent.getStringExtra(EXTRA_DEVICE_NAME)?.takeIf { it.isNotBlank() }
                     ?: "Android Songsterr"
+                memberInstrument = normalizeInstrument(intent.getStringExtra(EXTRA_INSTRUMENT))
                 shouldReconnect = true
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                     .putBoolean(PREF_AUTO_CONNECT, true)
+                    .putString(PREF_INSTRUMENT, memberInstrument)
                     .apply()
                 connect()
             }
@@ -279,7 +282,7 @@ class BandCueAdapterService : Service() {
         publishAdapterStatus(stateOverride = "command-pending")
         publishUiStatus()
 
-        val songUrl = command.currentSong?.songsterrReference
+        val songUrl = command.currentSong?.songsterrReferenceForInstrument(effectiveSongsterrInstrument())
         val openedSongForCommand = if (!songUrl.isNullOrBlank() && findSongsterrController() == null && shouldOpenSongForCommand()) {
             openSongsterrUrl(songUrl)
         } else {
@@ -310,7 +313,7 @@ class BandCueAdapterService : Service() {
         publishAdapterStatus(stateOverride = "command-pending")
         publishUiStatus()
 
-        val songUrl = song?.songsterrReference
+        val songUrl = song?.songsterrReferenceForInstrument(effectiveSongsterrInstrument())
         if (songUrl.isNullOrBlank()) {
             latestCommand = AdapterCommandStatus(
                 action = "open-song",
@@ -500,7 +503,7 @@ class BandCueAdapterService : Service() {
         val notificationEnabled = isNotificationListenerEnabled()
         val controller = if (notificationEnabled) findSongsterrController() else null
         val playback = playbackOverride ?: playbackFromController(controller)
-        val songUrl = currentSong?.songsterrReference
+        val songUrl = currentSong?.songsterrReferenceForInstrument(effectiveSongsterrInstrument())
         val songOpenable = !songUrl.isNullOrBlank() && canOpenSongsterrUrl(songUrl)
         val title = mediaTitle(controller) ?: currentSong?.title
 
@@ -567,7 +570,7 @@ class BandCueAdapterService : Service() {
     }
 
     private fun openCurrentSong() {
-        val source = currentSong?.songsterrReference
+        val source = currentSong?.songsterrReferenceForInstrument(effectiveSongsterrInstrument())
         if (source.isNullOrBlank()) {
             connectionDetail = "No current Songsterr URL to open."
             publishUiStatus()
@@ -592,6 +595,10 @@ class BandCueAdapterService : Service() {
         } catch (_: Exception) {
             false
         }
+    }
+
+    private fun effectiveSongsterrInstrument(): String {
+        return if (memberInstrument == "auto") "guitar" else memberInstrument
     }
 
     private fun canOpenSongsterrUrl(value: String): Boolean {
@@ -699,6 +706,7 @@ class BandCueAdapterService : Service() {
         const val ACTION_STATUS = "com.bandcue.songsterr.STATUS"
         const val EXTRA_ROOM_LOCATOR = "roomLocator"
         const val EXTRA_DEVICE_NAME = "deviceName"
+        const val EXTRA_INSTRUMENT = "instrument"
         const val EXTRA_CONNECTION_STATE = "connectionState"
         const val EXTRA_CONNECTION_DETAIL = "connectionDetail"
         const val EXTRA_CURRENT_SONG = "currentSong"
@@ -713,5 +721,6 @@ class BandCueAdapterService : Service() {
         private const val SONGSTERR_OPEN_SETTLE_MS = 1500L
         private const val PREFS_NAME = "bandcue-songsterr"
         private const val PREF_AUTO_CONNECT = "autoConnect"
+        private const val PREF_INSTRUMENT = "instrument"
     }
 }

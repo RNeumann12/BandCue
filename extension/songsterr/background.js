@@ -413,7 +413,7 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
 }
 
 async function openSongsterrFromRoom(currentSong, sequenceId) {
-  if (!normalizeSongsterrUrl(songsterrReference(currentSong))) {
+  if (!songsterrReferences(currentSong).some((reference) => normalizeSongsterrUrl(reference))) {
     reportCommandStatus({
       action: "open-song",
       sequenceId,
@@ -649,13 +649,14 @@ function getSongsterrTabIdentity(tab) {
 }
 
 async function ensureSongsterrTabs(currentSong, options = {}) {
-  const url = normalizeSongsterrUrl(songsterrReference(currentSong));
-  if (songsterrReference(currentSong)) {
-    if (!url) {
+  const references = songsterrReferences(currentSong);
+  const urls = references.map(normalizeSongsterrUrl).filter(Boolean);
+  if (references.length) {
+    if (!urls.length) {
       return [];
     }
 
-    const existing = await findSongsterrTabsForUrl(url);
+    const existing = await findSongsterrTabsForUrls(urls);
     if (existing.length) {
       return options.active ? [await activateSongsterrTab(existing[0]), ...existing.slice(1)] : existing;
     }
@@ -675,7 +676,10 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
     // part rather than the host's. On "auto" the instrument is read from the tab
     // we're about to reuse. Tabs already on the song are handled above and left
     // untouched.
-    const targetUrl = resolveMemberInstrumentUrl(url, reusable);
+    const targetUrl = normalizeSongsterrUrl(resolveMemberInstrumentUrl(currentSong, reusable));
+    if (!targetUrl) {
+      return [];
+    }
 
     if (reusable?.id) {
       const navigated = await navigateSongsterrTab(reusable, targetUrl, Boolean(options.active));
@@ -721,10 +725,14 @@ async function navigateSongsterrTab(tab, url, active) {
 }
 
 async function findSongsterrTabsForUrl(targetUrl) {
-  const targetKey = songKey(targetUrl);
+  return findSongsterrTabsForUrls([targetUrl]);
+}
+
+async function findSongsterrTabsForUrls(targetUrls) {
+  const targetKeys = new Set(targetUrls.map(songKey).filter(Boolean));
   const tabs = (await chrome.tabs.query({}))
     .filter((tab) => isSongsterrUrl(tab.url || ""));
-  return tabs.filter((tab) => tab.url && songKey(tab.url) === targetKey);
+  return tabs.filter((tab) => tab.url && targetKeys.has(songKey(tab.url)));
 }
 
 async function requestSongsterrStatusFromTabs(tabs) {
@@ -749,15 +757,15 @@ async function requestSongsterrStatusFromTabs(tabs) {
 }
 
 async function findSongsterrTabs(currentSong) {
-  const targetUrl = normalizeSongsterrUrl(songsterrReference(currentSong));
+  const targetUrls = songsterrReferences(currentSong).map(normalizeSongsterrUrl).filter(Boolean);
   const tabs = (await chrome.tabs.query({}))
     .filter((tab) => isSongsterrUrl(tab.url || ""));
-  if (!targetUrl) {
+  if (!targetUrls.length) {
     return tabs;
   }
 
-  const targetKey = songKey(targetUrl);
-  const matching = tabs.filter((tab) => tab.url && songKey(tab.url) === targetKey);
+  const targetKeys = new Set(targetUrls.map(songKey).filter(Boolean));
+  const matching = tabs.filter((tab) => tab.url && targetKeys.has(songKey(tab.url)));
 
   return matching.length ? matching : tabs;
 }
@@ -772,6 +780,25 @@ function songsterrReference(song) {
     return dedicated;
   }
   return song?.sourceType === "songsterr" ? (song.source?.trim() ?? "") : "";
+}
+
+function songsterrReferences(song) {
+  const references = [
+    songsterrReference(song),
+    song?.songsterrBassUrl?.trim() ?? "",
+    song?.songsterrDrumUrl?.trim() ?? ""
+  ].filter(Boolean);
+  return [...new Set(references)];
+}
+
+function explicitSongsterrInstrumentReference(song, instrument) {
+  if (instrument === "bass") {
+    return song?.songsterrBassUrl?.trim() ?? "";
+  }
+  if (instrument === "drum") {
+    return song?.songsterrDrumUrl?.trim() ?? "";
+  }
+  return "";
 }
 
 function normalizeSongsterrUrl(value) {
@@ -873,20 +900,24 @@ function applyInstrument(value, instrument) {
   }
 }
 
-// The URL to open/navigate to for this member: the host's song URL rewritten to
-// the member's instrument. An explicit popup choice always wins; on "auto" we
-// inherit the instrument from the member's currently-open Songsterr tab (the one
-// we're about to reuse), and fall back to the host URL unchanged when we can't
-// tell (no Songsterr tab open yet).
-function resolveMemberInstrumentUrl(hostUrl, currentTab) {
+// The URL to open/navigate to for this member. Explicit per-song bass/drum URLs
+// win because some Songsterr arrangements are separate song pages. Otherwise we
+// keep the old portable slug rewrite for songs whose parts share one song id.
+function resolveMemberInstrumentUrl(song, currentTab) {
+  const hostUrl = songsterrReference(song);
+
   if (memberInstrument !== "auto") {
-    return applyInstrument(hostUrl, memberInstrument);
+    return explicitSongsterrInstrumentReference(song, memberInstrument) ||
+      (hostUrl ? applyInstrument(hostUrl, memberInstrument) : "");
   }
+
   const detected =
     currentTab?.url && isSongsterrUrl(currentTab.url)
       ? instrumentFromUrl(currentTab.url)
       : undefined;
-  return detected ? applyInstrument(hostUrl, detected) : hostUrl;
+  return detected
+    ? explicitSongsterrInstrumentReference(song, detected) || (hostUrl ? applyInstrument(hostUrl, detected) : "")
+    : hostUrl;
 }
 
 // Coerce stored/incoming instrument values to a known category, defaulting to

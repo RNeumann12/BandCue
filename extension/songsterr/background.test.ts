@@ -15,6 +15,7 @@ const SONG_B = "https://www.songsterr.com/a/wsa/song-b-s200";
 const SONG_A_TAB = "https://www.songsterr.com/a/wsa/song-a-tab-s100";
 const SONG_A_BASS = "https://www.songsterr.com/a/wsa/song-a-bass-tab-s100";
 const SONG_A_DRUM = "https://www.songsterr.com/a/wsa/song-a-drum-tab-s100";
+const SONG_A_EASY_DRUM = "https://www.songsterr.com/a/wsa/song-a-easy-drum-tab-s5446545";
 const SONG_B_TAB = "https://www.songsterr.com/a/wsa/song-b-tab-s200";
 const SONG_B_BASS = "https://www.songsterr.com/a/wsa/song-b-bass-tab-s200";
 
@@ -302,6 +303,36 @@ describe("per-member instrument", () => {
     expect(created[0].url).toBe(SONG_A_DRUM);
   });
 
+  it("opens an explicit drum override as-is instead of rewriting the host URL", async () => {
+    const { context, created, sendRuntimeMessage } = loadBackground([
+      { id: 9, url: "https://example.com/", windowId: 1 }
+    ]);
+
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "drum" });
+    await context.ensureSongsterrTabs({
+      songsterrUrl: SONG_A_TAB,
+      songsterrDrumUrl: SONG_A_EASY_DRUM
+    }, { active: true });
+
+    expect(created).toHaveLength(1);
+    expect(created[0].url).toBe(SONG_A_EASY_DRUM);
+  });
+
+  it("does not reload a member already on an explicit alternate drum page", async () => {
+    const { context, created, updated, sendRuntimeMessage } = loadBackground([
+      { id: 1, url: SONG_A_EASY_DRUM, windowId: 1 }
+    ]);
+
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "drum" });
+    await context.ensureSongsterrTabs({
+      songsterrUrl: SONG_A_TAB,
+      songsterrDrumUrl: SONG_A_EASY_DRUM
+    }, { active: true });
+
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+
   it("navigates a reusable tab to the explicitly chosen instrument", async () => {
     const { context, created, updated, sendRuntimeMessage } = loadBackground([
       { id: 1, url: SONG_B_TAB, windowId: 1 }
@@ -324,6 +355,19 @@ describe("per-member instrument", () => {
     await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_TAB }, { active: true });
 
     expect(updated.some((u) => u.id === 1 && u.url === SONG_A_BASS)).toBe(true);
+  });
+
+  it("auto: uses an explicit alternate URL when the reusable tab reveals that instrument", async () => {
+    const { context, updated } = loadBackground([
+      { id: 1, url: SONG_B_BASS.replace("bass", "drum"), windowId: 1 }
+    ]);
+
+    await context.ensureSongsterrTabs({
+      songsterrUrl: SONG_A_TAB,
+      songsterrDrumUrl: SONG_A_EASY_DRUM
+    }, { active: true });
+
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_A_EASY_DRUM)).toBe(true);
   });
 
   it("auto: uses the host URL verbatim when no Songsterr tab is open to detect from", async () => {

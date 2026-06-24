@@ -512,6 +512,65 @@ describe("RoomController", () => {
     });
   });
 
+  it("associates Songsterr duration reported from an alternate drum URL", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Songsterr Drums",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    const song = {
+      id: "song-1",
+      title: "Correct Song",
+      sourceType: "musescore" as const,
+      museScoreSource: "Correct Song.mscz",
+      songsterrUrl: "https://www.songsterr.com/a/wsa/correct-song-tab-s1",
+      songsterrDrumUrl: "https://www.songsterr.com/a/wsa/correct-song-easy-drum-tab-s2"
+    };
+
+    room.handleMessage(host.id, {
+      type: "setlistUpdate",
+      updatedAt: 1100,
+      songs: [song]
+    }, 1100);
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1200,
+      song
+    }, 1200);
+
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus",
+      app: "songsterr",
+      ready: true,
+      title: "Correct Song Easy Drum Tab by Artist",
+      source: "https://www.songsterr.com/a/wsa/correct-song-easy-drum-tab-s2?track=1",
+      durationMs: 184_500,
+      durationSource: "adapter"
+    }, 1300);
+
+    expect(room.getState(1400).currentSong?.song).toMatchObject({
+      id: "song-1",
+      durationMs: 184_500,
+      durationSource: "adapter"
+    });
+    expect(room.getState(1400).setlist.songs[0]).toMatchObject({
+      id: "song-1",
+      durationMs: 184_500,
+      durationSource: "adapter"
+    });
+  });
+
   it("does not bind adapter duration to a song with a loose substring title overlap", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const host = room.addClient(undefined, {

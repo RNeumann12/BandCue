@@ -234,6 +234,8 @@ A targeted failure reply (e.g. a rejected transport request or a non-host mutati
   "sourceType": "songsterr",        // songsterr | musescore | other
   "source": "https://…",            // primary reference (URL or score name)
   "songsterrUrl": "https://…",      // optional, lets one entry also open in Songsterr
+  "songsterrBassUrl": "https://…",  // optional bass override when it is a different Songsterr page
+  "songsterrDrumUrl": "https://…",  // optional drums override when it is a different Songsterr page
   "museScoreSource": "CCR/Bad Moon Rising",  // optional, relative path or title for MuseScore
   "durationMs": 138000,             // optional
   "durationSource": "adapter",      // adapter | manual
@@ -243,7 +245,8 @@ A targeted failure reply (e.g. a rejected transport request or a non-host mutati
 
 A single song can target multiple apps. `song-sources.ts` resolves each app's reference: the
 dedicated field (`songsterrUrl` / `museScoreSource`) wins, else `source` is used when the
-primary `sourceType` matches that app.
+primary `sourceType` matches that app. For Songsterr adapters, `songsterrBassUrl` and
+`songsterrDrumUrl` override the main Songsterr URL for members who selected those instruments.
 
 ### `SongCatalogStatus` / `SongCatalogEntry` / `SongCatalogMatch`
 Privacy-safe local MuseScore library data published by a bridge/helper. Entries carry only a

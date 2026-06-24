@@ -162,6 +162,18 @@ export interface SetlistSong {
    */
   songsterrUrl?: string;
   /**
+   * Optional alternate Songsterr URL for bass players. Use this when Songsterr's
+   * bass arrangement is a different song page, not just the same tab URL with a
+   * bass slug.
+   */
+  songsterrBassUrl?: string;
+  /**
+   * Optional alternate Songsterr URL for drummers. Use this when Songsterr's
+   * drum arrangement is a different song page, not just the same tab URL with a
+   * drum slug.
+   */
+  songsterrDrumUrl?: string;
+  /**
    * Optional local MuseScore score reference (relative path or title) for this
    * song. Lets the same entry also be opened in MuseScore. When unset, the
    * MuseScore adapter falls back to `source` if `sourceType` is "musescore".

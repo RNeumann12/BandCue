@@ -70,7 +70,7 @@ mirrored in the extension and Android clients):
 | [`room-locator.ts`](../src/shared/room-locator.ts) | Turns a user-entered locator (URL / `host:port` / room code / port) into discovery candidates; mDNS host names; LAN subnet list. |
 | [`lan-discovery.ts`](../src/shared/lan-discovery.ts) | UDP broadcast discovery client + request/response parsing + broadcast address computation. |
 | [`lan-address.ts`](../src/shared/lan-address.ts) | Picks the best LAN IP to advertise from the OS network interfaces. |
-| [`song-sources.ts`](../src/shared/song-sources.ts) | Resolves a `SetlistSong` to its Songsterr / MuseScore reference (dedicated field wins, else `source`). |
+| [`song-sources.ts`](../src/shared/song-sources.ts) | Resolves a `SetlistSong` to its Songsterr / MuseScore references, including optional bass/drum Songsterr overrides. |
 
 ### Adapters
 

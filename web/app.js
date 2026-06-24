@@ -6,6 +6,7 @@ import {
   previousSongIndex,
   adjustCurrentIndexAfterRemoval,
   appliesToMuseScore,
+  appliesToSongsterr,
   getSongsterrUrl,
   isOpenableSong,
   calculateClockSample,
@@ -61,6 +62,8 @@ const elements = {
   songSourceTypeInput: document.querySelector("#songSourceTypeInput"),
   songSourceInput: document.querySelector("#songSourceInput"),
   songSongsterrUrlInput: document.querySelector("#songSongsterrUrlInput"),
+  songSongsterrBassUrlInput: document.querySelector("#songSongsterrBassUrlInput"),
+  songSongsterrDrumUrlInput: document.querySelector("#songSongsterrDrumUrlInput"),
   songMuseScoreSourceInput: document.querySelector("#songMuseScoreSourceInput"),
   songDurationInput: document.querySelector("#songDurationInput"),
   songNotesInput: document.querySelector("#songNotesInput"),
@@ -790,6 +793,8 @@ function addSetlistSong() {
     sourceType: elements.songSourceTypeInput.value,
     source: elements.songSourceInput.value.trim(),
     songsterrUrl: elements.songSongsterrUrlInput.value.trim(),
+    songsterrBassUrl: elements.songSongsterrBassUrlInput.value.trim(),
+    songsterrDrumUrl: elements.songSongsterrDrumUrlInput.value.trim(),
     museScoreSource: elements.songMuseScoreSourceInput.value.trim(),
     durationMs,
     durationSource: durationMs ? "manual" : undefined,
@@ -935,7 +940,7 @@ function playCurrentSongForRun() {
 
   // Songsterr reports a duration once loaded, so the server can auto-stop even
   // without a manual time; warn when nothing can supply one.
-  const durationKnown = Boolean(song.durationMs) || Boolean(getSongsterrUrl(song)) || song.sourceType === "songsterr";
+  const durationKnown = Boolean(song.durationMs) || appliesToSongsterr(song);
   setSetlistModeStatus(durationKnown
     ? `Playing ${currentSongLabel()} - auto-advances at the end.`
     : `Playing ${currentSongLabel()} - no known duration; use Next or Stop to advance.`);

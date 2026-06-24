@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   adjustCurrentIndexAfterRemoval,
   appliesToMuseScore,
+  appliesToSongsterr,
   calculateClockSample,
   calculateJitterMs,
   canHostPlay,
@@ -76,13 +77,16 @@ describe("song normalization", () => {
       sourceType: "songsterr",
       source: "",
       songsterrUrl: "https://songsterr.com/x",
+      songsterrBassUrl: "https://songsterr.com/bass",
+      songsterrDrumUrl: "",
       museScoreSource: "",
       notes: ""
     });
     expect(result).toMatchObject({
       id: "s1",
       title: "Song",
-      songsterrUrl: "https://songsterr.com/x"
+      songsterrUrl: "https://songsterr.com/x",
+      songsterrBassUrl: "https://songsterr.com/bass"
     });
     expect(result?.source).toBeUndefined();
     expect(result?.notes).toBeUndefined();
@@ -119,6 +123,17 @@ describe("song normalization", () => {
   it("preserves a valid adapter duration source from storage", () => {
     expect(normalizeStoredSong({ title: "A", durationMs: 2000, durationSource: "adapter" }))
       .toMatchObject({ durationMs: 2000, durationSource: "adapter" });
+  });
+
+  it("trims alternate Songsterr URLs from storage", () => {
+    expect(normalizeStoredSong({
+      title: "A",
+      songsterrBassUrl: " https://songsterr.com/bass ",
+      songsterrDrumUrl: " https://songsterr.com/drums "
+    })).toMatchObject({
+      songsterrBassUrl: "https://songsterr.com/bass",
+      songsterrDrumUrl: "https://songsterr.com/drums"
+    });
   });
 });
 
@@ -179,8 +194,14 @@ describe("song source resolution", () => {
     expect(appliesToMuseScore(undefined)).toBe(false);
   });
 
+  it("detects Songsterr applicability from alternate instrument URLs", () => {
+    expect(appliesToSongsterr({ sourceType: "other", songsterrDrumUrl: "https://songsterr.com/drums" })).toBe(true);
+    expect(appliesToSongsterr({ sourceType: "other" })).toBe(false);
+  });
+
   it("treats a song as openable when any adapter can resolve it", () => {
     expect(isOpenableSong({ songsterrUrl: "https://songsterr.com/x" })).toBe(true);
+    expect(isOpenableSong({ sourceType: "other", songsterrDrumUrl: "https://songsterr.com/drums" })).toBe(true);
     expect(isOpenableSong({ museScoreSource: "x" })).toBe(true);
     expect(isOpenableSong({ sourceType: "other", source: "notes" })).toBe(false);
     expect(isOpenableSong(undefined)).toBe(false);

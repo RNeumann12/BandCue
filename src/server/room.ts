@@ -23,7 +23,12 @@ import type {
   TransportState
 } from "../shared/protocol.js";
 import { DEFAULT_SCHEDULE_DELAY_MS, decideTransportRequest } from "../shared/transport.js";
-import { appliesToMuseScore, appliesToSongsterr } from "../shared/song-sources.js";
+import {
+  appliesToMuseScore,
+  appliesToSongsterr,
+  museScoreReference,
+  songsterrReferences
+} from "../shared/song-sources.js";
 
 interface RoomClient extends RoomClientSummary {
   socket?: WebSocket;
@@ -631,6 +636,8 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     sourceType,
     source: trimText(song.source ?? "", 500) || undefined,
     songsterrUrl: trimText(song.songsterrUrl ?? "", 500) || undefined,
+    songsterrBassUrl: trimText(song.songsterrBassUrl ?? "", 500) || undefined,
+    songsterrDrumUrl: trimText(song.songsterrDrumUrl ?? "", 500) || undefined,
     museScoreSource: trimText(song.museScoreSource ?? "", 500) || undefined,
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationSource(song.durationSource),
@@ -717,11 +724,12 @@ function adapterStatusMatchesSong(
   status: Omit<AdapterStatus, "type">,
   song: SetlistSong
 ): boolean {
-  if (status.app !== song.sourceType) {
+  if (!adapterAppliesToSong(status.app, song)) {
     return false;
   }
 
-  if (song.source && status.source && sameNormalizedSource(status.source, song.source)) {
+  const references = adapterReferencesForSong(status.app, song);
+  if (status.source && references.some((reference) => sameNormalizedSource(status.source!, reference))) {
     return true;
   }
 
@@ -732,6 +740,31 @@ function adapterStatusMatchesSong(
   const statusTitle = stripTabSuffix(normalizeSongIdentity(status.title ?? ""));
   const songTitle = stripTabSuffix(normalizeSongIdentity(song.title));
   return Boolean(statusTitle && songTitle && statusTitle === songTitle);
+}
+
+function adapterAppliesToSong(app: AdapterStatus["app"], song: SetlistSong): boolean {
+  if (app === "songsterr") {
+    return appliesToSongsterr(song);
+  }
+
+  if (app === "musescore") {
+    return appliesToMuseScore(song);
+  }
+
+  return false;
+}
+
+function adapterReferencesForSong(app: AdapterStatus["app"], song: SetlistSong): string[] {
+  if (app === "songsterr") {
+    return songsterrReferences(song);
+  }
+
+  if (app === "musescore") {
+    const reference = museScoreReference(song);
+    return reference ? [reference] : [];
+  }
+
+  return [];
 }
 
 function stripTabSuffix(value: string): string {

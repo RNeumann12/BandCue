@@ -2,12 +2,15 @@ package com.bandcue.songsterr
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.net.URI
 
 data class CurrentSong(
     val title: String,
     val sourceType: String,
     val source: String?,
-    val songsterrUrl: String? = null
+    val songsterrUrl: String? = null,
+    val songsterrBassUrl: String? = null,
+    val songsterrDrumUrl: String? = null
 ) {
     /**
      * Resolve the Songsterr URL for this song, mirroring
@@ -16,8 +19,24 @@ data class CurrentSong(
      * a single setlist entry target both Songsterr and MuseScore at once.
      */
     val songsterrReference: String?
-        get() = songsterrUrl?.takeIf { it.isNotBlank() }
+        get() = songsterrReferenceForInstrument("guitar")
+
+    fun songsterrReferenceForInstrument(instrument: String): String? {
+        val normalized = normalizeInstrument(instrument)
+        val explicit = when (normalized) {
+            "bass" -> songsterrBassUrl?.takeIf { it.isNotBlank() }
+            "drum" -> songsterrDrumUrl?.takeIf { it.isNotBlank() }
+            else -> null
+        }
+        if (!explicit.isNullOrBlank()) {
+            return explicit
+        }
+
+        val default = songsterrUrl?.takeIf { it.isNotBlank() }
             ?: source?.takeIf { sourceType == "songsterr" && it.isNotBlank() }
+            ?: return null
+        return if (normalized == "guitar") default else applySongsterrInstrument(default, normalized)
+    }
 }
 
 data class TransportCommand(
@@ -156,6 +175,35 @@ object ProtocolJson {
         title = song.optString("title"),
         sourceType = song.optString("sourceType"),
         source = song.optString("source").takeIf { it.isNotBlank() },
-        songsterrUrl = song.optString("songsterrUrl").takeIf { it.isNotBlank() }
+        songsterrUrl = song.optString("songsterrUrl").takeIf { it.isNotBlank() },
+        songsterrBassUrl = song.optString("songsterrBassUrl").takeIf { it.isNotBlank() },
+        songsterrDrumUrl = song.optString("songsterrDrumUrl").takeIf { it.isNotBlank() }
     )
+}
+
+fun normalizeInstrument(value: String?): String = when (value) {
+    "guitar", "bass", "drum" -> value
+    else -> "auto"
+}
+
+fun applySongsterrInstrument(value: String, instrument: String): String {
+    return try {
+        val uri = URI(value)
+        var path = (uri.rawPath ?: "")
+            .replace(Regex("-(?:bass|drum)-tab(-s\\d+)", RegexOption.IGNORE_CASE), "-tab$1")
+            .replace(Regex("(-s\\d+)t\\d+", RegexOption.IGNORE_CASE), "$1")
+        path = when (instrument) {
+            "bass" -> path.replace(Regex("-tab(-s\\d+)", RegexOption.IGNORE_CASE), "-bass-tab$1")
+            "drum" -> path.replace(Regex("-tab(-s\\d+)", RegexOption.IGNORE_CASE), "-drum-tab$1")
+            else -> path
+        }
+        val query = uri.rawQuery
+            ?.split("&")
+            ?.filterNot { it.substringBefore("=").equals("track", ignoreCase = true) }
+            ?.joinToString("&")
+            ?.takeIf { it.isNotBlank() }
+        URI(uri.scheme, uri.rawAuthority, path, query, uri.rawFragment).toString()
+    } catch (_: Exception) {
+        value
+    }
 }

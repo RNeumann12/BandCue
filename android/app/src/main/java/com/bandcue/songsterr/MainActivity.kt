@@ -13,8 +13,10 @@ import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.app.Activity
 
@@ -22,6 +24,7 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var roomInput: EditText
     private lateinit var nameInput: EditText
+    private lateinit var instrumentInput: Spinner
     private lateinit var statusText: TextView
     private lateinit var detailText: TextView
     private lateinit var songText: TextView
@@ -97,6 +100,17 @@ class MainActivity : Activity() {
         root.addView(label("Device name"))
         root.addView(nameInput)
 
+        instrumentInput = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                listOf("Auto", "Guitar", "Bass", "Drums")
+            )
+            setSelection(instrumentIndex(prefs.getString(PREF_INSTRUMENT, "auto")))
+        }
+        root.addView(label("My instrument"))
+        root.addView(instrumentInput)
+
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -149,16 +163,37 @@ class MainActivity : Activity() {
     private fun connect() {
         val room = roomInput.text.toString().trim().ifEmpty { DEFAULT_ROOM_PORT.toString() }
         val deviceName = nameInput.text.toString().trim().ifEmpty { "Android Songsterr" }
+        val instrument = selectedInstrument()
         prefs.edit()
             .putString(PREF_ROOM, room)
             .putString(PREF_NAME, deviceName)
+            .putString(PREF_INSTRUMENT, instrument)
             .apply()
 
         val intent = Intent(this, BandCueAdapterService::class.java)
             .setAction(BandCueAdapterService.ACTION_CONNECT)
             .putExtra(BandCueAdapterService.EXTRA_ROOM_LOCATOR, room)
             .putExtra(BandCueAdapterService.EXTRA_DEVICE_NAME, deviceName)
+            .putExtra(BandCueAdapterService.EXTRA_INSTRUMENT, instrument)
         startAdapterService(intent)
+    }
+
+    private fun selectedInstrument(): String {
+        return when (instrumentInput.selectedItemPosition) {
+            1 -> "guitar"
+            2 -> "bass"
+            3 -> "drum"
+            else -> "auto"
+        }
+    }
+
+    private fun instrumentIndex(value: String?): Int {
+        return when (normalizeInstrument(value)) {
+            "guitar" -> 1
+            "bass" -> 2
+            "drum" -> 3
+            else -> 0
+        }
     }
 
     private fun sendServiceAction(action: String) {
@@ -210,6 +245,7 @@ class MainActivity : Activity() {
     private companion object {
         const val PREF_ROOM = "room"
         const val PREF_NAME = "name"
+        const val PREF_INSTRUMENT = "instrument"
         const val PREF_AUTO_CONNECT = "autoConnect"
     }
 }

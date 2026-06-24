@@ -153,7 +153,8 @@ calibration are edited; its state lives in that browser's local storage.
 ### Setlist Flow
 
 Use the **Setlist** panel to add songs for the rehearsal. Each song can carry a title, a source
-type, a Songsterr URL, a MuseScore score reference, optional notes, and (once known) a duration.
+type, a main Songsterr URL, optional bass/drum Songsterr override URLs, a MuseScore score
+reference, optional notes, and (once known) a duration.
 
 - **Make Current**, **Previous**, **Next** publish the current song to every companion.
 - **Export** / **Import** move setlists between host browsers (the setlist is stored locally).
@@ -161,7 +162,8 @@ type, a Songsterr URL, a MuseScore score reference, optional notes, and (once kn
   adapter also opens the current URL automatically before a transport command when no matching
   tab is present.
 - A single setlist entry can target **both** Songsterr and MuseScore at once (a `songsterrUrl`
-  for band mates, a `museScoreSource` for whoever drives MuseScore).
+  for band mates, optional `songsterrBassUrl` / `songsterrDrumUrl` fields when those parts use
+  different Songsterr pages, and a `museScoreSource` for whoever drives MuseScore).
 
 MuseScore songs open automatically when the MuseScore helper has a configured score folder and
 exactly one local catalog entry matches the current item. The helper warns on a title mismatch,

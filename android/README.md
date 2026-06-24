@@ -36,9 +36,10 @@ This project is intended for sideload/debug APK use first. It has no Play Store 
    - `host:port`, for example `192.168.1.23:4173`,
    - the room code,
    - the coordinator port.
-7. Tap **Connect**.
+7. Pick **My instrument** if this phone should open bass or drum tabs.
+8. Tap **Connect**.
 
-The host page should show the phone as a Songsterr desktop adapter. If the current BandCue song has a Songsterr URL, **Open Current Songsterr Song** launches it on Android.
+The host page should show the phone as a Songsterr desktop adapter. If the current BandCue song has a Songsterr URL, **Open Current Songsterr Song** launches it on Android. Explicit bass/drum Songsterr URLs in the setlist are used when this phone is set to that instrument; otherwise BandCue falls back to Songsterr's usual bass/drum URL slug.
 
 ## Control Path
 

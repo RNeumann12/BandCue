@@ -48,15 +48,14 @@ Build a distributable zip with `npm run package:extension`.
 - **Auto-open** — when a transport command arrives and no matching Songsterr tab is open, the
   adapter opens the current song's Songsterr URL first. The extension reuses an already-open
   Songsterr tab and pre-opens it at count-in start.
-- **Per-member instrument** — Songsterr encodes the instrument category in the song-URL slug
-  (`-bass-tab` / `-drum-tab`, else the lead guitar tab). Each member picks their instrument once in
-  the popup — **Guitar / Bass / Drums**, or **Auto** (the default), which inherits the category
-  from whatever Songsterr tab they currently have open. When the host opens/advances a song, the
-  extension rewrites that one host URL to the member's category so everyone lands on their own
-  part; the category is portable across songs, so a single example URL is enough. Songs are matched
-  by a track-agnostic key (slug- and `t<n>`-agnostic), so a member already on the current song is
-  **never** reloaded onto the host's instrument. The choice is persisted per-machine in
-  `chrome.storage.local`; no host/server changes, no shared choice.
+- **Per-member instrument** — each member picks **Guitar / Bass / Drums**, or **Auto** (the
+  default), which inherits the category from the currently open Songsterr tab. Explicit
+  per-song `songsterrBassUrl` / `songsterrDrumUrl` fields win for arrangements that live on
+  different Songsterr pages. Otherwise the extension rewrites the host URL's instrument slug
+  (`-bass-tab` / `-drum-tab`) so everyone lands on their own part. Songs are matched by a
+  track-agnostic key (slug- and `t<n>`-agnostic) plus any explicit alternate URLs, so a member
+  already on the current song is **never** reloaded onto the host's instrument. The choice is
+  persisted per-machine in `chrome.storage.local`.
 - **Stop** is no-op when playback already appears stopped, and **never** uses a Space-key
   fallback (which on Songsterr is a toggle and could restart play). It only pauses active media
   elements or clicks a confidently-labelled pause/stop control.
@@ -101,14 +100,17 @@ installed Android SDK — no Android Studio required. Tests: `npm run test:andro
 
 1. **Media session first.** `play` calls `MediaController.TransportControls.play()`; `stop` calls
    `pause()` on the active Songsterr media session and reports playback `stopped`.
-2. **Accessibility fallback (opt-in).** Only when no Songsterr media session is visible, and only
+2. **Per-member instrument.** The Android UI also has **Auto / Guitar / Bass / Drums**. Auto uses
+   the main Songsterr URL; explicit Bass/Drums use `songsterrBassUrl` / `songsterrDrumUrl` when
+   present, otherwise they fall back to the same slug rewrite as the browser extension.
+3. **Accessibility fallback (opt-in).** Only when no Songsterr media session is visible, and only
    while Songsterr is foreground, it taps the visible play/pause control. It's opt-in because
    Android treats accessibility as a powerful permission.
-3. **Reset-to-start** is located with a layout-aware scorer over the visible toolbar controls
+4. **Reset-to-start** is located with a layout-aware scorer over the visible toolbar controls
    (anchored on speed / sound-mode / play), with recently-successful geometry cached per layout
    signature. When reset can't be identified confidently it reports skipped/missing rather than
    faking success — and play still proceeds.
-4. If Songsterr is missing or neither path is available, it reports a clear not-ready / failed
+5. If Songsterr is missing or neither path is available, it reports a clear not-ready / failed
    state instead of pretending to be controllable.
 
 **Disconnect** persists offline intent and stops reconnect, clock sync, pending transport tasks,
