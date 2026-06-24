@@ -75,7 +75,8 @@ export function decideTransportRequest(
         leaderId: client.id,
         action,
         sequenceId: current.sequenceId + 1,
-        scheduledServerTime: now
+        scheduledServerTime: now,
+        stopReason: "manual"
       }
     };
   }
@@ -86,12 +87,13 @@ export function decideTransportRequest(
 
   return {
     accepted: true,
-    nextState: {
-      status: "stopped",
-      leaderId: client.id,
-      action,
-      sequenceId: current.sequenceId + 1,
-      scheduledServerTime: now
-    }
-  };
-}
+      nextState: {
+        status: "stopped",
+        leaderId: client.id,
+        action,
+        sequenceId: current.sequenceId + 1,
+        scheduledServerTime: now,
+        stopReason: "manual"
+      }
+    };
+  }

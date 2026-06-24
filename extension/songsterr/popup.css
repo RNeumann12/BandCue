@@ -89,7 +89,8 @@ label {
   font-weight: 800;
 }
 
-input {
+input,
+select {
   min-width: 0;
   border: 1px solid #405046;
   border-radius: 7px;
@@ -99,7 +100,8 @@ input {
   outline: none;
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: #50e88a;
   box-shadow: 0 0 0 3px rgba(80, 232, 138, 0.16);
 }
@@ -138,12 +140,57 @@ button:disabled {
 .connection-actions,
 .row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.connection-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.row {
+  grid-template-columns: 1fr 1fr;
 }
 
 .transport-row button {
   background: #151b18;
+}
+
+.qr-scanner {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #334038;
+  border-radius: 8px;
+  background: #171e1a;
+  padding: 8px;
+}
+
+.qr-scanner[hidden] {
+  display: none;
+}
+
+.qr-scanner video {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 6px;
+  background: #050706;
+  object-fit: cover;
+}
+
+.qr-scanner-footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+#qrStatus {
+  color: #c4d0c3;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+#stopQrScan {
+  padding: 8px 10px;
 }
 
 label.checkbox {

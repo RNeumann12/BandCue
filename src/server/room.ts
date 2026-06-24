@@ -16,6 +16,7 @@ import type {
   ServerMessage,
   SetlistSong,
   SongDurationSource,
+  StopReason,
   SetlistState,
   SetlistUpdate,
   TransportCommand,
@@ -42,6 +43,7 @@ interface RecentClock {
 }
 
 const RECENT_CLOCK_TTL_MS = 30_000;
+const PLAYBACK_END_SETTLE_MS = 750;
 
 export class RoomController {
   private readonly clients = new Map<string, RoomClient>();
@@ -63,6 +65,11 @@ export class RoomController {
   };
   private runningTimer?: NodeJS.Timeout;
   private autoStopTimer?: NodeJS.Timeout;
+  private playbackEndTimer?: NodeJS.Timeout;
+  private playbackEndTracking?: {
+    sequenceId: number;
+    playingClientIds: Set<string>;
+  };
   private pendingClockBroadcast?: NodeJS.Timeout;
 
   constructor(
@@ -107,8 +114,11 @@ export class RoomController {
         leaderId: clientId,
         action: "stop",
         sequenceId: this.transport.sequenceId + 1,
-        scheduledServerTime: now
+        scheduledServerTime: now,
+        stopReason: "leader-disconnect"
       };
+      this.clearAutoStopTimer();
+      this.clearPlaybackEndTracking();
       this.broadcastTransportCommand({
         type: "transportCommand",
         action: "stop",
@@ -235,7 +245,8 @@ export class RoomController {
     if (songDurationChanged) {
       this.scheduleAutoStopForCurrentSong();
     }
-    if (statusChanged || songDurationChanged) {
+    const playbackEnded = this.applyAdapterPlaybackToTransport(clientId, now);
+    if (statusChanged || songDurationChanged || playbackEnded) {
       this.broadcastState();
     }
   }
@@ -371,6 +382,7 @@ export class RoomController {
     this.transport = decision.nextState;
     if (request.action === "stop") {
       this.clearAutoStopTimer();
+      this.clearPlaybackEndTracking();
     }
     const command: Omit<TransportCommand, "manualOffsetMs"> = {
       type: "transportCommand",
@@ -450,6 +462,7 @@ export class RoomController {
         status: "running",
         startedServerTime: scheduledServerTime
       };
+      this.startPlaybackEndTracking(this.transport.sequenceId);
       this.scheduleAutoStopForCurrentSong();
       this.broadcastState();
     }, delayMs);
@@ -482,14 +495,9 @@ export class RoomController {
       }
 
       const now = Date.now();
-      this.transport = {
-        status: "stopped",
-        leaderId,
-        action: "stop",
-        sequenceId: this.transport.sequenceId + 1,
-        scheduledServerTime: now
-      };
-      this.broadcastState();
+      if (this.stopRoomAutomatically("auto-duration", leaderId, now)) {
+        this.broadcastState();
+      }
     }, delayMs);
   }
 
@@ -500,6 +508,119 @@ export class RoomController {
 
     clearTimeout(this.autoStopTimer);
     this.autoStopTimer = undefined;
+  }
+
+  private startPlaybackEndTracking(sequenceId: number): void {
+    this.clearPlaybackEndTimer();
+    this.playbackEndTracking = {
+      sequenceId,
+      playingClientIds: new Set()
+    };
+  }
+
+  private clearPlaybackEndTracking(): void {
+    this.clearPlaybackEndTimer();
+    this.playbackEndTracking = undefined;
+  }
+
+  private clearPlaybackEndTimer(): void {
+    if (!this.playbackEndTimer) {
+      return;
+    }
+
+    clearTimeout(this.playbackEndTimer);
+    this.playbackEndTimer = undefined;
+  }
+
+  private applyAdapterPlaybackToTransport(clientId: string, now: number): boolean {
+    if (
+      this.transport.status !== "running" ||
+      this.transport.action !== "play"
+    ) {
+      return false;
+    }
+
+    if (!this.playbackEndTracking || this.playbackEndTracking.sequenceId !== this.transport.sequenceId) {
+      this.startPlaybackEndTracking(this.transport.sequenceId);
+    }
+
+    const playback = this.clients.get(clientId)?.status?.playback;
+    if (playback === "playing") {
+      this.playbackEndTracking?.playingClientIds.add(clientId);
+      this.clearPlaybackEndTimer();
+      return false;
+    }
+
+    if (playback !== "stopped" || !this.shouldStopFromPlaybackEnd()) {
+      return false;
+    }
+
+    this.schedulePlaybackEndStop(now);
+    return false;
+  }
+
+  private shouldStopFromPlaybackEnd(): boolean {
+    const tracking = this.playbackEndTracking;
+    if (!tracking || tracking.sequenceId !== this.transport.sequenceId || !tracking.playingClientIds.size) {
+      return false;
+    }
+
+    for (const client of this.clients.values()) {
+      if (client.status?.playback === "playing") {
+        return false;
+      }
+    }
+
+    for (const clientId of tracking.playingClientIds) {
+      const client = this.clients.get(clientId);
+      if (client && client.status?.playback !== "stopped") {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private schedulePlaybackEndStop(now: number): void {
+    if (this.playbackEndTimer) {
+      return;
+    }
+
+    const sequenceId = this.transport.sequenceId;
+    const leaderId = this.transport.leaderId;
+    this.playbackEndTimer = setTimeout(() => {
+      this.playbackEndTimer = undefined;
+      if (
+        this.transport.status !== "running" ||
+        this.transport.action !== "play" ||
+        this.transport.sequenceId !== sequenceId ||
+        !this.shouldStopFromPlaybackEnd()
+      ) {
+        return;
+      }
+
+      if (this.stopRoomAutomatically("auto-playback-ended", leaderId, Date.now())) {
+        this.broadcastState();
+      }
+    }, Math.max(0, PLAYBACK_END_SETTLE_MS - Math.max(0, Date.now() - now)));
+  }
+
+  private stopRoomAutomatically(reason: StopReason, leaderId: string | undefined, now: number): boolean {
+    if (this.transport.status !== "running" || this.transport.action !== "play") {
+      return false;
+    }
+
+    this.transport = {
+      status: "stopped",
+      leaderId,
+      action: "stop",
+      sequenceId: this.transport.sequenceId + 1,
+      scheduledServerTime: now,
+      stopReason: reason
+    };
+    this.clearAutoStopTimer();
+    this.clearPlaybackEndTracking();
+    return true;
   }
 
   private applyAdapterDurationToCurrentSong(

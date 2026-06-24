@@ -22,8 +22,16 @@
         Room, port, or URL
         <input id="roomUrl" type="text" placeholder="4173 or ABC123" />
       </label>
+      <section id="qrScanner" class="qr-scanner" hidden>
+        <video id="qrVideo" playsinline muted></video>
+        <div class="qr-scanner-footer">
+          <span id="qrStatus">Point your camera at the BandCue join QR code.</span>
+          <button id="stopQrScan" type="button">Close</button>
+        </div>
+      </section>
       <div class="connection-actions">
         <button id="connect" type="button">Connect</button>
+        <button id="scanQr" type="button">Scan QR</button>
         <button id="disconnect" type="button">Disconnect</button>
       </div>
       <div class="row transport-row">

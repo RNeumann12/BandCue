@@ -8,6 +8,8 @@ export type AdapterCommandAction = TransportAction | "open-song";
 
 export type TransportStatus = "stopped" | "scheduled" | "running";
 
+export type StopReason = "manual" | "auto-duration" | "auto-playback-ended" | "leader-disconnect";
+
 export type SongSourceType = "songsterr" | "musescore" | "other";
 
 export type ControlMode = "host-only" | "leader-stop" | "everyone-can-stop";
@@ -249,6 +251,7 @@ export interface TransportState {
   sequenceId: number;
   scheduledServerTime?: number;
   startedServerTime?: number;
+  stopReason?: StopReason;
 }
 
 export interface RoomState {
