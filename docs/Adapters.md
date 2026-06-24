@@ -26,7 +26,7 @@ A Manifest V3 extension that drives Songsterr browser tabs.
 
 | File | Role |
 | --- | --- |
-| `manifest.json` | MV3 manifest. Permissions: `storage`, `tabs`, `videoCapture`; host access to Songsterr + `http://*/*` + `ws://*/*`. |
+| `manifest.json` | MV3 manifest. Permissions: `storage`, `tabs`, `activeTab`; host access to Songsterr + `http://*/*` + `ws://*/*`. |
 | `background.js` | Service worker: holds the WebSocket connection, clock sync, discovery, reconnect, and connection intent. |
 | `content-script.js` | Injected into Songsterr pages: finds the transport control / media element and performs play/stop/reset. |
 | `popup.html` / `popup.css` / `popup.js` | The connect/disconnect UI and readiness panel. |
@@ -45,9 +45,9 @@ Build a distributable zip with `npm run package:extension`.
 - **Discovery** can't use raw UDP from a browser, so a room code / port is resolved by checking
   the local machine, the OS mDNS name (`bandcue.local` / `bandcue-<code>.local`), and a scan of
   common LAN subnets. On an unusual subnet, enter `host:port` (e.g. `192.168.1.23:4173`).
-- **QR join** uses the popup camera scanner to decode the host join QR code, fills the room URL,
-  and connects immediately after a successful scan. Browsers without native QR decoding still
-  support pasted room URLs.
+- **QR join** first scans the visible browser tab for the host join QR code. If camera access is
+  needed, the popup can open a dedicated extension scanner tab that reads the camera feed and joins
+  the room immediately after a successful scan.
 - **Auto-open** — when a transport command arrives and no matching Songsterr tab is open, the
   adapter opens the current song's Songsterr URL first. The extension reuses an already-open
   Songsterr tab and pre-opens it at count-in start.

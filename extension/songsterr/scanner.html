@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="scanner.css" />
+    <title>BandCue QR Scanner</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="eyebrow">BandCue</span>
+        <h1>Camera QR Scanner</h1>
+      </header>
+      <section class="scanner-panel">
+        <video id="camera" playsinline muted></video>
+        <div class="scanner-actions">
+          <span id="status">Starting camera...</span>
+          <button id="start" type="button">Start Camera</button>
+          <button id="close" type="button">Close</button>
+        </div>
+      </section>
+    </main>
+    <script src="vendor/jsQR.js"></script>
+    <script src="scanner.js"></script>
+  </body>
+</html>

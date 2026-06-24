@@ -183,7 +183,7 @@ async function configureConnection(input) {
   await refreshRoomEndpoint();
   autoConnectEnabled = true;
   chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
-  connect();
+  await connect();
 }
 
 async function refreshRoomEndpoint() {
@@ -218,7 +218,14 @@ async function connect() {
   if (clockTimer) clearInterval(clockTimer);
   connectionState = "connecting";
   connectionDetail = `Connecting to ${roomInput || roomUrl}`;
-  socket = new WebSocket(wsUrl);
+  try {
+    socket = new WebSocket(wsUrl);
+  } catch (error) {
+    connectionState = "error";
+    connectionDetail = `Could not open BandCue WebSocket: ${error.message}`;
+    scheduleReconnect();
+    return;
+  }
 
   socket.addEventListener("open", () => {
     connectionState = "connected";
@@ -966,11 +973,7 @@ function toWsUrl(value) {
 async function resolveRoomEndpoint(input) {
   const locator = normalizeRoomLocator(input);
   if (isAbsoluteRoomUrl(locator)) {
-    rememberHost(hostFromUrl(locator));
-    return {
-      roomUrl: locator,
-      wsUrl: toWsUrl(locator)
-    };
+    return resolveAbsoluteRoomEndpoint(locator);
   }
 
   const candidates = buildRoomDiscoveryCandidates(locator);
@@ -1010,6 +1013,17 @@ async function resolveRoomEndpoint(input) {
   }
 
   throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}`);
+}
+
+async function resolveAbsoluteRoomEndpoint(locator) {
+  const candidate = absoluteRoomDiscoveryCandidate(locator);
+  const result = await tryResolveRoomCandidate(candidate, 1500);
+  if (result.endpoint) {
+    rememberHost(hostFromUrl(result.endpoint.roomUrl));
+    return result.endpoint;
+  }
+
+  throw new Error(`The scanned URL is not an active BandCue room. ${result.error}`);
 }
 
 // Direct candidates for hosts known to have served a room, for room-code/port
@@ -1275,6 +1289,22 @@ function discoveryCandidate(host, port, expectedRoomCode) {
     expectedRoomCode,
     label: expectedRoomCode ? `${expectedRoomCode} on ${host}:${port}` : `${host}:${port}`
   };
+}
+
+function absoluteRoomDiscoveryCandidate(value) {
+  try {
+    const url = new URL(value);
+    url.pathname = "";
+    url.search = "";
+    url.hash = "";
+    return {
+      apiUrl: `${url.origin}/api/room`,
+      baseUrl: url.origin,
+      label: url.host
+    };
+  } catch {
+    throw new Error(`Use a room URL, room code, port, or host:port.`);
+  }
 }
 
 function isPort(value) {

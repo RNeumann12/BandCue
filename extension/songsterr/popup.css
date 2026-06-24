@@ -178,7 +178,7 @@ button:disabled {
 
 .qr-scanner-footer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
 }
@@ -191,6 +191,16 @@ button:disabled {
 
 #stopQrScan {
   padding: 8px 10px;
+}
+
+#openCameraScan {
+  border-color: #50e88a;
+  color: #dffff0;
+  padding: 8px 10px;
+}
+
+#openCameraScan[hidden] {
+  display: none;
 }
 
 label.checkbox {

@@ -6,6 +6,7 @@ const qrScanner = document.querySelector("#qrScanner");
 const qrVideo = document.querySelector("#qrVideo");
 const qrStatus = document.querySelector("#qrStatus");
 const stopQrScan = document.querySelector("#stopQrScan");
+const openCameraScan = document.querySelector("#openCameraScan");
 const play = document.querySelector("#play");
 const stop = document.querySelector("#stop");
 const suppressAutoOpen = document.querySelector("#suppressAutoOpen");
@@ -24,6 +25,8 @@ let userEditedRoom = false;
 let qrStream;
 let qrDetector;
 let qrScanTimer;
+const qrCanvas = document.createElement("canvas");
+const qrCanvasContext = qrCanvas.getContext("2d", { willReadFrequently: true });
 roomUrl.addEventListener("input", () => {
   userEditedRoom = true;
 });
@@ -50,6 +53,10 @@ scanQr.addEventListener("click", () => {
 
 stopQrScan.addEventListener("click", () => {
   stopQrScanSession();
+});
+
+openCameraScan.addEventListener("click", () => {
+  openCameraScannerPage();
 });
 
 disconnect.addEventListener("click", () => {
@@ -114,49 +121,60 @@ function refreshState() {
 }
 
 async function startQrScan() {
-  if (!("BarcodeDetector" in window)) {
-    showQrMessage("QR scanning is not supported in this browser. Paste the join URL instead.");
+  qrDetector = createBarcodeDetector();
+  if (!qrDetector && typeof jsQR !== "function") {
+    showQrMessage("QR scanning is not available in this browser. Paste the join URL instead.");
     return;
   }
 
   stopQrScanSession({ keepPanelOpen: true });
   qrScanner.hidden = false;
+  qrVideo.hidden = true;
+  openCameraScan.hidden = true;
   scanQr.disabled = true;
-  qrStatus.textContent = "Starting camera...";
+  qrStatus.textContent = "Looking for a QR code in the current tab...";
+
+  const visibleTabValue = await scanVisibleTabForQr();
+  if (visibleTabValue) {
+    useQrValue(visibleTabValue);
+    return;
+  }
+
+  qrStatus.textContent = "No QR code found in the current tab. Starting camera...";
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    scanQr.disabled = false;
+    openCameraScan.hidden = false;
+    showQrMessage("Camera access is not available. Open the join QR in the current tab or paste the URL.");
+    return;
+  }
 
   try {
-    qrDetector = new BarcodeDetector({ formats: ["qr_code"] });
     qrStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment" },
       audio: false
     });
     qrVideo.srcObject = qrStream;
+    qrVideo.hidden = false;
     await qrVideo.play();
     qrStatus.textContent = "Point your camera at the BandCue join QR code.";
     scanQrFrame();
   } catch (error) {
     stopQrScanSession({ keepPanelOpen: true });
+    openCameraScan.hidden = false;
     showQrMessage(cameraErrorMessage(error));
   }
 }
 
 async function scanQrFrame() {
-  if (!qrDetector || !qrStream) {
+  if (!qrStream) {
     return;
   }
 
   try {
-    const codes = await qrDetector.detect(qrVideo);
-    const value = codes.find((code) => code.rawValue)?.rawValue?.trim();
+    const value = (await readQrValue())?.trim();
     if (value) {
-      userEditedRoom = true;
-      roomUrl.value = value;
-      qrStatus.textContent = "QR code found. Connecting...";
-      stopQrScanSession({ keepPanelOpen: true });
-      chrome.runtime.sendMessage({ type: "popupConnect", roomUrl: value }, renderState);
-      setTimeout(() => {
-        qrScanner.hidden = true;
-      }, 900);
+      useQrValue(value);
       return;
     }
   } catch {
@@ -179,10 +197,114 @@ function stopQrScanSession(options = {}) {
   }
   qrDetector = undefined;
   qrVideo.srcObject = null;
+  qrVideo.hidden = false;
   scanQr.disabled = false;
   if (!options.keepPanelOpen) {
     qrScanner.hidden = true;
   }
+}
+
+function openCameraScannerPage() {
+  stopQrScanSession();
+  chrome.tabs.create({ url: chrome.runtime.getURL("scanner.html") });
+}
+
+function useQrValue(value) {
+  userEditedRoom = true;
+  roomUrl.value = value;
+  qrStatus.textContent = "QR code found. Connecting...";
+  stopQrScanSession({ keepPanelOpen: true });
+  chrome.runtime.sendMessage({ type: "popupConnect", roomUrl: value }, renderState);
+  setTimeout(() => {
+    qrScanner.hidden = true;
+  }, 900);
+}
+
+function createBarcodeDetector() {
+  if (!("BarcodeDetector" in window)) {
+    return undefined;
+  }
+
+  try {
+    return new BarcodeDetector({ formats: ["qr_code"] });
+  } catch {
+    return undefined;
+  }
+}
+
+async function readQrValue() {
+  if (qrDetector) {
+    const codes = await qrDetector.detect(qrVideo);
+    const value = codes.find((code) => code.rawValue)?.rawValue;
+    if (value) {
+      return value;
+    }
+  }
+
+  return readQrValueWithJsQr();
+}
+
+function readQrValueWithJsQr() {
+  if (typeof jsQR !== "function" || !qrCanvasContext || !qrVideo.videoWidth || !qrVideo.videoHeight) {
+    return "";
+  }
+
+  qrCanvas.width = qrVideo.videoWidth;
+  qrCanvas.height = qrVideo.videoHeight;
+  qrCanvasContext.drawImage(qrVideo, 0, 0, qrCanvas.width, qrCanvas.height);
+  return readQrValueFromCanvas();
+}
+
+async function scanVisibleTabForQr() {
+  if (typeof jsQR !== "function" || !chrome.tabs?.captureVisibleTab) {
+    return "";
+  }
+
+  try {
+    const dataUrl = await captureVisibleTab();
+    if (!dataUrl) {
+      return "";
+    }
+
+    const image = await loadImage(dataUrl);
+    qrCanvas.width = image.naturalWidth;
+    qrCanvas.height = image.naturalHeight;
+    qrCanvasContext.drawImage(image, 0, 0, qrCanvas.width, qrCanvas.height);
+    return readQrValueFromCanvas();
+  } catch {
+    return "";
+  }
+}
+
+function captureVisibleTab() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab({ format: "png" }, (dataUrl) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(dataUrl || "");
+    });
+  });
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.addEventListener("load", () => resolve(image), { once: true });
+    image.addEventListener("error", reject, { once: true });
+    image.src = src;
+  });
+}
+
+function readQrValueFromCanvas() {
+  if (typeof jsQR !== "function" || !qrCanvasContext || !qrCanvas.width || !qrCanvas.height) {
+    return "";
+  }
+
+  const image = qrCanvasContext.getImageData(0, 0, qrCanvas.width, qrCanvas.height);
+  return jsQR(image.data, image.width, image.height, { inversionAttempts: "attemptBoth" })?.data || "";
 }
 
 function showQrMessage(message) {
@@ -192,7 +314,7 @@ function showQrMessage(message) {
 
 function cameraErrorMessage(error) {
   if (error?.name === "NotAllowedError") {
-    return "Camera permission was blocked. Allow camera access to scan the join QR code.";
+    return "Camera permission was blocked in the popup. Open the camera scanner tab or scan the QR from the current tab.";
   }
   if (error?.name === "NotFoundError") {
     return "No camera was found. Paste the join URL instead.";

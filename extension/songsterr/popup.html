@@ -26,6 +26,7 @@
         <video id="qrVideo" playsinline muted></video>
         <div class="qr-scanner-footer">
           <span id="qrStatus">Point your camera at the BandCue join QR code.</span>
+          <button id="openCameraScan" type="button" hidden>Camera</button>
           <button id="stopQrScan" type="button">Close</button>
         </div>
       </section>
@@ -57,6 +58,7 @@
         <span id="commandState"></span>
       </div>
     </main>
+    <script src="vendor/jsQR.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

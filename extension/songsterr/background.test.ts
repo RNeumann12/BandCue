@@ -88,6 +88,15 @@ function loadBackground(initialTabs: FakeTab[]) {
 
   const context: any = {
     chrome,
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        type: "roomState",
+        roomCode: "ABC123",
+        companionUrl: "http://127.0.0.1:4173/?token=TEST"
+      })
+    }),
+    AbortController,
     setTimeout,
     clearTimeout,
     clearInterval,

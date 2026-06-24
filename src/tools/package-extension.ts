@@ -21,8 +21,12 @@ if (existsSync(outFile)) {
 // Package every top-level item (recursing into any subfolders) except test
 // files, which live beside the source but must not ship in the extension.
 const command = [
-  `$items = Get-ChildItem -Path "${extensionDir}\\*" -Exclude "*.test.*";`,
-  `Compress-Archive -Path $items -DestinationPath "${outFile}" -Force`
+  `$staging = Join-Path "${outDir}" "songsterr-extension-staging";`,
+  `if (Test-Path $staging) { Remove-Item -LiteralPath $staging -Recurse -Force; }`,
+  `New-Item -ItemType Directory -Path $staging | Out-Null;`,
+  `Get-ChildItem -Path "${extensionDir}" -Force -Exclude "*.test.*" | Copy-Item -Destination $staging -Recurse -Force;`,
+  `Compress-Archive -Path "$staging\\*" -DestinationPath "${outFile}" -Force;`,
+  `Remove-Item -LiteralPath $staging -Recurse -Force;`
 ].join(" ");
 
 const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", command], {
