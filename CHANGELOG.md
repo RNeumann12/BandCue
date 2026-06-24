@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 - 2026-06-24
+
+### Fixed
+
+- Fixed the public-beta host launcher preflight so release bundles accept the packaged Songsterr extension zip instead of requiring unpacked extension source files.
+
 ## 1.0.0 - 2026-06-24
 
 ### Added

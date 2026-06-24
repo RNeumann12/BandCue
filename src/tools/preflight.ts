@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -14,9 +14,7 @@ check("Node.js 20+", () => {
 }, () => Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10) >= 20);
 
 check("Dependencies installed", () => "node_modules present", () => existsSync(join(root, "node_modules")));
-check("Songsterr extension manifest", () => "extension/songsterr/manifest.json present", () =>
-  existsSync(join(root, "extension/songsterr/manifest.json"))
-);
+check("Songsterr extension package/source", describeSongsterrExtension, hasSongsterrExtension);
 check("Web host files", () => "web/index.html present", () => existsSync(join(root, "web/index.html")));
 
 const museScore = spawnSync("powershell.exe", [
@@ -41,6 +39,29 @@ function check(name: string, message: () => string, ok: () => boolean): void {
   } else {
     fail(name, message());
   }
+}
+
+function hasSongsterrExtension(): boolean {
+  return existsSync(join(root, "extension/songsterr/manifest.json")) || findPackagedExtension() !== undefined;
+}
+
+function describeSongsterrExtension(): string {
+  if (existsSync(join(root, "extension/songsterr/manifest.json"))) {
+    return "extension/songsterr/manifest.json present";
+  }
+
+  const packaged = findPackagedExtension();
+  return packaged ? `packages/${packaged} present` : "missing extension/songsterr/manifest.json or packages/bandcue-songsterr-extension-*.zip";
+}
+
+function findPackagedExtension(): string | undefined {
+  const packagesDir = join(root, "packages");
+  if (!existsSync(packagesDir)) {
+    return undefined;
+  }
+
+  return readdirSync(packagesDir)
+    .find((name) => /^bandcue-songsterr-extension-.+\.zip$/u.test(name));
 }
 
 function pass(name: string, message: string): void {
