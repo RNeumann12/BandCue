@@ -13,14 +13,14 @@
           <p class="eyebrow">BandCue rehearsal room</p>
           <h1 id="roomCode">Joining...</h1>
         </div>
-        <div class="transport" id="transportBadge">Stopped</div>
+        <div class="transport" id="transportBadge" role="status" aria-live="polite">Stopped</div>
       </section>
 
-      <section class="transport-deck" aria-live="polite">
+      <section class="transport-deck">
         <div class="transport-readout">
           <p class="label">Now</p>
-          <div class="countdown" id="countdown">--</div>
-          <div class="subline" id="subline">Waiting for a transport command</div>
+          <div class="countdown" id="countdown" aria-hidden="true">--</div>
+          <div class="subline" id="subline" aria-live="polite">Waiting for a transport command</div>
         </div>
         <div class="session-stack">
           <div class="metric">
