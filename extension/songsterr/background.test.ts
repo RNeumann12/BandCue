@@ -10,10 +10,13 @@ const backgroundSource = readFileSync(
 
 const SONG_A = "https://www.songsterr.com/a/wsa/song-a-s100";
 const SONG_B = "https://www.songsterr.com/a/wsa/song-b-s200";
-// Same song as SONG_A, pinned to different instruments (track tokens).
-const SONG_A_T2 = "https://www.songsterr.com/a/wsa/song-a-s100t2";
-const SONG_A_T3 = "https://www.songsterr.com/a/wsa/song-a-s100t3";
-const SONG_A_Q2 = "https://www.songsterr.com/a/wsa/song-a-s100?track=2";
+// Same song A on each instrument tab. Songsterr puts the instrument category in
+// the slug ("-bass-tab"/"-drum-tab", else the lead guitar tab).
+const SONG_A_TAB = "https://www.songsterr.com/a/wsa/song-a-tab-s100";
+const SONG_A_BASS = "https://www.songsterr.com/a/wsa/song-a-bass-tab-s100";
+const SONG_A_DRUM = "https://www.songsterr.com/a/wsa/song-a-drum-tab-s100";
+const SONG_B_TAB = "https://www.songsterr.com/a/wsa/song-b-tab-s200";
+const SONG_B_BASS = "https://www.songsterr.com/a/wsa/song-b-bass-tab-s200";
 
 type FakeTab = { id: number; url: string; windowId: number; active?: boolean };
 
@@ -31,8 +34,9 @@ function loadBackground(initialTabs: FakeTab[]) {
       }
     }, 0);
 
+  let messageListener: ((message: any, sender: any, sendResponse: any) => unknown) | undefined;
   const chrome = {
-    runtime: { onMessage: { addListener() {} } },
+    runtime: { onMessage: { addListener: (fn: any) => { messageListener = fn; } } },
     storage: { local: { get: (_keys: unknown, cb: (v: object) => void) => cb({}), set() {} } },
     windows: { update: async () => undefined },
     tabs: {
@@ -109,7 +113,14 @@ function loadBackground(initialTabs: FakeTab[]) {
     await flush();
   }
 
-  return { context, created, updated, deliverServerMessage };
+  // Drive the real onMessage handler the popup uses (e.g. to set the instrument).
+  function sendRuntimeMessage(message: unknown) {
+    return new Promise((resolve) => {
+      messageListener?.(message, {}, resolve);
+    });
+  }
+
+  return { context, created, updated, deliverServerMessage, sendRuntimeMessage };
 }
 
 describe("ensureSongsterrTabs tab reuse", () => {
@@ -224,124 +235,115 @@ describe("downbeat never navigates or reloads", () => {
   });
 });
 
-describe("songKey / readTrack / applyTrack helpers", () => {
+describe("songKey / instrumentFromUrl / applyInstrument helpers", () => {
   it("treats the same song on different instruments as one song", () => {
     const { context } = loadBackground([]);
-    expect(context.songKey(SONG_A_T2)).toBe(context.songKey(SONG_A_T3));
-    expect(context.songKey(SONG_A_T2)).toBe(context.songKey(SONG_A));
-    expect(context.songKey(SONG_A_Q2)).toBe(context.songKey(SONG_A));
+    expect(context.songKey(SONG_A_BASS)).toBe(context.songKey(SONG_A_DRUM));
+    expect(context.songKey(SONG_A_BASS)).toBe(context.songKey(SONG_A_TAB));
+    // The legacy "t<n>" track suffix collapses too.
+    expect(context.songKey(`${SONG_A_TAB}t2`)).toBe(context.songKey(SONG_A_TAB));
   });
 
   it("distinguishes genuinely different songs", () => {
     const { context } = loadBackground([]);
-    expect(context.songKey(SONG_A)).not.toBe(context.songKey(SONG_B));
+    expect(context.songKey(SONG_A_TAB)).not.toBe(context.songKey(SONG_B_TAB));
   });
 
-  it("does not strip a 't<n>' that is not the instrument suffix", () => {
+  it("does not strip a 't<n>' that is not the track suffix", () => {
     const { context } = loadBackground([]);
     const url = "https://www.songsterr.com/a/wsa/test123-s100";
     expect(context.songKey(url)).toContain("test123");
   });
 
-  it("reads the instrument from each URL form", () => {
+  it("reads the instrument category from the slug", () => {
     const { context } = loadBackground([]);
-    expect(context.readTrack(SONG_A_T2)).toEqual({ kind: "path", value: "2" });
-    expect(context.readTrack(SONG_A_Q2)).toEqual({ kind: "query", value: "2" });
-    expect(context.readTrack(SONG_A)).toBeNull();
+    expect(context.instrumentFromUrl(SONG_A_BASS)).toBe("bass");
+    expect(context.instrumentFromUrl(SONG_A_DRUM)).toBe("drum");
+    expect(context.instrumentFromUrl(SONG_A_TAB)).toBe("guitar");
   });
 
-  it("prefers the path form when both are present", () => {
+  it("rewrites a song URL across instruments", () => {
     const { context } = loadBackground([]);
-    const both = "https://www.songsterr.com/a/wsa/song-a-s100t2?track=9";
-    expect(context.readTrack(both)).toEqual({ kind: "path", value: "2" });
+    expect(context.applyInstrument(SONG_A_TAB, "bass")).toBe(SONG_A_BASS);
+    expect(context.applyInstrument(SONG_A_TAB, "drum")).toBe(SONG_A_DRUM);
+    expect(context.applyInstrument(SONG_A_BASS, "drum")).toBe(SONG_A_DRUM);
+    expect(context.applyInstrument(SONG_A_BASS, "guitar")).toBe(SONG_A_TAB);
   });
 
-  it("replaces an existing instrument token rather than appending", () => {
+  it("normalizes any existing track suffix away when applying an instrument", () => {
     const { context } = loadBackground([]);
-    const out = context.applyTrack(SONG_A_T2, { kind: "path", value: "3" });
-    expect(out).toBe(SONG_A_T3);
-    expect(out).not.toContain("t2");
-  });
-
-  it("converts across forms and clears the other form", () => {
-    const { context } = loadBackground([]);
-    const out = context.applyTrack(SONG_A_T2, { kind: "query", value: "5" });
-    expect(out).toContain("track=5");
-    expect(new URL(out).pathname).toBe("/a/wsa/song-a-s100");
-  });
-
-  it("strips the instrument for a null descriptor", () => {
-    const { context } = loadBackground([]);
-    expect(context.applyTrack(SONG_A_T2, null)).toBe(SONG_A);
+    expect(context.applyInstrument(`${SONG_A_TAB}t3`, "guitar")).toBe(SONG_A_TAB);
+    expect(context.applyInstrument(`${SONG_A_TAB}t3`, "bass")).toBe(SONG_A_BASS);
   });
 });
 
-describe("per-member instrument memory", () => {
+describe("per-member instrument", () => {
   it("does not reload a member already on the song on a different instrument", async () => {
     const { context, created, updated } = loadBackground([
-      { id: 1, url: SONG_A_T3, windowId: 1 }
+      { id: 1, url: SONG_A_BASS, windowId: 1 }
     ]);
 
-    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_T2 }, { active: true });
+    // Host advances to song A (guitar URL); member is already on A's bass tab.
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_TAB }, { active: true });
 
     expect(created).toHaveLength(0);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
   });
 
-  it("opens a fresh tab on the member's remembered instrument, not the host's", async () => {
-    const { context, created } = loadBackground([
+  it("opens a fresh tab on the explicitly chosen instrument, not the host's", async () => {
+    const { context, created, sendRuntimeMessage } = loadBackground([
       { id: 9, url: "https://example.com/", windowId: 1 }
     ]);
 
-    context.rememberInstrumentFromUrl(SONG_A_T3);
-    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_T2 }, { active: true });
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "drum" });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_TAB }, { active: true });
 
     expect(created).toHaveLength(1);
-    expect(created[0].url).toBe(SONG_A_T3);
+    expect(created[0].url).toBe(SONG_A_DRUM);
   });
 
-  it("navigates a reusable tab to the member's remembered instrument", async () => {
-    const { context, created, updated } = loadBackground([
-      { id: 1, url: SONG_B, windowId: 1 }
+  it("navigates a reusable tab to the explicitly chosen instrument", async () => {
+    const { context, created, updated, sendRuntimeMessage } = loadBackground([
+      { id: 1, url: SONG_B_TAB, windowId: 1 }
     ]);
 
-    context.rememberInstrumentFromUrl(SONG_A_T3);
-    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_T2 }, { active: true });
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "bass" });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_TAB }, { active: true });
 
     expect(created).toHaveLength(0);
-    expect(updated.some((u) => u.id === 1 && u.url === SONG_A_T3)).toBe(true);
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_A_BASS)).toBe(true);
   });
 
-  it("uses the host URL verbatim when no instrument is remembered", async () => {
+  it("auto: inherits the instrument from the member's currently-open tab", async () => {
+    // Default is "auto". The open tab is a bass tab for a different song, so
+    // advancing to song A should land on song A's bass tab.
+    const { context, updated } = loadBackground([
+      { id: 1, url: SONG_B_BASS, windowId: 1 }
+    ]);
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_TAB }, { active: true });
+
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_A_BASS)).toBe(true);
+  });
+
+  it("auto: uses the host URL verbatim when no Songsterr tab is open to detect from", async () => {
     const { context, created } = loadBackground([
       { id: 9, url: "https://example.com/", windowId: 1 }
     ]);
 
-    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_T2 }, { active: true });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_BASS }, { active: true });
 
-    expect(created[0].url).toBe(SONG_A_T2);
+    expect(created[0].url).toBe(SONG_A_BASS);
   });
 
-  it("does not let a transient bare song URL clobber a remembered instrument", async () => {
-    const { context, created } = loadBackground([
+  it("explicit guitar normalizes a host bass URL down to the lead tab", async () => {
+    const { context, created, sendRuntimeMessage } = loadBackground([
       { id: 9, url: "https://example.com/", windowId: 1 }
     ]);
 
-    context.rememberInstrumentFromUrl(SONG_A_T3);
-    context.rememberInstrumentFromUrl(SONG_A); // no token -> must be ignored
-    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A }, { active: true });
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "guitar" });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A_BASS }, { active: true });
 
-    expect(created[0].url).toBe(SONG_A_T3);
-  });
-
-  it("remembers and re-applies the query-param instrument form", async () => {
-    const { context, created } = loadBackground([
-      { id: 9, url: "https://example.com/", windowId: 1 }
-    ]);
-
-    context.rememberInstrumentFromUrl(SONG_A_Q2);
-    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A }, { active: true });
-
-    expect(created[0].url).toContain("track=2");
+    expect(created[0].url).toBe(SONG_A_TAB);
   });
 });

@@ -4,6 +4,7 @@ const disconnect = document.querySelector("#disconnect");
 const play = document.querySelector("#play");
 const stop = document.querySelector("#stop");
 const suppressAutoOpen = document.querySelector("#suppressAutoOpen");
+const instrument = document.querySelector("#instrument");
 const status = document.querySelector("#status");
 const connectionState = document.querySelector("#connectionState");
 const connectionDot = document.querySelector("#connectionDot");
@@ -24,6 +25,7 @@ chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
     roomUrl.value = state.roomInput || state.roomUrl;
   }
   suppressAutoOpen.checked = Boolean(state?.suppressAutoOpen);
+  instrument.value = state?.instrument || "auto";
   renderState(state);
 });
 
@@ -40,6 +42,13 @@ disconnect.addEventListener("click", () => {
 suppressAutoOpen.addEventListener("change", () => {
   chrome.runtime.sendMessage(
     { type: "popupSetSuppressAutoOpen", suppressAutoOpen: suppressAutoOpen.checked },
+    renderState
+  );
+});
+
+instrument.addEventListener("change", () => {
+  chrome.runtime.sendMessage(
+    { type: "popupSetInstrument", instrument: instrument.value },
     renderState
   );
 });
