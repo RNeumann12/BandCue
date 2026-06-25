@@ -314,6 +314,43 @@ describe("RoomController", () => {
     });
   });
 
+  it("sanitizes current song updates like setlist songs", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: -5,
+      total: 100_001,
+      updatedAt: 1200,
+      song: {
+        id: "song-1",
+        title: "  Long Song  ",
+        sourceType: "not-real",
+        source: "x".repeat(700),
+        durationMs: 25 * 60 * 60 * 1000,
+        notes: "n".repeat(700)
+      }
+    } as never, 1200);
+
+    const currentSong = room.getState(1300).currentSong;
+    expect(currentSong?.index).toBeUndefined();
+    expect(currentSong?.total).toBeUndefined();
+    expect(currentSong?.song).toMatchObject({
+      id: "song-1",
+      title: "Long Song",
+      sourceType: "other"
+    });
+    expect(currentSong?.song?.source).toHaveLength(500);
+    expect(currentSong?.song?.durationMs).toBeUndefined();
+    expect(currentSong?.song?.notes).toHaveLength(500);
+  });
+
   it("broadcasts a host request to open the current Songsterr song", () => {
     const hostMessages: string[] = [];
     const adapterMessages: string[] = [];

@@ -1,8 +1,8 @@
 # BandCue Networking & Discovery
 
 BandCue is local-first: the coordinator, the web UI, and all discovery live on the rehearsal LAN.
-This document covers how clients find a room, the four discovery mechanisms, and the token model
-that secures a connection.
+This document covers how clients find a room, the four discovery mechanisms, and the trusted-LAN
+token model used by the current implementation.
 
 ## Room Locators
 
@@ -18,6 +18,9 @@ A client joins a room from one of four user-entered **locators**, resolved by
 
 A room code or port produces *candidates* that are probed via `GET /api/room`. The
 `expectedRoomCode` on each candidate guards against connecting to the wrong room on a shared LAN.
+For the current v1 flow, a successful discovery response includes the token-bearing companion URL
+so adapters can join from just a room code or port. That convenience assumes the rehearsal LAN is
+trusted.
 
 ## The Four Discovery Mechanisms
 
@@ -89,17 +92,18 @@ Other detected LAN IPs are printed at startup so you know the alternatives.
 
 ## The Token & Security Model
 
-- The **room token** (`ROOM_TOKEN`) is the secret. It's a random `base64url` string generated at
-  startup (or set via `BANDCUE_TOKEN`). A WebSocket upgrade to `/ws` is **rejected with HTTP 401**
-  unless `?token=` matches. Anyone with the token can join and (subject to safety rules) control
-  transport.
-- The **room code** (`ROOM_CODE`) is **not** secret — it's a 6-hex-char locator that only helps
-  find the host. Discovery responders return the code freely. Knowing the code does not grant
-  access; the token still gates the WebSocket.
+- The **room token** (`ROOM_TOKEN`) is the WebSocket credential. It's a random `base64url` string
+  generated at startup (or set via `BANDCUE_TOKEN`). A WebSocket upgrade to `/ws` is **rejected
+  with HTTP 401** unless `?token=` matches. Anyone with the token can join and (subject to safety
+  rules) control transport.
+- The **room code** (`ROOM_CODE`) is **not** secret — it's a 6-hex-char locator that helps find the
+  host. In the current convenience-first discovery flow, a client that can reach `/api/room` on
+  the rehearsal LAN can obtain the token-bearing companion URL after matching the room code.
 - The full room URL embeds the token, so treat the URL and QR code like a shared password for the
   rehearsal.
-- BandCue assumes a trusted rehearsal LAN. There is no per-user auth, TLS, or rate limiting — it
-  is not designed to be exposed to the public internet. Keep it on the local network.
+- BandCue assumes a trusted rehearsal LAN. There is no per-user auth or TLS, and host privileges
+  are based on the connected client's declared role after it has joined with the room token. It is
+  not designed to be exposed to the public internet. Keep it on the local network.
 
 ## Default Ports
 

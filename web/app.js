@@ -89,6 +89,8 @@ const LEGACY_CALIBRATION_STORAGE_KEY = "playsync:calibration";
 const LEGACY_DEVICE_NAME_STORAGE_KEY = "playsync:name";
 migrateLegacyStorage();
 let socket;
+let clockTimer;
+let reconnectTimer;
 let serverOffsetMs = 0;
 let samples = [];
 let lastState;
@@ -258,6 +260,14 @@ setInterval(updateCountdown, 60);
 setInterval(tickSetlistLoading, 250);
 
 function connect() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+  if (clockTimer) {
+    clearInterval(clockTimer);
+    clockTimer = undefined;
+  }
   socket = new WebSocket(wsUrl);
 
   socket.addEventListener("open", () => {
@@ -270,7 +280,7 @@ function connect() {
       capabilities: []
     });
 
-    setInterval(() => {
+    clockTimer = setInterval(() => {
       send({ type: "clockSync", clientSentAt: Date.now() });
     }, 1000);
   });
@@ -317,14 +327,26 @@ function connect() {
     }
 
     if (message.type === "error") {
+      transportRequestPending = false;
       setText(elements.subline, message.message);
       setText(elements.hostWarning, message.message);
     }
   });
 
   socket.addEventListener("close", () => {
+    if (clockTimer) {
+      clearInterval(clockTimer);
+      clockTimer = undefined;
+    }
+    transportRequestPending = false;
     setText(elements.subline, "Disconnected. Reconnecting...");
-    setTimeout(connect, 1500);
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, 1500);
   });
 }
 

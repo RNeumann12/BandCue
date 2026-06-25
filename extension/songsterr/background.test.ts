@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { beforeEach, describe, expect, it } from "vitest";
+import {
+  DEFAULT_LAN_SCAN_SUBNETS,
+  describeLanScanSubnets
+} from "../../src/shared/room-locator.js";
 
 const backgroundSource = readFileSync(
   fileURLToPath(new URL("./background.js", import.meta.url)),
@@ -172,6 +176,14 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(1);
     expect(created[0].url).toBe(SONG_A);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+});
+
+describe("discovery constants", () => {
+  it("keeps extension LAN scan diagnostics in sync with shared defaults", () => {
+    const { context } = loadBackground([]);
+
+    expect(context.formatLanScanSubnets()).toBe(describeLanScanSubnets(DEFAULT_LAN_SCAN_SUBNETS));
   });
 });
 

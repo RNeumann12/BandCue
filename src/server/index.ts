@@ -5,11 +5,15 @@ import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import QRCode from "qrcode";
 import { WebSocketServer } from "ws";
-import type { ClientHello, ClientMessage } from "../shared/protocol.js";
 import { RoomController } from "./room.js";
 import { startDiscoveryResponder } from "./discovery.js";
 import { startMdnsResponder } from "./mdns.js";
 import { selectLanCandidates } from "../shared/lan-address.js";
+import {
+  MAX_WS_MESSAGE_BYTES,
+  parseClientHelloPayload,
+  parseClientMessagePayload
+} from "./message-guards.js";
 
 const PORT = Number(process.env.PORT ?? 4173);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -81,7 +85,7 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_MESSAGE_BYTES });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", baseUrl);
@@ -100,8 +104,8 @@ wss.on("connection", (socket) => {
   let clientId: string | undefined;
 
   socket.once("message", (raw) => {
-    const hello = safeParse(raw.toString()) as ClientHello | undefined;
-    if (!hello || hello.type !== "clientHello") {
+    const hello = parseClientHelloPayload(raw.toString());
+    if (!hello) {
       socket.close(1008, "Expected clientHello");
       return;
     }
@@ -110,7 +114,7 @@ wss.on("connection", (socket) => {
     clientId = client.id;
 
     socket.on("message", (messageRaw) => {
-      const message = safeParse(messageRaw.toString()) as ClientMessage | undefined;
+      const message = parseClientMessagePayload(messageRaw.toString());
       if (!message || !clientId) {
         return;
       }
@@ -128,14 +132,6 @@ wss.on("connection", (socket) => {
     }
   });
 });
-
-function safeParse(raw: string): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-}
 
 server.listen(PORT, HOST, () => {
   startDiscoveryResponder({

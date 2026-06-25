@@ -294,9 +294,9 @@ export class RoomController {
     }
 
     this.currentSong = {
-      song: update.song,
-      index: update.index,
-      total: update.total,
+      song: update.song ? sanitizeSong(update.song) : undefined,
+      index: sanitizeOptionalInteger(update.index, 1, 10_000),
+      total: sanitizeOptionalInteger(update.total, 0, 10_000),
       leaderId: client.id,
       updatedAt: update.updatedAt || now
     };
@@ -773,6 +773,19 @@ function sanitizeDurationMs(value: number | undefined): number | undefined {
 
   const rounded = Math.round(value);
   return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
+}
+
+function sanitizeOptionalInteger(
+  value: number | undefined,
+  min: number,
+  max: number
+): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded >= min && rounded <= max ? rounded : undefined;
 }
 
 function sanitizeDurationSource(value: SongDurationSource | undefined): SongDurationSource | undefined {

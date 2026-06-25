@@ -132,11 +132,23 @@ describe("room locator", () => {
   });
 
   it("describes room discovery diagnostics and fallback", () => {
+    expect(DEFAULT_LAN_SCAN_SUBNETS).toEqual([
+      "192.168.0",
+      "192.168.1",
+      "192.168.178",
+      "192.168.2",
+      "192.168.4",
+      "192.168.86",
+      "10.0.0",
+      "10.0.1",
+      "10.0.2",
+      "172.16.0",
+      "172.20.10"
+    ]);
     expect(discoveryPortForLocator("ABC123", 5000)).toBe(5000);
     expect(discoveryPortForLocator("4174", 5000)).toBe(4174);
     expect(expectedRoomCodeForLocator("abc123")).toBe("ABC123");
     expect(describeLanScanSubnets(["192.168.1"])).toBe("192.168.1.1-254");
     expect(roomDiscoveryFallbackHint(4173)).toContain("host:port shown on the host page");
-    expect(DEFAULT_LAN_SCAN_SUBNETS).toContain("172.20.10");
   });
 });

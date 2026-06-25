@@ -50,6 +50,22 @@ class RoomLocatorTest {
     fun buildsDocumentedLanScanCandidates() {
         val candidates = buildRoomDiscoveryCandidates("A1B2C3", 5000)
 
+        assertEquals(
+            listOf(
+                "192.168.0",
+                "192.168.1",
+                "192.168.178",
+                "192.168.2",
+                "192.168.4",
+                "192.168.86",
+                "10.0.0",
+                "10.0.1",
+                "10.0.2",
+                "172.16.0",
+                "172.20.10"
+            ),
+            LAN_SCAN_SUBNETS
+        )
         assertTrue(candidates.any { it.apiUrl == "http://192.168.1.1:5000/api/room" })
         assertTrue(candidates.any { it.apiUrl == "http://172.20.10.254:5000/api/room" })
         assertTrue(candidates.all { it.expectedRoomCode == "A1B2C3" })
