@@ -1,3 +1,5 @@
+importScripts("room-permissions.js");
+
 let socket;
 let roomInput;
 let roomUrl;
@@ -187,9 +189,26 @@ async function configureConnection(input) {
 }
 
 async function refreshRoomEndpoint() {
+  await assertRoomPermissions(roomInput);
   const endpoint = await resolveRoomEndpoint(roomInput);
   roomUrl = endpoint.roomUrl;
   wsUrl = endpoint.wsUrl;
+}
+
+async function assertRoomPermissions(input) {
+  if (!chrome.permissions?.contains || !globalThis.BandCueRoomPermissions) {
+    return;
+  }
+
+  const permission = globalThis.BandCueRoomPermissions.permissionsForLocator(input);
+  if (!permission.origins.length) {
+    throw new Error(permission.message);
+  }
+
+  const granted = await chrome.permissions.contains({ origins: permission.origins });
+  if (!granted) {
+    throw new Error(`${permission.message} Open the BandCue extension popup and press Connect to approve it.`);
+  }
 }
 
 async function connect() {

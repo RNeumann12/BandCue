@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.2 - 2026-06-25
+
+### Added
+
+- Added Chrome Web Store privacy, listing, reviewer, and asset-generation materials for the Songsterr extension.
+- Added generated Chrome Web Store screenshot and small promo tile assets.
+
+### Changed
+
+- Changed the Songsterr extension's broad local-network HTTP permission to an optional host permission requested when the user connects to a BandCue room.
+
 ## 1.0.1 - 2026-06-24
 
 ### Fixed

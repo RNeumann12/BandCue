@@ -11,6 +11,10 @@ const backgroundSource = readFileSync(
   fileURLToPath(new URL("./background.js", import.meta.url)),
   "utf8"
 );
+const permissionsSource = readFileSync(
+  fileURLToPath(new URL("./room-permissions.js", import.meta.url)),
+  "utf8"
+);
 
 const SONG_A = "https://www.songsterr.com/a/wsa/song-a-s100";
 const SONG_B = "https://www.songsterr.com/a/wsa/song-b-s200";
@@ -42,6 +46,7 @@ function loadBackground(initialTabs: FakeTab[]) {
   let messageListener: ((message: any, sender: any, sendResponse: any) => unknown) | undefined;
   const chrome = {
     runtime: { onMessage: { addListener: (fn: any) => { messageListener = fn; } } },
+    permissions: { contains: async () => true },
     storage: { local: { get: (_keys: unknown, cb: (v: object) => void) => cb({}), set() {} } },
     windows: { update: async () => undefined },
     tabs: {
@@ -110,9 +115,11 @@ function loadBackground(initialTabs: FakeTab[]) {
     JSON,
     Math,
     console,
+    importScripts() {},
     WebSocket: FakeSocket
   };
   vm.createContext(context);
+  vm.runInContext(permissionsSource, context);
   vm.runInContext(backgroundSource, context);
 
   const flush = () => new Promise((resolve) => setTimeout(resolve, 25));

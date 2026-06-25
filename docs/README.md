@@ -11,6 +11,8 @@ Detailed documentation for BandCue, local-first playback sync for band rehearsal
 | [Networking.md](Networking.md) | Debug discovery, understand mDNS/UDP/scan, or learn the token/auth model. |
 | [Configuration.md](Configuration.md) | Find a CLI flag, environment variable, default, or constant. |
 | [Development.md](Development.md) | Build, test, and contribute — including the Android build and release signing. |
+| [chrome-extension-privacy.md](chrome-extension-privacy.md) | Review the Chrome Web Store privacy policy for the Songsterr adapter. |
+| [chrome-web-store-release.md](chrome-web-store-release.md) | Prepare Chrome Web Store listing text, assets, and reviewer notes. |
 | [Improvements.md](Improvements.md) | See the living tracker of active reliability and workflow work. |
 
 ## Quick map

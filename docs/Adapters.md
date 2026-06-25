@@ -26,7 +26,7 @@ A Manifest V3 extension that drives Songsterr browser tabs.
 
 | File | Role |
 | --- | --- |
-| `manifest.json` | MV3 manifest. Permissions: `storage`, `tabs`, `activeTab`; host access to Songsterr + `http://*/*` + `ws://*/*`. |
+| `manifest.json` | MV3 manifest. Permissions: `storage`, `tabs`, `activeTab`; default host access to Songsterr; optional `http://*/*` access requested when joining a local BandCue room. |
 | `background.js` | Service worker: holds the WebSocket connection, clock sync, discovery, reconnect, and connection intent. |
 | `content-script.js` | Injected into Songsterr pages: finds the transport control / media element and performs play/stop/reset. |
 | `popup.html` / `popup.css` / `popup.js` | The connect/disconnect UI and readiness panel. |
@@ -44,7 +44,8 @@ Build a distributable zip with `npm run package:extension`.
 
 - **Discovery** can't use raw UDP from a browser, so a room code / port is resolved by checking
   the local machine, the OS mDNS name (`bandcue.local` / `bandcue-<code>.local`), and a scan of
-  common LAN subnets. On an unusual subnet, enter `host:port` (e.g. `192.168.1.23:4173`).
+  common LAN subnets. Chrome prompts for local network access when the user connects. On an
+  unusual subnet, enter `host:port` (e.g. `192.168.1.23:4173`).
 - **QR join** first scans the visible browser tab for the host join QR code. If camera access is
   needed, the popup can open a dedicated extension scanner tab that reads the camera feed and joins
   the room immediately after a successful scan.

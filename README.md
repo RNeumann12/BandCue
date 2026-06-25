@@ -225,6 +225,8 @@ Full details for each one live in [docs/Adapters.md](docs/Adapters.md).
 2. Select `<project-folder>\extension\songsterr`.
 3. Open a Songsterr song tab, click the BandCue extension icon.
 4. Enter the room code, the coordinator port (e.g. `4173`), or the full room URL, then **Connect**.
+   Chrome asks for local BandCue network access at that point so the extension can find or join the
+   rehearsal coordinator.
 
 The extension can't use raw UDP, so room-code/port lookup checks the local machine, the OS mDNS
 name, and common LAN subnets. On an unusual subnet, enter `host:port`. **Disconnect** keeps the

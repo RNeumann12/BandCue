@@ -43,7 +43,22 @@ chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
 setInterval(refreshState, 1000);
 window.addEventListener("beforeunload", stopQrScanSession);
 
-connect.addEventListener("click", () => {
+connect.addEventListener("click", async () => {
+  const permission = await requestRoomPermissions(roomUrl.value);
+  if (!permission.granted) {
+    renderState({
+      connected: false,
+      connectionState: "permission-needed",
+      connectionDetail: permission.message,
+      autoConnectEnabled: false,
+      status: {
+        ready: false,
+        detail: permission.message
+      }
+    });
+    return;
+  }
+
   chrome.runtime.sendMessage({ type: "popupConnect", roomUrl: roomUrl.value }, renderState);
 });
 
@@ -117,6 +132,37 @@ function refreshState() {
       roomUrl.value = state.roomInput || state.roomUrl;
     }
     renderState(state);
+  });
+}
+
+function requestRoomPermissions(input) {
+  if (!chrome.permissions?.request || !globalThis.BandCueRoomPermissions) {
+    return Promise.resolve({ granted: true, message: "" });
+  }
+
+  const permission = globalThis.BandCueRoomPermissions.permissionsForLocator(input);
+  if (!permission.origins.length) {
+    return Promise.resolve({ granted: false, message: permission.message });
+  }
+
+  return new Promise((resolve) => {
+    chrome.permissions.request({ origins: permission.origins }, (granted) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        resolve({
+          granted: false,
+          message: `Chrome could not request BandCue network access: ${error.message}`
+        });
+        return;
+      }
+
+      resolve({
+        granted: Boolean(granted),
+        message: granted
+          ? ""
+          : `${permission.message} Without this, paste a full room URL and approve that host when prompted.`
+      });
+    });
   });
 }
 
@@ -209,11 +255,28 @@ function openCameraScannerPage() {
   chrome.tabs.create({ url: chrome.runtime.getURL("scanner.html") });
 }
 
-function useQrValue(value) {
+async function useQrValue(value) {
   userEditedRoom = true;
   roomUrl.value = value;
-  qrStatus.textContent = "QR code found. Connecting...";
+  qrStatus.textContent = "QR code found. Checking BandCue network access...";
   stopQrScanSession({ keepPanelOpen: true });
+  const permission = await requestRoomPermissions(value);
+  if (!permission.granted) {
+    showQrMessage(permission.message);
+    renderState({
+      connected: false,
+      connectionState: "permission-needed",
+      connectionDetail: permission.message,
+      autoConnectEnabled: false,
+      status: {
+        ready: false,
+        detail: permission.message
+      }
+    });
+    return;
+  }
+
+  qrStatus.textContent = "QR code found. Connecting...";
   chrome.runtime.sendMessage({ type: "popupConnect", roomUrl: value }, renderState);
   setTimeout(() => {
     qrScanner.hidden = true;

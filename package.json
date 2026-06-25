@@ -1,6 +1,6 @@
 {
   "name": "bandcue",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "dev:musescore": "tsx src/adapters/musescore-windows.ts",
     "preflight": "tsx src/tools/preflight.ts",
     "generate:icons": "tsx src/tools/generate-icons.ts",
+    "generate:store-assets": "tsx src/tools/generate-store-assets.ts",
     "package:extension": "tsx src/tools/package-extension.ts",
     "package:release": "tsx src/tools/package-release.ts",
     "build:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1",

@@ -13,6 +13,7 @@ Every command-line flag and environment variable that BandCue understands. Defau
 | `npm run dev:musescore` | The MuseScore Windows helper ([`musescore-windows.ts`](../src/adapters/musescore-windows.ts)). |
 | `npm run preflight` | Pre-rehearsal environment checks. |
 | `npm run generate:icons` | Generate extension and Android launcher PNGs from the BandCue icon source. |
+| `npm run generate:store-assets` | Generate Chrome Web Store promo and screenshot PNGs. |
 | `npm run package:extension` | Zip the Chrome/Edge extension. |
 | `npm run package:release` | Build the public-beta release folder and zip. |
 | `npm run build:android` | Build the debug APK (bootstraps Gradle). |

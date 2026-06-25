@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BandCue Songsterr Adapter",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Connect Songsterr tabs to a local BandCue rehearsal room.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -10,7 +10,8 @@
     "128": "icons/icon-128.png"
   },
   "permissions": ["storage", "tabs", "activeTab"],
-  "host_permissions": ["https://www.songsterr.com/*", "https://songsterr.com/*", "http://*/*", "ws://*/*"],
+  "host_permissions": ["https://www.songsterr.com/*", "https://songsterr.com/*"],
+  "optional_host_permissions": ["http://*/*"],
   "background": {
     "service_worker": "background.js"
   },
