@@ -2,6 +2,17 @@
   "name": "bandcue",
   "version": "1.0.2",
   "private": true,
+  "description": "Local-first playback sync for band rehearsals — press play once and every device (Songsterr, MuseScore) starts on the same beat.",
+  "license": "MIT",
+  "author": "R. Neumann",
+  "homepage": "https://github.com/RNeumann12/BandCue#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RNeumann12/BandCue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RNeumann12/BandCue/issues"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx src/server/index.ts",

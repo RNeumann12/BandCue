@@ -1,13 +1,38 @@
 # BandCue
 
-**Local-first playback sync for band rehearsals.**
+### Hit play once. Your whole band starts together.
+
+You know the problem: everyone in the band has the tab or score open on their own
+phone, tablet, or laptop — and hitting "play" by hand never lines up. One screen is a
+beat ahead, another a beat behind.
+
+**BandCue fixes it.** Press play once on the leader's device and *every* device counts
+down to the same instant and starts on the beat — Songsterr in Chrome/Edge, Songsterr on
+Android, or MuseScore on Windows. Phones and tablets can also join as companion displays
+that mirror the countdown, the current song, and who's leading.
+
+- 🎯 **Scheduled start** — the coordinator says "go at time T", not "go now", so devices
+  sync to the same instant using a shared clock (NTP-style offset/RTT measurement).
+- 🎚️ **Per-device calibration** — nudge a consistently-early or late device earlier or later.
+- 📜 **Setlist mode** — auto-load, arm, play, and advance through the whole rehearsal hands-free.
+- 🔒 **Local-first** — runs entirely on your rehearsal Wi-Fi. No cloud, no account, no
+  internet needed once installed. Nothing about your rehearsal leaves the room.
+
+> **Free and open. Built to solve a real band's problem.**
+
+**[▶ Watch the 60-second demo](#)** · **[⬇ Download the latest release](https://github.com/RNeumann12/BandCue/releases)** · **[📖 Docs](#documentation)**
+
+> _Replace the demo link above with your video/GIF before sharing — see the README notes below._
+
+---
+
+## What it is, in one paragraph
 
 BandCue keeps a whole band on the same beat. One machine runs a **coordinator** on the
 rehearsal Wi-Fi. It sends *scheduled* transport commands (play / stop) to desktop and mobile
 **adapters** that drive real players — Songsterr in Chrome/Edge, Songsterr on Android, or
 MuseScore on Windows — so every device starts the song together. Phones and tablets can also
 join as **companion** displays that mirror the countdown, leader, and current-song state.
-
 Everything runs on the local network. There is no cloud service, no account, and no internet
 dependency once the dependencies are installed.
 
@@ -351,5 +376,13 @@ npm run build    # compile TypeScript
 
 Android JVM tests run via `npm run test:android`. See [docs/Development.md](docs/Development.md)
 for the full workflow, including how the Android build bootstraps Gradle without Android Studio.
+
+## License
+
+BandCue is released under the [MIT License](LICENSE).
+
+BandCue drives third-party players (Songsterr, MuseScore). It is an independent tool and is
+not affiliated with or endorsed by them; their names and assets belong to their respective
+owners. Use BandCue in accordance with those services' terms.
 </content>
 </invoke>
