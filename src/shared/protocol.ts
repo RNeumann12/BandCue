@@ -89,6 +89,8 @@ export interface ClockStatus {
   rttMs: number;
   offsetMs: number;
   jitterMs?: number;
+  /** How many clock samples this estimate is based on (for sync-readiness). */
+  sampleCount?: number;
 }
 
 export interface CalibrationUpdate {
@@ -240,6 +242,7 @@ export interface RoomClientSummary {
     rttMs: number;
     offsetMs: number;
     jitterMs?: number;
+    sampleCount?: number;
     manualOffsetMs?: number;
   };
 }

@@ -178,9 +178,17 @@ class BandCueAdapterService : Service() {
 
     private fun startClockSync() {
         stopClockSync()
+        // Warm up with a quick burst so the offset converges within ~2s, then
+        // settle into the steady cadence (avoids playing on a cold, seconds-off
+        // estimate). The burst tasks no-op once the socket is gone.
+        for (i in 0 until CLOCK_WARMUP_SAMPLES) {
+            scheduler.schedule({
+                socket?.sendText(ProtocolJson.clockSync(System.currentTimeMillis()))
+            }, i * CLOCK_WARMUP_INTERVAL_MS, TimeUnit.MILLISECONDS)
+        }
         clockTask = scheduler.scheduleAtFixedRate({
             socket?.sendText(ProtocolJson.clockSync(System.currentTimeMillis()))
-        }, 0, 1, TimeUnit.SECONDS)
+        }, CLOCK_WARMUP_SAMPLES * CLOCK_WARMUP_INTERVAL_MS, CLOCK_STEADY_INTERVAL_MS, TimeUnit.MILLISECONDS)
     }
 
     private fun stopClockSync() {
@@ -247,16 +255,17 @@ class BandCueAdapterService : Service() {
             serverSentAt = message.optLong("serverSentAt")
         )
         samples.add(sample)
-        while (samples.size > 10) {
+        while (samples.size > CLOCK_SAMPLE_WINDOW) {
             samples.removeAt(0)
         }
         val summary = summarizeClock(samples)
-        serverOffsetMs = summary.offsetMs
+        serverOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs)
         socket?.sendText(
             ProtocolJson.clockStatus(
                 rttMs = summary.rttMs,
-                offsetMs = summary.offsetMs,
-                jitterMs = calculateJitterMs(samples)
+                offsetMs = serverOffsetMs,
+                jitterMs = calculateJitterMs(samples),
+                sampleCount = samples.size
             )
         )
     }

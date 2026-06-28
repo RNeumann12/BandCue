@@ -80,7 +80,8 @@ export function sanitizeClientMessage(value: unknown): ClientMessage | undefined
         type: "clockStatus",
         rttMs: value.rttMs,
         offsetMs: value.offsetMs,
-        jitterMs: isFiniteNumber(value.jitterMs) ? value.jitterMs : undefined
+        jitterMs: isFiniteNumber(value.jitterMs) ? value.jitterMs : undefined,
+        sampleCount: isFiniteNumber(value.sampleCount) ? value.sampleCount : undefined
       };
     case "calibrationUpdate":
       return typeof value.targetClientId === "string" && isFiniteNumber(value.manualOffsetMs)

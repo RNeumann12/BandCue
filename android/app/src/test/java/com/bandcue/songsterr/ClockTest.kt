@@ -30,8 +30,29 @@ class ClockTest {
             )
         )
 
+        // RTT is still the median of the best samples for the quality gauge...
         assertEquals(30.0, summary.rttMs, 0.01)
-        assertEquals(6.0, summary.offsetMs, 0.01)
+        // ...but the offset comes from the single lowest-RTT sample (rtt 10 -> 2).
+        assertEquals(2.0, summary.offsetMs, 0.01)
+    }
+
+    @Test
+    fun blendOffsetAdoptsFirstAndLargeJumps() {
+        assertEquals(2_000.0, blendOffset(null, 2_000.0), 0.01)
+        val jump = 100.0 + CLOCK_OFFSET_JUMP_MS + 50.0
+        assertEquals(jump, blendOffset(100.0, jump), 0.01)
+    }
+
+    @Test
+    fun blendOffsetEasesSmallChanges() {
+        assertEquals(106.0, blendOffset(100.0, 120.0, 0.3), 0.01)
+    }
+
+    @Test
+    fun reportsConvergenceFromSamplesAndJitter() {
+        assertEquals(true, isClockConverged(5, 10.0))
+        assertEquals(false, isClockConverged(2, 10.0))
+        assertEquals(false, isClockConverged(10, 40.0))
     }
 
     @Test

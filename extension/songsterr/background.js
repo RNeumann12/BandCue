@@ -6,6 +6,13 @@ let roomUrl;
 let wsUrl;
 let serverOffsetMs = 0;
 let samples = [];
+// Clock cadence/estimator constants. Mirror of src/shared/clock.ts.
+const CLOCK_SAMPLE_WINDOW = 20;
+const CLOCK_WARMUP_SAMPLES = 8;
+const CLOCK_WARMUP_INTERVAL_MS = 250;
+const CLOCK_STEADY_INTERVAL_MS = 1000;
+const CLOCK_OFFSET_JUMP_MS = 250;
+const CLOCK_OFFSET_SMOOTHING = 0.3;
 let connectionState = "not configured";
 let connectionDetail = "Enter the BandCue room code, port, or URL and click Connect";
 let clockTimer;
@@ -257,7 +264,19 @@ async function connect() {
       capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
     });
 
-    clockTimer = setInterval(() => send({ type: "clockSync", clientSentAt: Date.now() }), 1000);
+    // Warm up with a quick burst so the offset converges within ~2s, then settle
+    // into the steady cadence (avoids playing on a cold, seconds-off estimate).
+    const sendClockSync = () => send({ type: "clockSync", clientSentAt: Date.now() });
+    let warmupRemaining = CLOCK_WARMUP_SAMPLES;
+    sendClockSync();
+    clockTimer = setInterval(() => {
+      sendClockSync();
+      warmupRemaining -= 1;
+      if (warmupRemaining <= 0) {
+        clearInterval(clockTimer);
+        clockTimer = setInterval(sendClockSync, CLOCK_STEADY_INTERVAL_MS);
+      }
+    }, CLOCK_WARMUP_INTERVAL_MS);
     scheduleActiveTabStatusReport(0);
     requestSongsterrStatusFromTabs();
   });
@@ -273,14 +292,15 @@ async function connect() {
         message.serverSentAt
       );
       samples.push(sample);
-      samples = samples.slice(-10);
+      samples = samples.slice(-CLOCK_SAMPLE_WINDOW);
       const summary = summarizeClock(samples);
-      serverOffsetMs = summary.offsetMs;
+      serverOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs);
       send({
         type: "clockStatus",
         rttMs: summary.rttMs,
-        offsetMs: summary.offsetMs,
-        jitterMs: calculateJitterMs(samples)
+        offsetMs: serverOffsetMs,
+        jitterMs: calculateJitterMs(samples),
+        sampleCount: samples.length
       });
       return;
     }
@@ -1371,11 +1391,27 @@ function calculateClockSample(clientSentAt, clientReceivedAt, serverReceivedAt, 
 }
 
 function summarizeClock(clockSamples) {
-  const best = [...clockSamples].sort((a, b) => a.rttMs - b.rttMs).slice(0, 5);
+  if (!clockSamples.length) {
+    return { rttMs: 0, offsetMs: 0 };
+  }
+  const sorted = [...clockSamples].sort((a, b) => a.rttMs - b.rttMs);
+  const best = sorted.slice(0, 5);
   return {
     rttMs: median(best.map((sample) => sample.rttMs)),
-    offsetMs: median(best.map((sample) => sample.offsetMs))
+    // Offset from the single lowest-RTT sample (NTP clock filter); jitter is
+    // damped over time by blendOffset.
+    offsetMs: sorted[0].offsetMs
   };
+}
+
+function blendOffset(previous, next) {
+  if (previous === undefined || !Number.isFinite(previous)) {
+    return next;
+  }
+  if (Math.abs(next - previous) > CLOCK_OFFSET_JUMP_MS) {
+    return next;
+  }
+  return previous + CLOCK_OFFSET_SMOOTHING * (next - previous);
 }
 
 function calculateJitterMs(clockSamples) {

@@ -83,11 +83,12 @@ object ProtocolJson {
         .put("clientSentAt", clientSentAt)
         .toString()
 
-    fun clockStatus(rttMs: Double, offsetMs: Double, jitterMs: Double): String = JSONObject()
+    fun clockStatus(rttMs: Double, offsetMs: Double, jitterMs: Double, sampleCount: Int): String = JSONObject()
         .put("type", "clockStatus")
         .put("rttMs", rttMs)
         .put("offsetMs", offsetMs)
         .put("jitterMs", jitterMs)
+        .put("sampleCount", sampleCount)
         .toString()
 
     fun adapterStatus(

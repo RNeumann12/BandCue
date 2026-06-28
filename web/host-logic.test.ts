@@ -229,7 +229,7 @@ describe("clock math", () => {
     ];
     const summary = summarizeClock(samples);
     expect(summary.rttMs).toBe(12); // median of [10, 12, 200]
-    expect(summary.offsetMs).toBe(7);
+    expect(summary.offsetMs).toBe(5); // offset of the single lowest-rtt sample (rtt 10)
   });
 
   it("reports zero jitter with fewer than two samples", () => {
@@ -253,8 +253,9 @@ describe("clock math", () => {
 
 describe("calibration", () => {
   it("clamps manual offset to the supported range and rounds", () => {
-    expect(clampManualOffset(1500)).toBe(1000);
-    expect(clampManualOffset(-1500)).toBe(-1000);
+    expect(clampManualOffset(6000)).toBe(5000);
+    expect(clampManualOffset(-6000)).toBe(-5000);
+    expect(clampManualOffset(1500)).toBe(1500);
     expect(clampManualOffset(12.6)).toBe(13);
     expect(clampManualOffset(Number.NaN)).toBe(0);
   });
@@ -266,9 +267,12 @@ describe("calibration", () => {
 
   it("grades timing quality from rtt and jitter", () => {
     expect(getTimingQuality(undefined).label).toBe("pending");
-    expect(getTimingQuality({ rttMs: 50, jitterMs: 5 }).label).toBe("tight");
-    expect(getTimingQuality({ rttMs: 120, jitterMs: 5 }).label).toBe("watch");
-    expect(getTimingQuality({ rttMs: 50, jitterMs: 40 }).label).toBe("unstable");
+    // Below the sample threshold the offset isn't trustworthy yet.
+    expect(getTimingQuality({ rttMs: 50, jitterMs: 5, sampleCount: 1 }).label).toBe("syncing…");
+    // Once enough samples are in, grade purely on rtt/jitter.
+    expect(getTimingQuality({ rttMs: 50, jitterMs: 5, sampleCount: 10 }).label).toBe("tight");
+    expect(getTimingQuality({ rttMs: 120, jitterMs: 5, sampleCount: 10 }).label).toBe("watch");
+    expect(getTimingQuality({ rttMs: 50, jitterMs: 40, sampleCount: 10 }).label).toBe("unstable");
   });
 });
 

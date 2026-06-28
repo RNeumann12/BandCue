@@ -17,8 +17,13 @@ import {
 } from "./musescore-catalog.js";
 import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
 import {
+  blendOffset,
   calculateClockSample,
   calculateJitterMs,
+  CLOCK_SAMPLE_WINDOW,
+  CLOCK_STEADY_INTERVAL_MS,
+  CLOCK_WARMUP_INTERVAL_MS,
+  CLOCK_WARMUP_SAMPLES,
   delayUntilServerTime,
   summarizeClock,
   type ClockSample
@@ -173,13 +178,17 @@ async function connect(): Promise<void> {
         message.serverSentAt
       );
       samples.push(sample);
-      const summary = summarizeClock(samples.slice(-10));
-      serverOffsetMs = summary.offsetMs;
+      if (samples.length > CLOCK_SAMPLE_WINDOW) {
+        samples.splice(0, samples.length - CLOCK_SAMPLE_WINDOW);
+      }
+      const summary = summarizeClock(samples);
+      serverOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs);
       send({
         type: "clockStatus",
         rttMs: summary.rttMs,
-        offsetMs: summary.offsetMs,
-        jitterMs: calculateJitterMs(samples.slice(-10))
+        offsetMs: serverOffsetMs,
+        jitterMs: calculateJitterMs(samples),
+        sampleCount: samples.length
       });
       return;
     }
@@ -393,9 +402,19 @@ function startClockSync(): void {
     clearInterval(clockTimer);
   }
 
+  // Warm up with a quick burst so the offset converges within ~2s, then settle
+  // into the steady cadence (avoids playing on a cold, seconds-off estimate).
+  const sendClockSync = () => send({ type: "clockSync", clientSentAt: Date.now() });
+  let warmupRemaining = CLOCK_WARMUP_SAMPLES;
+  sendClockSync();
   clockTimer = setInterval(() => {
-    send({ type: "clockSync", clientSentAt: Date.now() });
-  }, 1000);
+    sendClockSync();
+    warmupRemaining -= 1;
+    if (warmupRemaining <= 0) {
+      clearInterval(clockTimer);
+      clockTimer = setInterval(sendClockSync, CLOCK_STEADY_INTERVAL_MS);
+    }
+  }, CLOCK_WARMUP_INTERVAL_MS);
 }
 
 function pollMuseScore(): void {

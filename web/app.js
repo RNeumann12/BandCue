@@ -12,6 +12,11 @@ import {
   calculateClockSample,
   summarizeClock,
   calculateJitterMs,
+  blendOffset,
+  CLOCK_SAMPLE_WINDOW,
+  CLOCK_WARMUP_SAMPLES,
+  CLOCK_WARMUP_INTERVAL_MS,
+  CLOCK_STEADY_INTERVAL_MS,
   clampManualOffset,
   getCalibrationKey,
   getTimingQuality,
@@ -280,9 +285,20 @@ function connect() {
       capabilities: []
     });
 
+    // Warm up with a quick burst of samples so the clock offset converges within
+    // ~2s, then fall back to the steady cadence. Avoids playing on a cold,
+    // single-sample (and possibly seconds-off) offset estimate.
+    const sendClockSync = () => send({ type: "clockSync", clientSentAt: Date.now() });
+    let warmupRemaining = CLOCK_WARMUP_SAMPLES;
+    sendClockSync();
     clockTimer = setInterval(() => {
-      send({ type: "clockSync", clientSentAt: Date.now() });
-    }, 1000);
+      sendClockSync();
+      warmupRemaining -= 1;
+      if (warmupRemaining <= 0) {
+        clearInterval(clockTimer);
+        clockTimer = setInterval(sendClockSync, CLOCK_STEADY_INTERVAL_MS);
+      }
+    }, CLOCK_WARMUP_INTERVAL_MS);
   });
 
   socket.addEventListener("message", (event) => {
@@ -307,14 +323,17 @@ function connect() {
         message.serverSentAt
       );
       samples.push(sample);
-      samples = samples.slice(-10);
+      samples = samples.slice(-CLOCK_SAMPLE_WINDOW);
       const summary = summarizeClock(samples);
-      serverOffsetMs = summary.offsetMs;
+      // Ease the new offset into the running estimate to damp jitter (large, real
+      // clock steps are still adopted immediately by blendOffset).
+      serverOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs);
       send({
         type: "clockStatus",
         rttMs: summary.rttMs,
-        offsetMs: summary.offsetMs,
-        jitterMs: calculateJitterMs(samples)
+        offsetMs: serverOffsetMs,
+        jitterMs: calculateJitterMs(samples),
+        sampleCount: samples.length
       });
       return;
     }
@@ -744,8 +763,8 @@ function createTimingRow(key) {
       <input
         class="manual-offset"
         type="number"
-        min="-1000"
-        max="1000"
+        min="-5000"
+        max="5000"
         step="10"
       />
     </label>

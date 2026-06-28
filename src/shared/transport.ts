@@ -2,6 +2,11 @@ import type { ControlMode, RoomClientSummary, TransportAction, TransportState } 
 
 export const DEFAULT_SCHEDULE_DELAY_MS = 1500;
 
+// Maximum per-device manual timing nudge. Generous enough to cover real output
+// latency (e.g. Bluetooth speakers/headphones) on top of the automatic clock
+// offset compensation. Mirrored in web/host-logic.js and the manual-offset input.
+export const MANUAL_OFFSET_LIMIT_MS = 5000;
+
 export interface TransportDecision {
   accepted: boolean;
   reason?: string;

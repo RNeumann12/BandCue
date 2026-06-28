@@ -179,6 +179,15 @@ export function isOpenableSong(song) {
 }
 
 // --- Clock / timing math --------------------------------------------------
+// Mirror of src/shared/clock.ts. Keep the two in sync.
+
+export const CLOCK_SAMPLE_WINDOW = 20;
+export const CLOCK_WARMUP_SAMPLES = 8;
+export const CLOCK_WARMUP_INTERVAL_MS = 250;
+export const CLOCK_STEADY_INTERVAL_MS = 1000;
+export const CLOCK_OFFSET_JUMP_MS = 250;
+export const CLOCK_OFFSET_SMOOTHING = 0.3;
+export const CLOCK_MIN_SAMPLES = 5;
 
 export function calculateClockSample(clientSentAt, clientReceivedAt, serverReceivedAt, serverSentAt) {
   const rttMs = clientReceivedAt - clientSentAt - (serverSentAt - serverReceivedAt);
@@ -187,11 +196,33 @@ export function calculateClockSample(clientSentAt, clientReceivedAt, serverRecei
 }
 
 export function summarizeClock(clockSamples) {
-  const best = [...clockSamples].sort((a, b) => a.rttMs - b.rttMs).slice(0, 5);
+  if (!clockSamples.length) {
+    return { rttMs: 0, offsetMs: 0 };
+  }
+  const sorted = [...clockSamples].sort((a, b) => a.rttMs - b.rttMs);
+  const best = sorted.slice(0, 5);
   return {
+    // Median RTT of the best samples drives the timing-quality badge.
     rttMs: median(best.map((sample) => sample.rttMs)),
-    offsetMs: median(best.map((sample) => sample.offsetMs))
+    // Offset from the single lowest-RTT sample (least queuing delay = most accurate).
+    offsetMs: sorted[0].offsetMs
   };
+}
+
+// Smooths a measured offset into the running estimate; adopts large jumps (a real
+// clock step) immediately. Mirror of blendOffset in src/shared/clock.ts.
+export function blendOffset(previous, next, smoothing = CLOCK_OFFSET_SMOOTHING, jumpMs = CLOCK_OFFSET_JUMP_MS) {
+  if (previous === undefined || !Number.isFinite(previous)) {
+    return next;
+  }
+  if (Math.abs(next - previous) > jumpMs) {
+    return next;
+  }
+  return previous + smoothing * (next - previous);
+}
+
+export function isClockConverged(sampleCount, jitterMs) {
+  return (sampleCount ?? 0) >= CLOCK_MIN_SAMPLES && (jitterMs ?? 0) < 35;
 }
 
 export function calculateJitterMs(clockSamples) {
@@ -208,12 +239,16 @@ export function median(values) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
+// Mirror of MANUAL_OFFSET_LIMIT_MS in src/shared/transport.ts and the
+// manual-offset input bounds in web/app.js. Keep all three in sync.
+export const MANUAL_OFFSET_LIMIT_MS = 5000;
+
 export function clampManualOffset(value) {
   if (!Number.isFinite(value)) {
     return 0;
   }
 
-  return Math.max(-1000, Math.min(1000, Math.round(value)));
+  return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(value)));
 }
 
 // Calibrations are keyed by device name so they re-apply when a device reconnects
@@ -225,6 +260,12 @@ export function getCalibrationKey(device) {
 export function getTimingQuality(clock) {
   if (!clock) {
     return { label: "pending", className: "warn" };
+  }
+
+  // Until enough samples have arrived the offset can't be trusted yet, so surface
+  // a distinct "syncing" state rather than a (misleadingly green) quality badge.
+  if ((clock.sampleCount ?? 0) < CLOCK_MIN_SAMPLES) {
+    return { label: "syncing…", className: "warn" };
   }
 
   if ((clock.rttMs ?? 0) >= 180 || (clock.jitterMs ?? 0) >= 35) {
@@ -309,6 +350,10 @@ export function collectWarnings(state, readyAdapters, desktopAdapters) {
   for (const device of desktopAdapters) {
     if (!device.status?.ready) {
       warnings.push(`${device.deviceName}: ${device.status?.detail || "adapter not ready"}`);
+    }
+
+    if ((device.clock?.sampleCount ?? 0) < CLOCK_MIN_SAMPLES) {
+      warnings.push(`${device.deviceName}: clock still syncing - wait a moment before starting for tight timing.`);
     }
 
     if ((device.clock?.rttMs ?? 0) >= 180) {

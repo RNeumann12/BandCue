@@ -23,7 +23,11 @@ import type {
   TransportRequest,
   TransportState
 } from "../shared/protocol.js";
-import { DEFAULT_SCHEDULE_DELAY_MS, decideTransportRequest } from "../shared/transport.js";
+import {
+  DEFAULT_SCHEDULE_DELAY_MS,
+  MANUAL_OFFSET_LIMIT_MS,
+  decideTransportRequest
+} from "../shared/transport.js";
 import {
   appliesToMuseScore,
   appliesToSongsterr,
@@ -151,7 +155,7 @@ export class RoomController {
     }
 
     if (message.type === "clockStatus") {
-      this.updateClock(clientId, message.rttMs, message.offsetMs, message.jitterMs);
+      this.updateClock(clientId, message.rttMs, message.offsetMs, message.jitterMs, message.sampleCount);
       return;
     }
 
@@ -190,13 +194,19 @@ export class RoomController {
     }
   }
 
-  updateClock(clientId: string, rttMs: number, offsetMs: number, jitterMs?: number): void {
+  updateClock(
+    clientId: string,
+    rttMs: number,
+    offsetMs: number,
+    jitterMs?: number,
+    sampleCount?: number
+  ): void {
     const client = this.clients.get(clientId);
     if (!client) {
       return;
     }
 
-    client.clock = { ...client.clock, rttMs, offsetMs, jitterMs };
+    client.clock = { ...client.clock, rttMs, offsetMs, jitterMs, sampleCount };
     this.rememberClock(client, Date.now());
     this.scheduleClockBroadcast();
   }
@@ -738,7 +748,7 @@ function clampManualOffset(value: number): number {
     return 0;
   }
 
-  return Math.max(-1000, Math.min(1000, Math.round(value)));
+  return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(value)));
 }
 
 function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
