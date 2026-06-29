@@ -62,6 +62,8 @@ const elements = {
   stopButton: document.querySelector("#stopButton"),
   setlistPanel: document.querySelector("#setlistPanel"),
   setlistForm: document.querySelector("#setlistForm"),
+  setlistSubmitButton: document.querySelector("#setlistSubmitButton"),
+  cancelEditButton: document.querySelector("#cancelEditButton"),
   setlistCount: document.querySelector("#setlistCount"),
   setlistItems: document.querySelector("#setlistItems"),
   songTitleInput: document.querySelector("#songTitleInput"),
@@ -102,6 +104,7 @@ let lastState;
 let clientId;
 let setlist = loadSetlist();
 let currentSongIndex = -1;
+let editingSongIndex = -1;
 let calibrations = loadCalibrations();
 let appliedCalibrationByClientId = {};
 let transportRequestPending = false;
@@ -185,7 +188,11 @@ elements.controlModeSelect?.addEventListener("change", () => {
 
 elements.setlistForm?.addEventListener("submit", (event) => {
   event.preventDefault();
-  addSetlistSong();
+  submitSetlistForm();
+});
+
+elements.cancelEditButton?.addEventListener("click", () => {
+  cancelEditSong();
 });
 
 elements.setlistItems?.addEventListener("click", (event) => {
@@ -202,6 +209,10 @@ elements.setlistItems?.addEventListener("click", (event) => {
 
   if (button.dataset.setlistAction === "select") {
     selectCurrentSong(index);
+  }
+
+  if (button.dataset.setlistAction === "edit") {
+    startEditSong(index);
   }
 
   if (button.dataset.setlistAction === "remove") {
@@ -822,15 +833,22 @@ function getBaseTimingKey(device) {
   ].join(":");
 }
 
-function addSetlistSong() {
+function submitSetlistForm() {
+  if (editingSongIndex >= 0) {
+    saveEditedSong();
+  } else {
+    addSetlistSong();
+  }
+}
+
+function readSongForm() {
   const title = elements.songTitleInput.value.trim();
   if (!title) {
-    return;
+    return undefined;
   }
 
   const durationMs = parseDurationInput(elements.songDurationInput.value);
-  const song = {
-    id: createId(),
+  return {
     title,
     sourceType: elements.songSourceTypeInput.value,
     source: elements.songSourceInput.value.trim(),
@@ -842,8 +860,15 @@ function addSetlistSong() {
     durationSource: durationMs ? "manual" : undefined,
     notes: elements.songNotesInput.value.trim()
   };
+}
 
-  setlist.push(song);
+function addSetlistSong() {
+  const fields = readSongForm();
+  if (!fields) {
+    return;
+  }
+
+  setlist.push({ id: createId(), ...fields });
   persistSetlist();
   publishSetlist();
   elements.setlistForm.reset();
@@ -854,6 +879,65 @@ function addSetlistSong() {
   }
 
   renderSetlist();
+}
+
+function startEditSong(index) {
+  if (index < 0 || index >= setlist.length) {
+    return;
+  }
+
+  const song = setlist[index];
+  editingSongIndex = index;
+  elements.songTitleInput.value = song.title || "";
+  elements.songSourceTypeInput.value = song.sourceType || "other";
+  elements.songSourceInput.value = song.source || "";
+  elements.songSongsterrUrlInput.value = song.songsterrUrl || "";
+  elements.songSongsterrBassUrlInput.value = song.songsterrBassUrl || "";
+  elements.songSongsterrDrumUrlInput.value = song.songsterrDrumUrl || "";
+  elements.songMuseScoreSourceInput.value = song.museScoreSource || "";
+  elements.songDurationInput.value = song.durationMs ? formatElapsed(song.durationMs) : "";
+  elements.songNotesInput.value = song.notes || "";
+
+  setText(elements.setlistSubmitButton, "Save Changes");
+  elements.cancelEditButton.hidden = false;
+  renderSetlist();
+  elements.songTitleInput.focus();
+}
+
+function saveEditedSong() {
+  const fields = readSongForm();
+  if (!fields) {
+    return;
+  }
+
+  if (editingSongIndex < 0 || editingSongIndex >= setlist.length) {
+    cancelEditSong();
+    return;
+  }
+
+  const editedIndex = editingSongIndex;
+  setlist[editedIndex] = { id: setlist[editedIndex].id, ...fields };
+  resetEditState();
+  persistSetlist();
+  publishSetlist();
+
+  if (currentSongIndex === editedIndex) {
+    publishCurrentSong();
+  }
+
+  renderSetlist();
+}
+
+function cancelEditSong() {
+  resetEditState();
+  renderSetlist();
+}
+
+function resetEditState() {
+  editingSongIndex = -1;
+  elements.setlistForm.reset();
+  setText(elements.setlistSubmitButton, "Add Song");
+  elements.cancelEditButton.hidden = true;
 }
 
 function selectCurrentSong(index) {
@@ -1029,6 +1113,12 @@ function removeSetlistSong(index) {
   setlist.splice(index, 1);
   currentSongIndex = adjustCurrentIndexAfterRemoval(currentSongIndex, index);
 
+  if (editingSongIndex === index) {
+    resetEditState();
+  } else if (editingSongIndex > index) {
+    editingSongIndex -= 1;
+  }
+
   persistSetlist();
   publishSetlist();
   publishCurrentSong();
@@ -1195,16 +1285,20 @@ function importSetlist(file) {
 
 function renderSetlistItem(song, index) {
   const isCurrent = index === currentSongIndex;
+  const isEditing = index === editingSongIndex;
   const meta = formatSongMeta(song, index + 1, setlist.length);
   const notes = song.notes ? `<span class="small">${escapeHtml(song.notes)}</span>` : "";
 
   return `
-    <div class="setlist-item ${isCurrent ? "current" : ""}">
+    <div class="setlist-item ${isCurrent ? "current" : ""} ${isEditing ? "editing" : ""}">
       <div class="setlist-item-head">
         <strong class="setlist-item-title">${escapeHtml(song.title)}</strong>
         <div class="setlist-item-actions">
           <button class="link-button" type="button" data-setlist-action="select" data-index="${index}">
             ${isCurrent ? "Current" : "Make Current"}
+          </button>
+          <button class="link-button" type="button" data-setlist-action="edit" data-index="${index}">
+            ${isEditing ? "Editing" : "Edit"}
           </button>
           <button class="link-button" type="button" data-setlist-action="remove" data-index="${index}">
             Remove

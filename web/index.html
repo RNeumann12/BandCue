@@ -1,8 +1,11 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" translate="no" class="notranslate">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Keep the UI in English: stop browsers (e.g. Chrome on a German phone)
+         from auto-translating the page, which mixed German and English text. -->
+    <meta name="google" content="notranslate" />
     <title>BandCue Room</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -135,7 +138,10 @@
               <span>Notes</span>
               <input id="songNotesInput" name="notes" autocomplete="off" />
             </label>
-            <button class="secondary" type="submit">Add Song</button>
+            <div class="setlist-form-actions">
+              <button class="secondary" id="setlistSubmitButton" type="submit">Add Song</button>
+              <button class="secondary" id="cancelEditButton" type="button" hidden>Cancel</button>
+            </div>
           </form>
           <div class="setlist-controls">
             <button class="secondary compact" id="previousSongButton" type="button">Previous</button>

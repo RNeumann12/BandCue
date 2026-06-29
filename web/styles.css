@@ -394,8 +394,19 @@ select:focus {
   height: 18px;
 }
 
+.setlist-form-actions {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
 .setlist-items {
   display: grid;
+}
+
+.setlist-item.editing {
+  border-left: 6px solid var(--pending);
+  padding-left: 12px;
 }
 
 .timing-rows {
