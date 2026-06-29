@@ -58,6 +58,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 reportStatus();
 statusTimer = setInterval(reportStatus, 5000);
 startDurationObservation();
+enforceSynthOnLoad();
 
 function sendRuntimeMessage(message) {
   try {
@@ -89,6 +90,10 @@ function handleRuntimeMessageError(error) {
 }
 
 async function controlSongsterr(action, resetBeforePlay = false) {
+  // Songsterr's "Original" source streams a YouTube video, which can drift or
+  // stall on a weak connection and break sync. The "Synth" source is rendered
+  // locally, so force it before a synced play to keep playback deterministic.
+  const synthDetail = action === "play" ? ensureSynthPlaybackMode() : "";
   const resetDetail = action === "play" && resetBeforePlay
     ? resetSongsterrPosition()
     : "";
@@ -104,7 +109,7 @@ async function controlSongsterr(action, resetBeforePlay = false) {
 
   const mediaControlled = await controlMediaElement(action);
   if (mediaControlled) {
-    lastControlDetail = joinControlDetails(resetDetail, `Used native media ${action}`);
+    lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used native media ${action}`);
     return {
       ok: true,
       detail: lastControlDetail,
@@ -123,7 +128,7 @@ async function controlSongsterr(action, resetBeforePlay = false) {
 
   const clicked = clickTransportButton(action);
   if (clicked) {
-    lastControlDetail = joinControlDetails(resetDetail, `Clicked Songsterr player control: ${clicked}`);
+    lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Clicked Songsterr player control: ${clicked}`);
     return {
       ok: true,
       detail: lastControlDetail,
@@ -132,7 +137,7 @@ async function controlSongsterr(action, resetBeforePlay = false) {
   }
 
   if (action === "play" && dispatchSpaceFallback()) {
-    lastControlDetail = joinControlDetails(resetDetail, `Used safe Space shortcut fallback for ${action}`);
+    lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used safe Space shortcut fallback for ${action}`);
     return {
       ok: true,
       detail: lastControlDetail,
@@ -320,6 +325,124 @@ async function controlMediaElement(action) {
   return pausedActiveMedia;
 }
 
+function ensureSynthPlaybackMode() {
+  const sourceControl = findSourceControl();
+  if (!sourceControl) {
+    return "";
+  }
+
+  const radios = [...sourceControl.querySelectorAll("input[type='radio'], [role='radio']")];
+  const synthRadio = radios.find(isSynthSource);
+  const originalRadio = radios.find(isOriginalSource);
+
+  if (synthRadio && isRadioChecked(synthRadio)) {
+    return "";
+  }
+
+  if (synthRadio) {
+    activateSourceRadio(synthRadio);
+    return "Forced Songsterr playback source to Synth";
+  }
+
+  // The Synth radio could not be identified by label. Only fall back to
+  // Songsterr's "v" source toggle when we are confident the Original source is
+  // currently active, so we never accidentally toggle away from Synth.
+  const originalActive = (originalRadio && isRadioChecked(originalRadio)) || hasOriginalAudioSource();
+  if (originalActive && dispatchKeyShortcut("v")) {
+    return "Toggled Songsterr playback source toward Synth";
+  }
+
+  return "";
+}
+
+function findSourceControl() {
+  return document.querySelector(
+    ".control-source, #control-source, [class*='control-source'], [data-testid*='control-source']"
+  );
+}
+
+function isSynthSource(radio) {
+  return /\bsynth\b/.test(getSourceRadioLabel(radio));
+}
+
+function isOriginalSource(radio) {
+  return /\boriginal\b/.test(getSourceRadioLabel(radio));
+}
+
+function getSourceRadioLabel(radio) {
+  const labelledBy = (radio.getAttribute("aria-labelledby") || "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent || "")
+    .join(" ");
+
+  return [
+    radio.getAttribute("value"),
+    radio.getAttribute("aria-label"),
+    radio.getAttribute("title"),
+    radio.getAttribute("name"),
+    radio.id,
+    labelledBy,
+    findLabelFor(radio)?.textContent
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function isRadioChecked(radio) {
+  if (radio.getAttribute("aria-checked") !== null) {
+    return radio.getAttribute("aria-checked") === "true";
+  }
+  return Boolean(radio.checked);
+}
+
+function activateSourceRadio(radio) {
+  // Songsterr's source radios are often visually hidden inputs driven by an
+  // associated label, so click the label when present and visible.
+  const label = findLabelFor(radio);
+  const target = label && isVisible(label) ? label : radio;
+  target.click();
+}
+
+function findLabelFor(radio) {
+  const wrapping = typeof radio.closest === "function" ? radio.closest("label") : null;
+  if (wrapping) {
+    return wrapping;
+  }
+
+  if (radio.id) {
+    for (const label of document.querySelectorAll("label[for]")) {
+      if (label.getAttribute("for") === radio.id) {
+        return label;
+      }
+    }
+  }
+
+  return null;
+}
+
+function hasOriginalAudioSource() {
+  return Boolean(
+    document.querySelector("iframe[src*='youtube'], iframe[src*='youtu.be'], iframe[src*='ytimg']")
+  );
+}
+
+function enforceSynthOnLoad(attemptsLeft = 12) {
+  const detail = ensureSynthPlaybackMode();
+  if (detail) {
+    lastControlDetail = detail;
+    scheduleStatusReport(0);
+    return;
+  }
+
+  // Keep retrying briefly while the player is still mounting and the source
+  // control has not rendered yet.
+  if (!findSourceControl() && attemptsLeft > 0) {
+    setTimeout(() => enforceSynthOnLoad(attemptsLeft - 1), 750);
+  }
+}
+
 function resetSongsterrPosition() {
   // Songsterr drives its play cursor from internal state, not an HTML media
   // timeline, so currentTime = 0 alone does not move it. Backspace is
@@ -428,14 +551,21 @@ function dispatchKeyShortcut(key) {
   document.body.setAttribute("tabindex", "-1");
   document.body.focus({ preventScroll: true });
 
-  const code = key === " " ? "Space" : key;
+  const isLetter = /^[a-z]$/i.test(key);
+  const code = key === " "
+    ? "Space"
+    : isLetter
+      ? `Key${key.toUpperCase()}`
+      : key;
   const keyCode = key === " "
     ? 32
     : key === "Home"
       ? 36
       : key === "Backspace"
         ? 8
-        : 0;
+        : isLetter
+          ? key.toUpperCase().charCodeAt(0)
+          : 0;
   for (const target of [window, document, document.body]) {
     for (const type of ["keydown", "keypress", "keyup"]) {
       target.dispatchEvent(new KeyboardEvent(type, {

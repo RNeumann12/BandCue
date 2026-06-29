@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.4 - 2026-06-29
+
+### Changed
+
+- The Songsterr extension now forces the player's "Synth" playback source instead of "Original" (YouTube) on page load and before every synced play, so sync stays reliable on weak connections where the original video stalls or drifts.
+
+## 1.0.3 - 2026-06-29
+
+### Changed
+
+- Improved automatic clock sync so device timing converges in ~2 s instead of ~10 s: a warm-up burst of rapid samples on connect, a lowest-RTT (NTP-style) offset estimator with a wider sample window, and EMA smoothing that still adopts real clock steps immediately. Adds a "syncing…" readiness badge and a pre-Play warning when an adapter's clock hasn't settled.
+- Raised the manual offset cap to ±5000 ms to cover genuine output/Bluetooth latency.
+
 ## 1.0.2 - 2026-06-25
 
 ### Added

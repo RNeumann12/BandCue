@@ -33,6 +33,24 @@ class FakeElement {
       listener();
     }
   }
+
+  closest() {
+    return null;
+  }
+
+  clicks = 0;
+
+  click() {
+    this.clicks += 1;
+  }
+}
+
+class FakeSourceControl {
+  constructor(private readonly radios: FakeElement[]) {}
+
+  querySelectorAll() {
+    return this.radios;
+  }
 }
 
 class FakeMediaElement extends FakeElement {
@@ -43,18 +61,32 @@ class FakeKeyboardEvent {}
 
 function loadContentScript({
   elements = [],
-  media = []
+  media = [],
+  sourceControl = null
 }: {
   elements?: FakeElement[];
   media?: FakeMediaElement[];
+  sourceControl?: FakeSourceControl | null;
 } = {}) {
   const messages: unknown[] = [];
   const document = {
     title: "Song A Tab by Artist",
     documentElement: new FakeElement(),
+    querySelector(selector: string) {
+      if (sourceControl && /control-source/.test(selector)) {
+        return sourceControl;
+      }
+      return null;
+    },
+    getElementById() {
+      return null;
+    },
     querySelectorAll(selector: string) {
       if (selector === "audio, video") {
         return media;
+      }
+      if (selector === "label[for]") {
+        return [];
       }
       return elements;
     }
@@ -141,5 +173,48 @@ describe("Songsterr content duration discovery", () => {
     vi.runOnlyPendingTimers();
 
     expect(messages).toContainEqual(expect.objectContaining({ durationMs: 211_000 }));
+  });
+});
+
+describe("Songsterr synth playback mode", () => {
+  function radio(value: string, checked: boolean) {
+    return new FakeElement("", {
+      role: "radio",
+      value,
+      "aria-checked": checked ? "true" : "false"
+    });
+  }
+
+  it("switches the source control to Synth when Original is active", () => {
+    const original = radio("original", true);
+    const synth = radio("synth", false);
+    const { context } = loadContentScript({
+      sourceControl: new FakeSourceControl([original, synth])
+    });
+
+    // The script enforces Synth once on load; reset so we assert the standalone call.
+    expect(synth.clicks).toBe(1);
+    synth.clicks = 0;
+
+    expect(context.ensureSynthPlaybackMode()).toBe("Forced Songsterr playback source to Synth");
+    expect(synth.clicks).toBe(1);
+    expect(original.clicks).toBe(0);
+  });
+
+  it("leaves the source control untouched when Synth is already active", () => {
+    const original = radio("original", false);
+    const synth = radio("synth", true);
+    const { context } = loadContentScript({
+      sourceControl: new FakeSourceControl([original, synth])
+    });
+
+    expect(context.ensureSynthPlaybackMode()).toBe("");
+    expect(synth.clicks).toBe(0);
+  });
+
+  it("does nothing when the source control is absent", () => {
+    const { context } = loadContentScript();
+
+    expect(context.ensureSynthPlaybackMode()).toBe("");
   });
 });
