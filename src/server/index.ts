@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,15 +96,31 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
+  // Defense-in-depth alongside the app-level liveness sweep: let the OS probe
+  // and tear down peers that vanish without a FIN.
+  if (socket instanceof Socket) {
+    socket.setKeepAlive(true, 30_000);
+  }
+
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws);
   });
 });
 
+// A freshly upgraded socket that never sends clientHello would otherwise linger
+// forever holding a slot. Close it if the handshake does not arrive in time.
+const HELLO_TIMEOUT_MS = 10_000;
+
 wss.on("connection", (socket) => {
   let clientId: string | undefined;
 
+  const helloTimer = setTimeout(() => {
+    socket.close(1008, "clientHello timeout");
+  }, HELLO_TIMEOUT_MS);
+  helloTimer.unref?.();
+
   socket.once("message", (raw) => {
+    clearTimeout(helloTimer);
     const hello = parseClientHelloPayload(raw.toString());
     if (!hello) {
       socket.close(1008, "Expected clientHello");
@@ -127,6 +144,7 @@ wss.on("connection", (socket) => {
   });
 
   socket.on("close", () => {
+    clearTimeout(helloTimer);
     if (clientId) {
       room.removeClient(clientId);
     }
@@ -144,6 +162,7 @@ server.listen(PORT, HOST, () => {
     port: PORT,
     address: lanAddress
   });
+  room.startLivenessSweep();
   console.log("BandCue coordinator running");
   console.log(`Host controls:      ${hostUrl}`);
   console.log(`Companion room:     ${companionUrl}`);

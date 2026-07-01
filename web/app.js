@@ -38,6 +38,21 @@ const token = params.get("token");
 const isHost = location.pathname === "/host" || params.get("host") === "1";
 const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
 const wsUrl = `${wsProtocol}//${location.host}/ws?token=${encodeURIComponent(token ?? "")}`;
+// The server replies to our 1 Hz clockSync, so no server contact for this long
+// means a half-open socket. Force a reconnect instead of waiting for the browser
+// to eventually tear the dead connection down.
+const HEARTBEAT_TIMEOUT_MS = 6000;
+const HEARTBEAT_CHECK_INTERVAL_MS = 2000;
+// Exponential backoff with jitter so a coordinator restart doesn't get hammered
+// by every device reconnecting in lockstep.
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_CAP_MS = 20000;
+
+function reconnectDelayMs(attempt) {
+  const exponential = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt, 6));
+  const jitter = exponential * 0.2 * (Math.random() * 2 - 1);
+  return Math.max(500, Math.round(exponential + jitter));
+}
 
 const elements = {
   roomCode: document.querySelector("#roomCode"),
@@ -98,6 +113,9 @@ migrateLegacyStorage();
 let socket;
 let clockTimer;
 let reconnectTimer;
+let heartbeatTimer;
+let lastServerContactAt = 0;
+let reconnectAttempts = 0;
 let serverOffsetMs = 0;
 let samples = [];
 let lastState;
@@ -284,9 +302,26 @@ function connect() {
     clearInterval(clockTimer);
     clockTimer = undefined;
   }
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
   socket = new WebSocket(wsUrl);
 
   socket.addEventListener("open", () => {
+    reconnectAttempts = 0;
+    lastServerContactAt = Date.now();
+    // Start each connection from a clean clock estimate. Stale pre-disconnect
+    // samples are dangerous after a sleep/resume, where the machine clock may
+    // have just stepped; the warm-up burst rebuilds the offset from scratch.
+    samples = [];
+    serverOffsetMs = 0;
+    heartbeatTimer = setInterval(() => {
+      if (Date.now() - lastServerContactAt > HEARTBEAT_TIMEOUT_MS) {
+        // Closing a half-open socket fires the close handler, which reconnects.
+        socket?.close();
+      }
+    }, HEARTBEAT_CHECK_INTERVAL_MS);
     send({
       type: "clientHello",
       deviceName: localStorage.getItem(DEVICE_NAME_STORAGE_KEY)
@@ -313,6 +348,7 @@ function connect() {
   });
 
   socket.addEventListener("message", (event) => {
+    lastServerContactAt = Date.now();
     const message = JSON.parse(event.data);
 
     if (message.type === "serverHello") {
@@ -368,15 +404,20 @@ function connect() {
       clearInterval(clockTimer);
       clockTimer = undefined;
     }
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
+    }
     transportRequestPending = false;
     setText(elements.subline, "Disconnected. Reconnecting...");
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
+    reconnectAttempts += 1;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
       connect();
-    }, 1500);
+    }, reconnectDelayMs(reconnectAttempts));
   });
 }
 

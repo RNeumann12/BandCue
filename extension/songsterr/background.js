@@ -17,6 +17,9 @@ let connectionState = "not configured";
 let connectionDetail = "Enter the BandCue room code, port, or URL and click Connect";
 let clockTimer;
 let reconnectTimer;
+let heartbeatTimer;
+let lastServerContactAt = 0;
+let reconnectAttempts = 0;
 let lastStatus = {
   ready: false,
   app: "songsterr",
@@ -51,6 +54,24 @@ let memberInstrument = "auto";
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
+// The server replies to our 1 Hz clockSync, so no server contact for this long
+// means a half-open socket (Wi-Fi drop / machine sleep) that never fired a close
+// event. Force a reconnect instead of silently talking to a dead socket.
+const HEARTBEAT_TIMEOUT_MS = 6000;
+const HEARTBEAT_CHECK_INTERVAL_MS = 2000;
+// Exponential backoff with jitter so a coordinator restart isn't hammered by
+// every device reconnecting in lockstep (each retry also avoids a full LAN scan).
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_CAP_MS = 20_000;
+// Re-run room discovery only every Nth automatic retry; in between we reuse the
+// last resolved WebSocket URL so a downed server doesn't trigger a LAN scan
+// storm in the MV3 service worker on every attempt.
+const RESOLVE_EVERY_N_ATTEMPTS = 4;
+// MV3 service workers are evicted after ~30s idle, which would drop a pending
+// reconnect setTimeout. This periodic alarm wakes the worker to retry while
+// disconnected. Chrome clamps alarm periods to a 1-minute minimum.
+const RECONNECT_ALARM_NAME = "bandcue-reconnect";
+const RECONNECT_ALARM_PERIOD_MINUTES = 1;
 // Number of LAN probes in flight at once. High enough to cover a /24 quickly
 // while staying under Chrome's ~256 total socket budget for the service worker.
 const LAN_SCAN_CONCURRENCY = 150;
@@ -189,6 +210,8 @@ chrome.tabs.onRemoved.addListener(() => {
 
 async function configureConnection(input) {
   roomInput = normalizeRoomLocator(input);
+  // A fresh user-initiated connect resets backoff so the first retry is quick.
+  reconnectAttempts = 0;
   await refreshRoomEndpoint();
   autoConnectEnabled = true;
   chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
@@ -225,7 +248,11 @@ async function connect() {
     return;
   }
 
-  if (roomInput) {
+  // Reuse the last resolved endpoint on quick reconnects; only re-run discovery
+  // periodically so a downed server can't trigger a LAN-scan storm every retry.
+  const shouldResolve =
+    !wsUrl || (reconnectAttempts > 0 && reconnectAttempts % RESOLVE_EVERY_N_ATTEMPTS === 0);
+  if (roomInput && shouldResolve) {
     try {
       await refreshRoomEndpoint();
       chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
@@ -242,6 +269,10 @@ async function connect() {
   socket = undefined;
   previousSocket?.close();
   if (clockTimer) clearInterval(clockTimer);
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
   connectionState = "connecting";
   connectionDetail = `Connecting to ${roomInput || roomUrl}`;
   try {
@@ -257,6 +288,20 @@ async function connect() {
     connectionState = "connected";
     connectionDetail = "Connected to BandCue coordinator";
     lastDeliveredStatusSignature = "";
+    reconnectAttempts = 0;
+    lastServerContactAt = Date.now();
+    // Start each connection from a clean clock estimate. Stale pre-disconnect
+    // samples are dangerous after a sleep/resume, where the machine clock may
+    // have just stepped; the warm-up burst rebuilds the offset from scratch.
+    samples = [];
+    serverOffsetMs = 0;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      if (Date.now() - lastServerContactAt > HEARTBEAT_TIMEOUT_MS) {
+        // Closing a half-open socket fires the close handler, which reconnects.
+        socket?.close();
+      }
+    }, HEARTBEAT_CHECK_INTERVAL_MS);
     send({
       type: "clientHello",
       deviceName: "Songsterr tab",
@@ -282,6 +327,7 @@ async function connect() {
   });
 
   socket.addEventListener("message", (event) => {
+    lastServerContactAt = Date.now();
     const message = JSON.parse(event.data);
 
     if (message.type === "clockSyncResult") {
@@ -351,13 +397,17 @@ async function connect() {
       clearInterval(clockTimer);
       clockTimer = undefined;
     }
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
+    }
     if (!autoConnectEnabled) {
       connectionState = "disconnected-by-user";
       connectionDetail = "Disconnected. Press Connect when you want this extension to join.";
       return;
     }
     connectionState = "disconnected";
-    connectionDetail = "Disconnected; retrying in 2 seconds";
+    connectionDetail = "Disconnected; reconnecting shortly";
     scheduleReconnect();
   });
 
@@ -369,7 +419,9 @@ async function connect() {
 
 function disconnectByUser() {
   autoConnectEnabled = false;
+  reconnectAttempts = 0;
   chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
+  clearReconnectAlarm();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
@@ -377,6 +429,10 @@ function disconnectByUser() {
   if (clockTimer) {
     clearInterval(clockTimer);
     clockTimer = undefined;
+  }
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
   }
   if (tabStatusTimer) {
     clearTimeout(tabStatusTimer);
@@ -394,16 +450,51 @@ function scheduleReconnect() {
   if (!autoConnectEnabled) {
     return;
   }
+  ensureReconnectAlarm();
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
   }
+  reconnectAttempts += 1;
   reconnectTimer = setTimeout(() => {
     reconnectTimer = undefined;
     if (autoConnectEnabled) {
       connect();
     }
-  }, 2000);
+  }, reconnectDelayMs(reconnectAttempts));
 }
+
+function reconnectDelayMs(attempt) {
+  const exponential = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt, 6));
+  const jitter = exponential * 0.2 * (Math.random() * 2 - 1);
+  return Math.max(500, Math.round(exponential + jitter));
+}
+
+// A periodic alarm survives service-worker eviction; the short setTimeout above
+// handles fast reconnects while the worker is alive, and the alarm is the
+// backstop that revives the worker to retry after it has been suspended.
+function ensureReconnectAlarm() {
+  chrome.alarms?.create(RECONNECT_ALARM_NAME, {
+    periodInMinutes: RECONNECT_ALARM_PERIOD_MINUTES
+  });
+}
+
+function clearReconnectAlarm() {
+  chrome.alarms?.clear(RECONNECT_ALARM_NAME);
+}
+
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name !== RECONNECT_ALARM_NAME) {
+    return;
+  }
+  if (!autoConnectEnabled) {
+    clearReconnectAlarm();
+    return;
+  }
+  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
+    return;
+  }
+  connect();
+});
 
 async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false) {
   // At the downbeat we only *locate* an existing Songsterr tab -- we never

@@ -43,11 +43,19 @@ class BandCueWebSocketClient(
                 Socket()
             }
             rawSocket.connect(InetSocketAddress(url.host, port), 5000)
+            // Enable TCP keepalive so a silently dropped peer is eventually noticed
+            // by the OS even if no data flows.
+            rawSocket.keepAlive = true
             socket = rawSocket
             input = BufferedInputStream(rawSocket.getInputStream())
             output = BufferedOutputStream(rawSocket.getOutputStream())
 
             performHandshake(url, port)
+            // The server replies to our ~1 Hz clockSync, so data should arrive at
+            // least every second. A read timeout well above that cadence makes a
+            // half-open connection (Wi-Fi drop / server sleep) throw instead of
+            // blocking readLoop forever, which drives onError -> scheduleReconnect.
+            rawSocket.soTimeout = READ_TIMEOUT_MS
             listener.onOpen()
             readLoop()
         } catch (error: Throwable) {
@@ -265,5 +273,6 @@ class BandCueWebSocketClient(
 
     private companion object {
         const val WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        const val READ_TIMEOUT_MS = 8000
     }
 }

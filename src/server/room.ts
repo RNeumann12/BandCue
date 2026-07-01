@@ -48,6 +48,13 @@ interface RecentClock {
 
 const RECENT_CLOCK_TTL_MS = 30_000;
 const PLAYBACK_END_SETTLE_MS = 750;
+// A connected client sends clockSync at ~1 Hz (faster during warm-up), so silence
+// for longer than this means the socket is half-open (Wi-Fi drop, laptop sleep,
+// Android Doze, killed app) even though no TCP FIN ever arrived. The periodic
+// sweep evicts such clients so the room list stays truthful and a vanished
+// transport leader still triggers the leader-disconnect Stop promptly.
+const CLIENT_IDLE_TIMEOUT_MS = 12_000;
+const LIVENESS_SWEEP_INTERVAL_MS = 4_000;
 
 export class RoomController {
   private readonly clients = new Map<string, RoomClient>();
@@ -75,6 +82,7 @@ export class RoomController {
     playingClientIds: Set<string>;
   };
   private pendingClockBroadcast?: NodeJS.Timeout;
+  private livenessSweepTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly roomCode: string,
@@ -134,6 +142,52 @@ export class RoomController {
       });
     }
     this.broadcastState();
+  }
+
+  /**
+   * Evict clients we have not heard from within CLIENT_IDLE_TIMEOUT_MS. A live
+   * client sends clockSync every second, so prolonged silence means a half-open
+   * socket that never produced a `close` event. We terminate the socket (best
+   * effort) and drop the client via removeClient, which also fires the
+   * leader-disconnect Stop when the vanished client held transport.
+   */
+  sweepIdleClients(now = Date.now()): void {
+    const staleIds: string[] = [];
+    for (const [id, client] of this.clients) {
+      if (now - client.lastSeenAt > CLIENT_IDLE_TIMEOUT_MS) {
+        staleIds.push(id);
+      }
+    }
+
+    for (const id of staleIds) {
+      const socket = this.clients.get(id)?.socket as
+        | (WebSocket & { terminate?: () => void })
+        | undefined;
+      if (socket && typeof socket.terminate === "function") {
+        try {
+          socket.terminate();
+        } catch {
+          // Best effort; removeClient below still drops it from the room.
+        }
+      }
+      this.removeClient(id);
+    }
+  }
+
+  /** Start the periodic liveness sweep. Returns a function that stops it. */
+  startLivenessSweep(intervalMs = LIVENESS_SWEEP_INTERVAL_MS): () => void {
+    this.stopLivenessSweep();
+    this.livenessSweepTimer = setInterval(() => this.sweepIdleClients(), intervalMs);
+    // The sweep alone should never keep the Node process alive.
+    this.livenessSweepTimer.unref?.();
+    return () => this.stopLivenessSweep();
+  }
+
+  stopLivenessSweep(): void {
+    if (this.livenessSweepTimer) {
+      clearInterval(this.livenessSweepTimer);
+      this.livenessSweepTimer = undefined;
+    }
   }
 
   handleMessage(clientId: string, message: ClientMessage, now = Date.now()): void {

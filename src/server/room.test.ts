@@ -937,6 +937,62 @@ describe("RoomController", () => {
     });
     expect(room.getState(1300).transport.status).toBe("stopped");
   });
+
+  it("evicts clients that have gone silent past the idle timeout", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const stale = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Ghost",
+      role: "companion",
+      capabilities: []
+    }, 1000);
+    const fresh = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Live",
+      role: "companion",
+      capabilities: []
+    }, 1000);
+
+    // Keep the "fresh" client alive with a recent message.
+    room.handleMessage(fresh.id, { type: "clockSync", clientSentAt: 20_000 }, 20_000);
+
+    // 15s later: stale client (last seen at 1000) is well past the 12s timeout,
+    // fresh client (last seen at 20000) is not.
+    room.sweepIdleClients(21_000);
+
+    const ids = room.getState(21_000).clients.map((client) => client.id);
+    expect(ids).toContain(fresh.id);
+    expect(ids).not.toContain(stale.id);
+  });
+
+  it("stops transport when the silent client was the leader", () => {
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "MuseScore",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1100 }, 1100);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    // The host never sends another message; sweep well past the timeout.
+    room.sweepIdleClients(20_000);
+
+    const stopCommand = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "transportCommand" && message.action === "stop");
+    expect(stopCommand).toMatchObject({ action: "stop", leaderId: host.id });
+    expect(room.getState(20_000).transport.status).toBe("stopped");
+  });
 });
 
 function fakeSocket(messages: string[]): WebSocket {

@@ -31,6 +31,8 @@ class BandCueAdapterService : Service() {
     private var socket: BandCueWebSocketClient? = null
     private var clockTask: ScheduledFuture<*>? = null
     private var reconnectTask: ScheduledFuture<*>? = null
+    private var reconnectAttempts = 0
+    private var lastEndpoint: RoomEndpoint? = null
     private val commandTasks = Collections.synchronizedSet(mutableSetOf<ScheduledFuture<*>>())
     private var latestCommand: AdapterCommandStatus? = null
     private var currentSong: CurrentSong? = null
@@ -56,6 +58,10 @@ class BandCueAdapterService : Service() {
                     ?: "Android Songsterr"
                 memberInstrument = normalizeInstrument(intent.getStringExtra(EXTRA_INSTRUMENT))
                 shouldReconnect = true
+                // A fresh user-initiated connect resets backoff and forces the
+                // locator to be resolved again in case the host moved.
+                reconnectAttempts = 0
+                lastEndpoint = null
                 getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
                     .putBoolean(PREF_AUTO_CONNECT, true)
                     .putString(PREF_INSTRUMENT, memberInstrument)
@@ -99,7 +105,16 @@ class BandCueAdapterService : Service() {
             publishUiStatus()
 
             try {
-                val endpoint = resolveRoomEndpoint(roomLocator)
+                // Reuse the last resolved endpoint on quick reconnects; only re-run
+                // discovery periodically so a downed server doesn't trigger a LAN
+                // scan on every retry (which drains the battery).
+                val shouldResolve = lastEndpoint == null ||
+                    (reconnectAttempts > 0 && reconnectAttempts % RESOLVE_EVERY_N_ATTEMPTS == 0)
+                val endpoint = if (shouldResolve) {
+                    resolveRoomEndpoint(roomLocator).also { lastEndpoint = it }
+                } else {
+                    lastEndpoint ?: resolveRoomEndpoint(roomLocator).also { lastEndpoint = it }
+                }
                 if (!shouldReconnect) {
                     return@execute
                 }
@@ -109,6 +124,14 @@ class BandCueAdapterService : Service() {
                     override fun onOpen() {
                         connectionState = "connected"
                         connectionDetail = "Connected to BandCue coordinator"
+                        reconnectAttempts = 0
+                        // Start each connection from a clean clock estimate. Stale
+                        // pre-disconnect samples are dangerous after a Doze/resume,
+                        // where the device clock may have just stepped; the warm-up
+                        // burst rebuilds the offset from scratch. onText (which also
+                        // mutates samples) runs on this same read thread.
+                        samples.clear()
+                        serverOffsetMs = 0.0
                         socket?.sendText(ProtocolJson.clientHello(deviceName))
                         startClockSync()
                         publishAdapterStatus()
@@ -173,7 +196,20 @@ class BandCueAdapterService : Service() {
             return
         }
         reconnectTask?.cancel(false)
-        reconnectTask = scheduler.schedule({ connect() }, 2, TimeUnit.SECONDS)
+        reconnectAttempts += 1
+        reconnectTask = scheduler.schedule(
+            { connect() },
+            reconnectDelayMs(reconnectAttempts),
+            TimeUnit.MILLISECONDS
+        )
+    }
+
+    // Exponential backoff with jitter so a coordinator restart isn't hammered by
+    // every device reconnecting in lockstep.
+    private fun reconnectDelayMs(attempt: Int): Long {
+        val exponential = (RECONNECT_BASE_MS shl minOf(attempt, 6)).coerceAtMost(RECONNECT_CAP_MS)
+        val jitter = (exponential * 0.2 * (Math.random() * 2 - 1)).toLong()
+        return (exponential + jitter).coerceAtLeast(500L)
     }
 
     private fun startClockSync() {
@@ -731,5 +767,8 @@ class BandCueAdapterService : Service() {
         private const val PREFS_NAME = "bandcue-songsterr"
         private const val PREF_AUTO_CONNECT = "autoConnect"
         private const val PREF_INSTRUMENT = "instrument"
+        private const val RECONNECT_BASE_MS = 1000L
+        private const val RECONNECT_CAP_MS = 20000L
+        private const val RESOLVE_EVERY_N_ATTEMPTS = 4
     }
 }

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 - 2026-07-01
+
+### Changed
+
+- Hardened connection stability against half-open sockets (Wi-Fi drops, laptop sleep, Android Doze, killed apps) that never send a TCP close:
+  - The coordinator now runs a liveness sweep that evicts clients it hasn't heard from within ~12 s (every client sends clockSync at ~1 Hz), so ghost devices no longer linger in the room and a vanished transport leader still triggers the leader-disconnect Stop promptly. New sockets that never send `clientHello` are also closed after a timeout.
+  - The web and Songsterr-extension clients add a heartbeat watchdog that forces a reconnect when the server goes silent, instead of talking to a dead socket until the browser eventually tears it down.
+  - The Android client enables TCP keepalive and a read timeout so a half-open connection fails and reconnects instead of blocking forever.
+  - All clients now reconnect with exponential backoff + jitter (instead of a fixed delay) and reuse the last resolved endpoint between retries, so a coordinator restart isn't hammered by a LAN-scan storm. The extension adds a `chrome.alarms` backstop so a reconnect still happens after the MV3 service worker is evicted.
+  - Every client now clears its clock samples and offset on (re)connect, so timing re-converges cleanly from the warm-up burst instead of blending in stale samples from before a sleep/resume (when the device clock may have just stepped).
+  - The coordinator enables TCP keepalive on WebSocket connections so the OS also helps detect peers that vanish without a TCP close.
+
 ## 1.0.4 - 2026-06-29
 
 ### Changed
