@@ -116,7 +116,10 @@ let reconnectTimer;
 let heartbeatTimer;
 let lastServerContactAt = 0;
 let reconnectAttempts = 0;
-let serverOffsetMs = 0;
+// undefined until the first clockSyncResult so blendOffset adopts the first
+// fresh sample as-is; seeding with 0 would slew a real offset from zero and
+// leave a residual timing error after the warm-up burst.
+let serverOffsetMs;
 let samples = [];
 let lastState;
 let clientId;
@@ -315,7 +318,7 @@ function connect() {
     // samples are dangerous after a sleep/resume, where the machine clock may
     // have just stepped; the warm-up burst rebuilds the offset from scratch.
     samples = [];
-    serverOffsetMs = 0;
+    serverOffsetMs = undefined;
     heartbeatTimer = setInterval(() => {
       if (Date.now() - lastServerContactAt > HEARTBEAT_TIMEOUT_MS) {
         // Closing a half-open socket fires the close handler, which reconnects.
@@ -1358,7 +1361,7 @@ function updateCountdown() {
   }
 
   const transport = lastState.transport;
-  const serverNow = Date.now() + serverOffsetMs;
+  const serverNow = Date.now() + (serverOffsetMs ?? 0);
 
   if (transport.status === "scheduled" && transport.scheduledServerTime) {
     const remaining = Math.max(0, transport.scheduledServerTime - serverNow);
@@ -1394,8 +1397,25 @@ function getDeviceBadge(device, state) {
 function renderCommand(command) {
   const when = formatTime(command.at);
   const path = command.controlPath ? ` via ${command.controlPath}` : "";
+  const fired = renderFiredDeviation(command);
   const detail = command.detail ? `: ${command.detail}` : "";
-  return `${command.action} ${command.status}${path} at ${when}${detail}`;
+  return `${command.action} ${command.status}${path} at ${when}${fired}${detail}`;
+}
+
+// Measured start deviation vs the scheduled downbeat (adapter-reported fire
+// time in server time). Only meaningful while the transport still holds the
+// same sequence, i.e. the schedule the command was fired against.
+function renderFiredDeviation(command) {
+  const transport = lastState?.transport;
+  if (
+    !command.firedAtServerTime ||
+    !transport?.scheduledServerTime ||
+    transport.sequenceId !== command.sequenceId
+  ) {
+    return "";
+  }
+  const deviationMs = Math.round(command.firedAtServerTime - transport.scheduledServerTime);
+  return ` (started ${formatSignedMs(deviationMs)} vs schedule)`;
 }
 
 function renderCatalogMatch(status) {

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { RoomClientSummary, TransportState } from "./protocol.js";
-import { decideTransportRequest } from "./transport.js";
+import {
+  DEFAULT_SCHEDULE_DELAY_MS,
+  MAX_SCHEDULE_DELAY_MS,
+  decideTransportRequest,
+  scheduleDelayForClients
+} from "./transport.js";
 
 const stopped: TransportState = { status: "stopped", sequenceId: 0 };
 
@@ -100,5 +105,52 @@ describe("transport decisions", () => {
 
     expect(decision.accepted).toBe(true);
     expect(decision.nextState?.leaderId).toBe("other");
+  });
+});
+
+describe("scheduleDelayForClients", () => {
+  it("keeps the default delay for a healthy room", () => {
+    const clients = [
+      client({ clock: { rttMs: 20, offsetMs: 5, jitterMs: 3 } }),
+      client({ id: "client-b", clock: { rttMs: 60, offsetMs: -10, jitterMs: 8 } })
+    ];
+
+    expect(scheduleDelayForClients(clients)).toBe(DEFAULT_SCHEDULE_DELAY_MS);
+  });
+
+  it("extends the count-in for a slow, jittery transport client", () => {
+    const clients = [
+      client({ clock: { rttMs: 20, offsetMs: 5, jitterMs: 3 } }),
+      // needed = 600/2 + 80*4 + 1000 = 1620 > default 1500
+      client({ id: "client-slow", clock: { rttMs: 600, offsetMs: 0, jitterMs: 80 } })
+    ];
+
+    expect(scheduleDelayForClients(clients)).toBe(1620);
+  });
+
+  it("ignores companions and clients without clock data", () => {
+    const clients = [
+      client({
+        id: "companion",
+        role: "companion",
+        capabilities: [],
+        clock: { rttMs: 2000, offsetMs: 0, jitterMs: 500 }
+      }),
+      client({ id: "no-clock", clock: undefined })
+    ];
+
+    expect(scheduleDelayForClients(clients)).toBe(DEFAULT_SCHEDULE_DELAY_MS);
+  });
+
+  it("caps the count-in for pathological outliers", () => {
+    const clients = [
+      client({ clock: { rttMs: 30_000, offsetMs: 0, jitterMs: 5000 } })
+    ];
+
+    expect(scheduleDelayForClients(clients)).toBe(MAX_SCHEDULE_DELAY_MS);
+  });
+
+  it("respects a larger configured default", () => {
+    expect(scheduleDelayForClients([], 2500)).toBe(2500);
   });
 });

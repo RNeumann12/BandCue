@@ -457,7 +457,7 @@ describe("RoomController", () => {
     });
   });
 
-  it("sanitizes malformed catalog entries without throwing", () => {
+  it("accepts malformed catalog payloads and never rebroadcasts entries", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const adapter = room.addClient(undefined, {
       type: "clientHello",
@@ -484,9 +484,10 @@ describe("RoomController", () => {
     }).not.toThrow();
 
     const stored = room.getState(1200).clients.find((client) => client.id === adapter.id);
-    expect(stored?.status?.catalog?.entries).toEqual([
-      { title: "Bad Moon Rising", relativePath: "CCR/Bad Moon Rising.mscz", sourceId: undefined }
-    ]);
+    // Entries stay on the adapter; room state only carries the counts so the
+    // catalog is not rebroadcast to every client on each state update.
+    expect(stored?.status?.catalog?.entries).toBeUndefined();
+    expect(stored?.status?.catalog?.total).toBe(4);
   });
 
   it("associates matching adapter-reported duration with the current setlist song", () => {

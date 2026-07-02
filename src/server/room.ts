@@ -26,7 +26,8 @@ import type {
 import {
   DEFAULT_SCHEDULE_DELAY_MS,
   MANUAL_OFFSET_LIMIT_MS,
-  decideTransportRequest
+  decideTransportRequest,
+  scheduleDelayForClients
 } from "../shared/transport.js";
 import {
   appliesToMuseScore,
@@ -83,15 +84,22 @@ export class RoomController {
   };
   private pendingClockBroadcast?: NodeJS.Timeout;
   private livenessSweepTimer?: NodeJS.Timeout;
+  // Last logged "<sequence>:<firedAt>" per client, to keep the per-play timing
+  // log to one line per executed command.
+  private readonly lastTimingLogByClientId = new Map<string, string>();
 
   constructor(
     private readonly roomCode: string,
     private readonly companionUrl: string,
     private readonly hostUrl: string,
-    private readonly scheduleDelayMs = DEFAULT_SCHEDULE_DELAY_MS
+    private readonly scheduleDelayMs = DEFAULT_SCHEDULE_DELAY_MS,
+    // Time source for everything the room schedules or stamps. Production
+    // passes the monotonic serverNow (src/server/server-clock.ts) so an OS
+    // clock step cannot shift room time; tests keep the Date.now default.
+    private readonly now: () => number = () => Date.now()
   ) {}
 
-  addClient(socket: WebSocket | undefined, hello: ClientHello, now = Date.now()): RoomClient {
+  addClient(socket: WebSocket | undefined, hello: ClientHello, now = this.now()): RoomClient {
     const recentClock = this.getRecentClock(clientKeyFromHello(hello), now);
     const client: RoomClient = {
       id: randomUUID(),
@@ -120,7 +128,7 @@ export class RoomController {
   removeClient(clientId: string): void {
     this.clients.delete(clientId);
     if (this.transport.leaderId === clientId && this.transport.status !== "stopped") {
-      const now = Date.now();
+      const now = this.now();
       this.transport = {
         status: "stopped",
         leaderId: clientId,
@@ -151,7 +159,7 @@ export class RoomController {
    * effort) and drop the client via removeClient, which also fires the
    * leader-disconnect Stop when the vanished client held transport.
    */
-  sweepIdleClients(now = Date.now()): void {
+  sweepIdleClients(now = this.now()): void {
     const staleIds: string[] = [];
     for (const [id, client] of this.clients) {
       if (now - client.lastSeenAt > CLIENT_IDLE_TIMEOUT_MS) {
@@ -190,7 +198,7 @@ export class RoomController {
     }
   }
 
-  handleMessage(clientId: string, message: ClientMessage, now = Date.now()): void {
+  handleMessage(clientId: string, message: ClientMessage, now = this.now()): void {
     const client = this.clients.get(clientId);
     if (!client) {
       return;
@@ -203,7 +211,7 @@ export class RoomController {
         type: "clockSyncResult",
         clientSentAt: message.clientSentAt,
         serverReceivedAt: now,
-        serverSentAt: Date.now()
+        serverSentAt: this.now()
       });
       return;
     }
@@ -261,11 +269,11 @@ export class RoomController {
     }
 
     client.clock = { ...client.clock, rttMs, offsetMs, jitterMs, sampleCount };
-    this.rememberClock(client, Date.now());
+    this.rememberClock(client, this.now());
     this.scheduleClockBroadcast();
   }
 
-  getState(now = Date.now()): RoomState {
+  getState(now = this.now()): RoomState {
     return {
       type: "roomState",
       roomCode: this.roomCode,
@@ -304,6 +312,7 @@ export class RoomController {
     };
     const songDurationChanged = this.applyAdapterDurationToCurrentSong(client, nextStatus, now);
     const statusChanged = JSON.stringify(client.status ?? null) !== JSON.stringify(nextStatus);
+    this.logCommandTiming(client, nextStatus.lastCommand);
     client.status = nextStatus;
     client.lastSeenAt = now;
     if (songDurationChanged) {
@@ -339,7 +348,7 @@ export class RoomController {
       offsetMs: target.clock?.offsetMs ?? 0,
       manualOffsetMs: clampManualOffset(update.manualOffsetMs)
     };
-    target.lastSeenAt = Date.now();
+    target.lastSeenAt = this.now();
     this.rememberClock(target, target.lastSeenAt);
     this.broadcastState();
   }
@@ -426,12 +435,18 @@ export class RoomController {
     request: TransportRequest,
     now: number
   ): void {
+    // A play's count-in adapts to the room: a transport-capable client on a
+    // slow or jittery path gets a longer lead so its command still lands and
+    // preps before the downbeat.
+    const delayMs = request.action === "play"
+      ? scheduleDelayForClients(this.clients.values(), this.scheduleDelayMs)
+      : this.scheduleDelayMs;
     const decision = decideTransportRequest(
       this.transport,
       client,
       request.action,
       now,
-      this.scheduleDelayMs,
+      delayMs,
       this.safety
     );
 
@@ -515,7 +530,7 @@ export class RoomController {
       clearTimeout(this.runningTimer);
     }
 
-    const delayMs = Math.max(0, scheduledServerTime - Date.now());
+    const delayMs = Math.max(0, scheduledServerTime - this.now());
     this.runningTimer = setTimeout(() => {
       if (this.transport.status !== "scheduled") {
         return;
@@ -548,7 +563,7 @@ export class RoomController {
 
     const sequenceId = this.transport.sequenceId;
     const leaderId = this.transport.leaderId;
-    const delayMs = Math.max(0, startedServerTime + durationMs - Date.now());
+    const delayMs = Math.max(0, startedServerTime + durationMs - this.now());
     this.autoStopTimer = setTimeout(() => {
       if (
         this.transport.status !== "running" ||
@@ -558,7 +573,7 @@ export class RoomController {
         return;
       }
 
-      const now = Date.now();
+      const now = this.now();
       if (this.stopRoomAutomatically("auto-duration", leaderId, now)) {
         this.broadcastState();
       }
@@ -663,10 +678,10 @@ export class RoomController {
         return;
       }
 
-      if (this.stopRoomAutomatically("auto-playback-ended", leaderId, Date.now())) {
+      if (this.stopRoomAutomatically("auto-playback-ended", leaderId, this.now())) {
         this.broadcastState();
       }
-    }, Math.max(0, PLAYBACK_END_SETTLE_MS - Math.max(0, Date.now() - now)));
+    }, Math.max(0, PLAYBACK_END_SETTLE_MS - Math.max(0, this.now() - now)));
   }
 
   private stopRoomAutomatically(reason: StopReason, leaderId: string | undefined, now: number): boolean {
@@ -729,6 +744,38 @@ export class RoomController {
     return true;
   }
 
+  /**
+   * One structured line per executed transport command with a measured fire
+   * time, so "we were out of sync on song 4" is answerable after rehearsal.
+   * Deviation is relative to the scheduled downbeat of the same sequence and
+   * includes any intentional manual calibration offset.
+   */
+  private logCommandTiming(
+    client: RoomClientSummary,
+    lastCommand: NonNullable<RoomClientSummary["status"]>["lastCommand"]
+  ): void {
+    if (
+      !lastCommand?.firedAtServerTime ||
+      lastCommand.sequenceId === undefined ||
+      lastCommand.sequenceId !== this.transport.sequenceId ||
+      !this.transport.scheduledServerTime
+    ) {
+      return;
+    }
+
+    const key = `${lastCommand.sequenceId}:${lastCommand.firedAtServerTime}`;
+    if (this.lastTimingLogByClientId.get(client.id) === key) {
+      return;
+    }
+    this.lastTimingLogByClientId.set(client.id, key);
+
+    const deviationMs = Math.round(lastCommand.firedAtServerTime - this.transport.scheduledServerTime);
+    const signed = deviationMs >= 0 ? `+${deviationMs}` : `${deviationMs}`;
+    console.log(
+      `[timing] ${client.deviceName}: ${lastCommand.action}#${lastCommand.sequenceId} fired ${signed} ms vs scheduled start`
+    );
+  }
+
   private broadcastState(): void {
     if (this.pendingClockBroadcast) {
       clearTimeout(this.pendingClockBroadcast);
@@ -749,8 +796,12 @@ export class RoomController {
   }
 
   private broadcast(message: ServerMessage): void {
+    // Serialize once; the same JSON goes to every client, and stringifying a
+    // large roomState (setlist + adapter status) per socket adds up at the
+    // 400 ms clock-rebroadcast cadence.
+    const serialized = JSON.stringify(message);
     for (const client of this.clients.values()) {
-      this.send(client, message);
+      this.sendSerialized(client, serialized);
     }
   }
 
@@ -764,11 +815,15 @@ export class RoomController {
   }
 
   private send(client: RoomClient, message: ServerMessage): void {
+    this.sendSerialized(client, JSON.stringify(message));
+  }
+
+  private sendSerialized(client: RoomClient, serialized: string): void {
     if (!client.socket || client.socket.readyState !== client.socket.OPEN) {
       return;
     }
 
-    client.socket.send(JSON.stringify(message));
+    client.socket.send(serialized);
   }
 
   private rememberClock(client: RoomClientSummary, now: number): void {
@@ -861,23 +916,25 @@ function sanitizeCatalog(value: AdapterStatus["catalog"]): AdapterStatus["catalo
     return undefined;
   }
 
-  const entries = Array.isArray(value.entries)
+  // Individual entries are deliberately not kept in room state: nothing in the
+  // room consumes them (matching happens on the adapter, the host UI shows
+  // only totals and match status), and rebroadcasting up to 500 titles/paths
+  // to every phone on every state update wastes rehearsal-Wi-Fi airtime.
+  const validEntryCount = Array.isArray(value.entries)
     ? value.entries
       .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry) && typeof entry === "object")
       .map((entry) => ({
         title: trimText(entry.title, 140),
-        relativePath: normalizeRelativeCatalogPath(entry.relativePath),
-        sourceId: trimText(entry.sourceId ?? "", 160) || undefined
+        relativePath: normalizeRelativeCatalogPath(entry.relativePath)
       }))
       .filter((entry) => entry.title && entry.relativePath)
-      .slice(0, 500)
+      .length
     : undefined;
   const total = Number.isFinite(value.total)
     ? Math.max(0, Math.min(100_000, Math.round(value.total)))
-    : entries?.length ?? 0;
+    : validEntryCount ?? 0;
 
   return {
-    entries,
     total,
     rootCount: Number.isFinite(value.rootCount)
       ? Math.max(0, Math.min(100, Math.round(value.rootCount ?? 0)))

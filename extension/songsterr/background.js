@@ -4,7 +4,10 @@ let socket;
 let roomInput;
 let roomUrl;
 let wsUrl;
-let serverOffsetMs = 0;
+// undefined until the first clockSyncResult so blendOffset adopts the first
+// fresh sample as-is; seeding with 0 would slew a real offset from zero and
+// leave a residual timing error after the warm-up burst.
+let serverOffsetMs;
 let samples = [];
 // Clock cadence/estimator constants. Mirror of src/shared/clock.ts.
 const CLOCK_SAMPLE_WINDOW = 20;
@@ -26,6 +29,15 @@ let lastStatus = {
   detail: "No Songsterr tab detected"
 };
 let latestCommand;
+// This adapter's id in the room (from serverHello); used to find our own
+// manual calibration offset inside roomState during reconciliation.
+let myClientId;
+// Highest transport sequence this adapter has acted on. Lets roomState
+// reconciliation catch commands that were broadcast while we were disconnected
+// without re-running ones the push path already handled. Survives reconnects
+// on purpose: a missed Stop must still be caught after the socket comes back.
+let lastTransportSequenceId = 0;
+let lastTransportAction;
 let tabStatusTimer;
 let tabStatusInFlight = false;
 let tabStatusPending = false;
@@ -51,6 +63,10 @@ let knownHosts = [];
 // Persisted per-machine.
 let memberInstrument = "auto";
 
+// How far ahead of the scheduled downbeat a transport command is forwarded to
+// the content script. Covers the tab query, the IPC hop, and Songsterr prep
+// (synth source, reset-to-start); the content script waits out the remainder.
+const DISPATCH_LEAD_MS = 400;
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
@@ -294,7 +310,7 @@ async function connect() {
     // samples are dangerous after a sleep/resume, where the machine clock may
     // have just stepped; the warm-up burst rebuilds the offset from scratch.
     samples = [];
-    serverOffsetMs = 0;
+    serverOffsetMs = undefined;
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(() => {
       if (Date.now() - lastServerContactAt > HEARTBEAT_TIMEOUT_MS) {
@@ -351,36 +367,18 @@ async function connect() {
       return;
     }
 
+    if (message.type === "serverHello") {
+      myClientId = message.clientId;
+      return;
+    }
+
     if (message.type === "transportCommand") {
-      const manualOffsetMs = message.manualOffsetMs || 0;
-      const delayMs = Math.max(
-        0,
-        message.scheduledServerTime + manualOffsetMs - (Date.now() + serverOffsetMs)
-      );
-      reportCommandStatus({
-        action: message.action,
-        sequenceId: message.sequenceId,
-        status: "pending",
-        ready: lastStatus.ready,
-        detail: `Songsterr ${message.action} command scheduled${formatManualOffset(manualOffsetMs)}`,
-        at: Date.now()
-      });
-      // Get the tab onto the right song when the count-in *starts*, not when it
-      // reaches zero. Loading/navigating a tab takes longer than the count-in, so
-      // doing it at play time would reload the page on the downbeat and throw the
-      // band out of sync. This is the only place that navigates; the downbeat
-      // (sendTransportToSongsterr) only locates the already-loaded tab.
-      if (message.action === "play") {
-        ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
-      }
-      setTimeout(() => {
-        sendTransportToSongsterr(
-          message.action,
-          message.sequenceId,
-          message.currentSong?.song,
-          Boolean(message.resetBeforePlay)
-        );
-      }, delayMs);
+      handleTransportCommand(message);
+      return;
+    }
+
+    if (message.type === "roomState") {
+      reconcileTransportFromRoomState(message);
       return;
     }
 
@@ -496,14 +494,148 @@ chrome.alarms?.onAlarm.addListener((alarm) => {
   connect();
 });
 
-async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false) {
-  // At the downbeat we only *locate* an existing Songsterr tab -- we never
-  // navigate or create one here. The eager pre-open at count-in start
-  // (ensureSongsterrTabs) is responsible for getting the right song loaded.
-  // Navigating at play time reloads the page on the downbeat (Songsterr's SPA
-  // rewrites the path with a track suffix, so an exact-URL match can miss even
-  // when the tab is already on the song) and throws the band out of sync.
-  const tabs = await findSongsterrTabs(currentSong);
+function handleTransportCommand(message) {
+  lastTransportSequenceId = message.sequenceId;
+  lastTransportAction = message.action;
+  const manualOffsetMs = message.manualOffsetMs || 0;
+  // The room-time downbeat converted to this machine's clock. The content
+  // script does the final wait against this instant.
+  const dueLocalAt = message.scheduledServerTime + manualOffsetMs - (serverOffsetMs ?? 0);
+  const delayMs = Math.max(0, dueLocalAt - Date.now());
+  reportCommandStatus({
+    action: message.action,
+    sequenceId: message.sequenceId,
+    status: "pending",
+    ready: lastStatus.ready,
+    detail: `Songsterr ${message.action} command scheduled${formatManualOffset(manualOffsetMs)}`,
+    at: Date.now()
+  });
+  // Get the tab onto the right song when the count-in *starts*, not when it
+  // reaches zero. Loading/navigating a tab takes longer than the count-in, so
+  // doing it at play time would reload the page on the downbeat and throw the
+  // band out of sync. This is the only place that navigates; the downbeat
+  // (sendTransportToSongsterr) only locates the already-loaded tab.
+  if (message.action === "play") {
+    ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
+  }
+  // Dispatch to the content script *ahead* of the downbeat: the tab query,
+  // IPC hop, and Songsterr prep all happen during the count-in, and the
+  // content script burns the remaining time so the control action itself
+  // lands on the beat. (Waiting the full delay here made every browser
+  // device start late by the tab-query + messaging + prep latency.)
+  setTimeout(() => {
+    sendTransportToSongsterr(
+      message.action,
+      message.sequenceId,
+      message.currentSong?.song,
+      Boolean(message.resetBeforePlay),
+      dueLocalAt
+    );
+  }, Math.max(0, delayMs - DISPATCH_LEAD_MS));
+}
+
+// Minimum lead time left on a reconciled play for it to still start together;
+// with less than this there is no room for the tab/IPC/prep pipeline, and
+// starting late would be worse than not starting.
+const MIN_RECONCILE_LEAD_MS = 250;
+
+// Adapters normally act on pushed transportCommand messages. A device that was
+// disconnected (Wi-Fi blip, coordinator restart) while one was broadcast never
+// sees it -- but every roomState carries the authoritative transport state, so
+// catch up from there where it is safe to do so.
+function reconcileTransportFromRoomState(state) {
+  const transport = state?.transport;
+  if (!transport || typeof transport.sequenceId !== "number") {
+    return;
+  }
+
+  // A lower sequence than we've handled means a fresh room (coordinator was
+  // restarted and its counter reset); adopt its numbering rather than treating
+  // everything as already-seen.
+  if (transport.sequenceId < lastTransportSequenceId) {
+    lastTransportSequenceId = transport.sequenceId;
+    lastTransportAction = undefined;
+    return;
+  }
+  if (transport.sequenceId === lastTransportSequenceId) {
+    return;
+  }
+
+  if (
+    transport.status === "scheduled" &&
+    transport.action === "play" &&
+    transport.scheduledServerTime
+  ) {
+    const manualOffsetMs = manualOffsetForSelf(state);
+    const dueLocalAt = transport.scheduledServerTime + manualOffsetMs - (serverOffsetMs ?? 0);
+    if (dueLocalAt - Date.now() >= MIN_RECONCILE_LEAD_MS) {
+      handleTransportCommand({
+        action: "play",
+        sequenceId: transport.sequenceId,
+        scheduledServerTime: transport.scheduledServerTime,
+        manualOffsetMs,
+        resetBeforePlay: true,
+        currentSong: state.currentSong
+      });
+    } else {
+      // Too late to start together; skip rather than joining off-beat.
+      lastTransportSequenceId = transport.sequenceId;
+    }
+    return;
+  }
+
+  // Only reconcile stops that were actually commanded (manual Stop or the
+  // leader vanishing). The coordinator's automatic stops (song duration
+  // elapsed, all playback ended) deliberately never broadcast a Stop command
+  // because the players have already stopped on their own.
+  const commandedStop =
+    transport.stopReason === "manual" || transport.stopReason === "leader-disconnect";
+  if (transport.status === "stopped" && commandedStop && lastTransportAction === "play") {
+    // We missed the Stop while disconnected. Running it now is safe: the
+    // content script treats Stop on already-stopped playback as a no-op.
+    handleTransportCommand({
+      action: "stop",
+      sequenceId: transport.sequenceId,
+      scheduledServerTime: transport.scheduledServerTime || Date.now() + (serverOffsetMs ?? 0),
+      manualOffsetMs: 0,
+      resetBeforePlay: false,
+      currentSong: state.currentSong
+    });
+    return;
+  }
+
+  // Running mid-song (we cannot join cleanly) or stopped without a play of
+  // ours to undo: adopt the sequence so future reconciliation stays quiet.
+  lastTransportSequenceId = transport.sequenceId;
+}
+
+function manualOffsetForSelf(state) {
+  if (!myClientId || !Array.isArray(state?.clients)) {
+    return 0;
+  }
+  const self = state.clients.find((client) => client?.id === myClientId);
+  return self?.clock?.manualOffsetMs || 0;
+}
+
+async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false, dueLocalAt = 0) {
+  // This runs DISPATCH_LEAD_MS ahead of the downbeat; the content script waits
+  // out the remainder against dueLocalAt and fires the control on the beat.
+  // We only *locate* an existing Songsterr tab here -- we never navigate or
+  // create one. The eager pre-open at count-in start (ensureSongsterrTabs) is
+  // responsible for getting the right song loaded. Navigating at play time
+  // reloads the page on the downbeat (Songsterr's SPA rewrites the path with a
+  // track suffix, so an exact-URL match can miss even when the tab is already
+  // on the song) and throws the band out of sync.
+  let tabs = await findSongsterrTabs(currentSong);
+  if (!tabs.length && dueLocalAt) {
+    // A tab opened at count-in start may still be loading at lead time; give it
+    // until the downbeat itself before declaring failure.
+    const remainingMs = dueLocalAt - Date.now();
+    if (remainingMs > 50) {
+      await new Promise((resolve) => setTimeout(resolve, remainingMs));
+      tabs = await findSongsterrTabs(currentSong);
+    }
+  }
   if (!tabs.length) {
     reportCommandStatus({
       action,
@@ -516,19 +648,22 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     return;
   }
 
-  const results = [];
-  for (const tab of tabs) {
-    if (tab.id) {
-      const result = await chrome.tabs
-        .sendMessage(tab.id, { type: "bandcueTransport", action, resetBeforePlay })
-        .catch((error) => ({
-          ok: false,
-          detail: error?.message || "Songsterr content script did not respond",
-          controlPath: "content-script"
-        }));
-      results.push(result);
-    }
-  }
+  // Dispatch to every tab in parallel: each content script blocks until the
+  // downbeat before responding, so awaiting tabs one at a time would delay
+  // every tab after the first past the scheduled start.
+  const results = await Promise.all(
+    tabs
+      .filter((tab) => tab.id)
+      .map((tab) =>
+        chrome.tabs
+          .sendMessage(tab.id, { type: "bandcueTransport", action, resetBeforePlay, dueLocalAt })
+          .catch((error) => ({
+            ok: false,
+            detail: error?.message || "Songsterr content script did not respond",
+            controlPath: "content-script"
+          }))
+      )
+  );
 
   const success = results.find((result) => result?.ok);
   const failure = results.find((result) => result && !result.ok);
@@ -545,6 +680,9 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     ready: lastStatus.ready || tabs.length > 0,
     detail: final.detail,
     controlPath: final.controlPath,
+    firedAtServerTime: final.ok && Number.isFinite(final.firedAtLocal)
+      ? Math.round(final.firedAtLocal + (serverOffsetMs ?? 0))
+      : undefined,
     at: Date.now()
   });
 }
@@ -665,7 +803,8 @@ function reportCommandStatus(command) {
     status: command.status,
     at: command.at,
     detail: command.detail,
-    controlPath: command.controlPath
+    controlPath: command.controlPath,
+    firedAtServerTime: command.firedAtServerTime
   };
   publishAdapterStatus({
     ...lastStatus,

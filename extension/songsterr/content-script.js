@@ -45,7 +45,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "bandcueTransport") {
-    controlSongsterr(message.action, Boolean(message.resetBeforePlay)).then((result) => {
+    runScheduledTransport(message).then((result) => {
       reportStatus();
       sendResponse(result);
     });
@@ -89,14 +89,63 @@ function handleRuntimeMessageError(error) {
   }
 }
 
-async function controlSongsterr(action, resetBeforePlay = false) {
+// The background worker dispatches transport commands ahead of the scheduled
+// downbeat and passes the target instant as dueLocalAt (already converted to
+// this machine's clock, manual offset included). Songsterr prep (forcing the
+// Synth source, resetting to the start) runs immediately during the count-in;
+// the final wait happens here so the control action itself lands on the beat
+// instead of after tab-query + messaging + prep latency.
+async function runScheduledTransport(message) {
+  const action = message.action;
+  const resetBeforePlay = Boolean(message.resetBeforePlay);
+  const dueLocalAt = Number(message.dueLocalAt) || 0;
+  let prepared;
+  if (action === "play" && dueLocalAt > Date.now()) {
+    prepared = {
+      synthDetail: ensureSynthPlaybackMode(),
+      resetDetail: resetBeforePlay ? resetSongsterrPosition() : ""
+    };
+  }
+  await waitUntilLocalTime(dueLocalAt);
+  const result = await controlSongsterr(action, resetBeforePlay, prepared);
+  // For play via the media element, media.play() has resolved here, i.e.
+  // playback has actually begun -- the best local proxy for the audible start.
+  // The background converts this to server time for the host's deviation view.
+  result.firedAtLocal = Date.now();
+  return result;
+}
+
+// setTimeout alone can fire several ms late (more under load), so sleep to just
+// short of the target and burn the last stretch in a tight loop.
+const FINAL_SPIN_MS = 25;
+
+async function waitUntilLocalTime(dueLocalAt) {
+  if (!dueLocalAt) {
+    return;
+  }
+  const coarseMs = dueLocalAt - Date.now() - FINAL_SPIN_MS;
+  if (coarseMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, coarseMs));
+  }
+  while (Date.now() < dueLocalAt) {
+    // Busy-wait for at most FINAL_SPIN_MS.
+  }
+}
+
+async function controlSongsterr(action, resetBeforePlay = false, prepared = undefined) {
   // Songsterr's "Original" source streams a YouTube video, which can drift or
   // stall on a weak connection and break sync. The "Synth" source is rendered
   // locally, so force it before a synced play to keep playback deterministic.
-  const synthDetail = action === "play" ? ensureSynthPlaybackMode() : "";
-  const resetDetail = action === "play" && resetBeforePlay
-    ? resetSongsterrPosition()
-    : "";
+  // When the scheduled path already did this during the count-in, reuse its
+  // result instead of repeating the DOM work on the downbeat.
+  const synthDetail = prepared
+    ? prepared.synthDetail
+    : action === "play" ? ensureSynthPlaybackMode() : "";
+  const resetDetail = prepared
+    ? prepared.resetDetail
+    : action === "play" && resetBeforePlay
+      ? resetSongsterrPosition()
+      : "";
   const playbackState = inferPlaybackState();
   if (action === "stop" && playbackState === "stopped") {
     lastControlDetail = "Songsterr playback is already stopped; Stop was a no-op";
@@ -107,8 +156,8 @@ async function controlSongsterr(action, resetBeforePlay = false) {
     };
   }
 
-  const mediaControlled = await controlMediaElement(action);
-  if (mediaControlled) {
+  const mediaResult = await controlMediaElement(action);
+  if (mediaResult.ok) {
     lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used native media ${action}`);
     return {
       ok: true,
@@ -145,11 +194,13 @@ async function controlSongsterr(action, resetBeforePlay = false) {
     };
   }
 
-  lastControlDetail = `Could not find a Songsterr ${action} control`;
+  lastControlDetail = mediaResult.autoplayBlocked
+    ? "Browser blocked autoplay for this tab. Click once inside the Songsterr tab, then try again."
+    : `Could not find a Songsterr ${action} control`;
   return {
     ok: false,
     detail: lastControlDetail,
-    controlPath: "none"
+    controlPath: mediaResult.autoplayBlocked ? "autoplay-blocked" : "none"
   };
 }
 
@@ -299,19 +350,26 @@ function observeDurationSources() {
 async function controlMediaElement(action) {
   const mediaElements = [...document.querySelectorAll("audio, video")];
   if (!mediaElements.length) {
-    return false;
+    return { ok: false };
   }
 
   if (action === "play") {
+    let autoplayBlocked = false;
     for (const media of mediaElements) {
       try {
         await media.play();
-        return true;
-      } catch {
+        return { ok: true };
+      } catch (error) {
+        // The browser refuses playback until the user has interacted with the
+        // tab. Surface this specifically -- the button/Space fallbacks below
+        // run through Songsterr's own JS and are blocked the same way.
+        if (error?.name === "NotAllowedError") {
+          autoplayBlocked = true;
+        }
         // Try the next media element before falling back to Songsterr controls.
       }
     }
-    return false;
+    return { ok: false, autoplayBlocked };
   }
 
   let pausedActiveMedia = false;
@@ -322,7 +380,7 @@ async function controlMediaElement(action) {
     media.pause();
   }
 
-  return pausedActiveMedia;
+  return { ok: pausedActiveMedia };
 }
 
 function ensureSynthPlaybackMode() {

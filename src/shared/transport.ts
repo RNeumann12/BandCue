@@ -7,6 +7,38 @@ export const DEFAULT_SCHEDULE_DELAY_MS = 1500;
 // offset compensation. Mirrored in web/host-logic.js and the manual-offset input.
 export const MANUAL_OFFSET_LIMIT_MS = 5000;
 
+// Upper bound for the dynamic count-in so one terrible outlier cannot stretch
+// the wait absurdly; beyond this the device is better served by calibration.
+export const MAX_SCHEDULE_DELAY_MS = 5000;
+// Fixed budget a command needs on top of network transit: the extension's
+// dispatch lead (~400 ms), Songsterr prep, and safety margin.
+const SCHEDULE_PREP_BUDGET_MS = 1000;
+
+/**
+ * Count-in length for a play, adapted to the room's timing quality. The default
+ * covers typical rehearsal Wi-Fi; a transport-capable client with a slow or
+ * jittery measured path extends the count-in so its command still arrives and
+ * preps in time. Companion displays never extend it — they mirror, not play.
+ */
+export function scheduleDelayForClients(
+  clients: Iterable<Pick<RoomClientSummary, "capabilities" | "clock">>,
+  defaultDelayMs = DEFAULT_SCHEDULE_DELAY_MS
+): number {
+  let required = defaultDelayMs;
+  for (const client of clients) {
+    if (!client.capabilities?.some((capability) => capability.canPlay && capability.canStop)) {
+      continue;
+    }
+    const clock = client.clock;
+    if (!clock) {
+      continue;
+    }
+    const needed = (clock.rttMs ?? 0) / 2 + (clock.jitterMs ?? 0) * 4 + SCHEDULE_PREP_BUDGET_MS;
+    required = Math.max(required, needed);
+  }
+  return Math.round(Math.min(required, MAX_SCHEDULE_DELAY_MS));
+}
+
 export interface TransportDecision {
   accepted: boolean;
   reason?: string;

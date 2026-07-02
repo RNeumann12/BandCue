@@ -21,6 +21,111 @@ class CommandTimingTest {
     }
 
     @Test
+    fun reconciliationSchedulesMissedFuturePlay() {
+        val decision = decideTransportReconciliation(
+            status = "scheduled",
+            action = "play",
+            sequenceId = 5,
+            stopReason = null,
+            lastSequenceId = 4,
+            lastAction = null,
+            playLeadMs = 900
+        )
+
+        assertEquals(TransportReconciliation.SchedulePlay, decision)
+    }
+
+    @Test
+    fun reconciliationSkipsPlayWithTooLittleLead() {
+        val decision = decideTransportReconciliation(
+            status = "scheduled",
+            action = "play",
+            sequenceId = 5,
+            stopReason = null,
+            lastSequenceId = 4,
+            lastAction = null,
+            playLeadMs = 100
+        )
+
+        assertEquals(TransportReconciliation.AdoptSequence, decision)
+    }
+
+    @Test
+    fun reconciliationExecutesMissedCommandedStopAfterOurPlay() {
+        val decision = decideTransportReconciliation(
+            status = "stopped",
+            action = "stop",
+            sequenceId = 6,
+            stopReason = "manual",
+            lastSequenceId = 5,
+            lastAction = "play",
+            playLeadMs = 0
+        )
+
+        assertEquals(TransportReconciliation.ExecuteStop, decision)
+    }
+
+    @Test
+    fun reconciliationIgnoresAutomaticStops() {
+        val decision = decideTransportReconciliation(
+            status = "stopped",
+            action = "stop",
+            sequenceId = 6,
+            stopReason = "auto-duration",
+            lastSequenceId = 5,
+            lastAction = "play",
+            playLeadMs = 0
+        )
+
+        assertEquals(TransportReconciliation.AdoptSequence, decision)
+    }
+
+    @Test
+    fun reconciliationIgnoresStopWithoutOurPlay() {
+        val decision = decideTransportReconciliation(
+            status = "stopped",
+            action = "stop",
+            sequenceId = 6,
+            stopReason = "manual",
+            lastSequenceId = 0,
+            lastAction = null,
+            playLeadMs = 0
+        )
+
+        assertEquals(TransportReconciliation.AdoptSequence, decision)
+    }
+
+    @Test
+    fun reconciliationDoesNothingOnSameSequence() {
+        val decision = decideTransportReconciliation(
+            status = "scheduled",
+            action = "play",
+            sequenceId = 5,
+            stopReason = null,
+            lastSequenceId = 5,
+            lastAction = "play",
+            playLeadMs = 900
+        )
+
+        assertEquals(TransportReconciliation.None, decision)
+    }
+
+    @Test
+    fun reconciliationResetsTrackingWhenSequenceRegresses() {
+        val decision = decideTransportReconciliation(
+            status = "stopped",
+            action = null,
+            sequenceId = 0,
+            stopReason = null,
+            lastSequenceId = 12,
+            lastAction = "play",
+            playLeadMs = 0
+        )
+
+        assertEquals(TransportReconciliation.ResetTracking, decision)
+    }
+
+    @Test
     fun stopIsNoOpWhenPlaybackAlreadyStopped() {
         val plan = decideStopControlPlan(
             playbackState = "stopped",

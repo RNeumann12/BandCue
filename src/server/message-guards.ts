@@ -188,7 +188,8 @@ function sanitizeLastCommand(value: unknown): AdapterStatus["lastCommand"] | und
     status: value.status as AdapterCommandStatus,
     at: value.at,
     detail: typeof value.detail === "string" ? value.detail : undefined,
-    controlPath: typeof value.controlPath === "string" ? value.controlPath : undefined
+    controlPath: typeof value.controlPath === "string" ? value.controlPath : undefined,
+    firedAtServerTime: isFiniteNumber(value.firedAtServerTime) ? value.firedAtServerTime : undefined
   };
 }
 

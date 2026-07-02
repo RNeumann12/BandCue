@@ -120,6 +120,12 @@ export interface AdapterStatus {
     at: number;
     detail?: string;
     controlPath?: string;
+    /**
+     * When the control action actually executed, in server time (local fire
+     * time + measured clock offset). Lets the host show each device's real
+     * start deviation from the scheduled downbeat and suggest calibration.
+     */
+    firedAtServerTime?: number;
   };
 }
 

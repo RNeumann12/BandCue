@@ -36,10 +36,22 @@ class BandCueAdapterService : Service() {
     private val commandTasks = Collections.synchronizedSet(mutableSetOf<ScheduledFuture<*>>())
     private var latestCommand: AdapterCommandStatus? = null
     private var currentSong: CurrentSong? = null
+    // This adapter's id in the room (from serverHello); used to find our own
+    // manual calibration offset inside roomState during reconciliation.
+    private var myClientId: String? = null
+    // Highest transport sequence this adapter has acted on. Lets roomState
+    // reconciliation catch commands broadcast while we were disconnected
+    // without re-running ones the push path already handled. Survives
+    // reconnects on purpose: a missed Stop must still be caught afterwards.
+    private var lastTransportSequenceId = 0
+    private var lastTransportAction: String? = null
     private var roomLocator: String = DEFAULT_ROOM_PORT.toString()
     private var deviceName: String = "Android Songsterr"
     private var memberInstrument: String = "auto"
-    private var serverOffsetMs = 0.0
+    // null until the first clockSyncResult so blendOffset adopts the first fresh
+    // sample as-is; seeding with 0.0 would slew a real offset from zero and leave
+    // a residual timing error after the warm-up burst.
+    private var serverOffsetMs: Double? = null
     @Volatile private var shouldReconnect = false
     @Volatile private var connectionState = "not connected"
     @Volatile private var connectionDetail = "Enter a BandCue room URL, host:port, room code, or port."
@@ -131,7 +143,7 @@ class BandCueAdapterService : Service() {
                         // burst rebuilds the offset from scratch. onText (which also
                         // mutates samples) runs on this same read thread.
                         samples.clear()
-                        serverOffsetMs = 0.0
+                        serverOffsetMs = null
                         socket?.sendText(ProtocolJson.clientHello(deviceName))
                         startClockSync()
                         publishAdapterStatus()
@@ -261,8 +273,12 @@ class BandCueAdapterService : Service() {
 
         when (message.optString("type")) {
             "clockSyncResult" -> handleClockSyncResult(message)
+            "serverHello" -> {
+                myClientId = ProtocolJson.parseServerHelloClientId(message) ?: myClientId
+            }
             "roomState" -> {
                 currentSong = ProtocolJson.parseCurrentSong(message)
+                reconcileTransportFromRoomState(message)
                 publishAdapterStatus()
                 publishUiStatus()
             }
@@ -295,11 +311,12 @@ class BandCueAdapterService : Service() {
             samples.removeAt(0)
         }
         val summary = summarizeClock(samples)
-        serverOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs)
+        val blendedOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs)
+        serverOffsetMs = blendedOffsetMs
         socket?.sendText(
             ProtocolJson.clockStatus(
                 rttMs = summary.rttMs,
-                offsetMs = serverOffsetMs,
+                offsetMs = blendedOffsetMs,
                 jitterMs = calculateJitterMs(samples),
                 sampleCount = samples.size
             )
@@ -307,13 +324,15 @@ class BandCueAdapterService : Service() {
     }
 
     private fun handleTransportCommand(command: TransportCommand) {
+        lastTransportSequenceId = command.sequenceId
+        lastTransportAction = command.action
         val scheduled = scheduleTransportCommand(
             action = command.action,
             sequenceId = command.sequenceId,
             scheduledServerTime = command.scheduledServerTime,
             manualOffsetMs = command.manualOffsetMs,
             localNow = System.currentTimeMillis(),
-            serverOffsetMs = serverOffsetMs
+            serverOffsetMs = serverOffsetMs ?: 0.0
         )
 
         latestCommand = AdapterCommandStatus(
@@ -343,6 +362,63 @@ class BandCueAdapterService : Service() {
         scheduleCommandTask({
             executeTransport(command)
         }, delayMs, TimeUnit.MILLISECONDS)
+    }
+
+    // Catch transport commands that were broadcast while this device was
+    // disconnected: every roomState carries the authoritative transport state.
+    // The decision logic lives in CommandTiming.decideTransportReconciliation.
+    private fun reconcileTransportFromRoomState(message: JSONObject) {
+        val transport = ProtocolJson.parseTransportState(message) ?: return
+        val manualOffsetMs = ProtocolJson.parseManualOffsetForClient(message, myClientId)
+        val dueLocalAt = scheduleTransportCommand(
+            action = transport.action ?: "",
+            sequenceId = transport.sequenceId,
+            scheduledServerTime = transport.scheduledServerTime,
+            manualOffsetMs = manualOffsetMs,
+            localNow = System.currentTimeMillis(),
+            serverOffsetMs = serverOffsetMs ?: 0.0
+        ).dueLocalAt
+
+        when (
+            decideTransportReconciliation(
+                status = transport.status,
+                action = transport.action,
+                sequenceId = transport.sequenceId,
+                stopReason = transport.stopReason,
+                lastSequenceId = lastTransportSequenceId,
+                lastAction = lastTransportAction,
+                playLeadMs = dueLocalAt - System.currentTimeMillis()
+            )
+        ) {
+            TransportReconciliation.ResetTracking -> {
+                lastTransportSequenceId = transport.sequenceId
+                lastTransportAction = null
+            }
+            TransportReconciliation.AdoptSequence -> {
+                lastTransportSequenceId = transport.sequenceId
+            }
+            TransportReconciliation.SchedulePlay -> handleTransportCommand(
+                TransportCommand(
+                    action = "play",
+                    sequenceId = transport.sequenceId,
+                    scheduledServerTime = transport.scheduledServerTime,
+                    manualOffsetMs = manualOffsetMs,
+                    resetBeforePlay = true,
+                    currentSong = currentSong
+                )
+            )
+            TransportReconciliation.ExecuteStop -> handleTransportCommand(
+                TransportCommand(
+                    action = "stop",
+                    sequenceId = transport.sequenceId,
+                    scheduledServerTime = transport.scheduledServerTime,
+                    manualOffsetMs = 0,
+                    resetBeforePlay = false,
+                    currentSong = currentSong
+                )
+            )
+            TransportReconciliation.None -> Unit
+        }
     }
 
     private fun handleOpenSongCommand(command: OpenSongCommand) {
@@ -528,13 +604,22 @@ class BandCueAdapterService : Service() {
         detail: String,
         controlPath: String
     ) {
+        val now = System.currentTimeMillis()
+        // Actual execution time in server time, so the host can show this
+        // device's real start deviation from the scheduled downbeat.
+        val firedAtServerTime = if (status == "succeeded") {
+            (now + (serverOffsetMs ?: 0.0)).toLong()
+        } else {
+            null
+        }
         latestCommand = AdapterCommandStatus(
             action = command.action,
             sequenceId = command.sequenceId,
             status = status,
-            at = System.currentTimeMillis(),
+            at = now,
             detail = detail,
-            controlPath = controlPath
+            controlPath = controlPath,
+            firedAtServerTime = firedAtServerTime
         )
         publishAdapterStatus(stateOverride = if (status == "succeeded") "last-command-succeeded" else "last-command-failed")
         publishUiStatus()

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Browser devices now hit the downbeat, not shortly after it: the extension forwards transport commands to the Songsterr tab ~400 ms ahead of the scheduled start, runs the pre-play work (Synth source, reset-to-start) during the count-in, and waits out the final stretch inside the page so the play action itself lands on the beat. Multiple Songsterr tabs are dispatched in parallel.
+- Coordinator restarts no longer kick everyone out of the room: the room token and code persist in a local `.bandcue-room.json` (delete it to rotate them; `BANDCUE_TOKEN`/`BANDCUE_ROOM_CODE` still override), so saved URLs and QR codes keep working and every client reconnects on its own.
+- Devices that were briefly offline now catch up from room state: a play scheduled while they were disconnected still starts on the beat (when enough count-in remains), and a manual Stop they missed is applied on reconnect. Automatic end-of-song stops are deliberately not replayed.
+- Clock offset estimates no longer start biased toward zero after a (re)connect; the first fresh sample is adopted as-is, removing a residual timing error of up to tens of milliseconds after Wi-Fi blips.
+- Room time on the coordinator is now derived from a monotonic clock, so an OS/NTP clock step mid-rehearsal can no longer shift scheduled starts or auto-stop timers.
+- The count-in now adapts to the room: a playing device on a slow or jittery connection extends the scheduled delay (up to 5 s) so its command still arrives and preps in time; companion displays never extend it.
+- Each device now reports when its play/stop actually executed, in room time: the host device list shows "started ±N ms vs schedule" per device, and the coordinator logs one `[timing]` line per executed command — sync issues become diagnosable (and calibratable) instead of guesswork.
+- Room-state broadcasts no longer carry MuseScore catalog entries (up to 500 titles/paths went to every phone on every update); only the counts and match status are shared. The server also pings every client every 4 s to catch dead connections faster, and warns when the machine's LAN address changes mid-session and the QR/URLs go stale.
+- New automated sync-accuracy harness: a simulated rehearsal with jittery Wi-Fi, latency spikes, and badly skewed device clocks asserts that all devices start within 30 ms of each other — regressions to timing code now fail CI instead of surfacing at rehearsal.
+
+### Fixed
+
+- Songsterr extension: when the browser blocks autoplay because the tab was never interacted with, the host now sees "Browser blocked autoplay — click once inside the Songsterr tab" instead of a generic failure.
+- Android: fragmented WebSocket messages are now reassembled instead of silently dropped (latent — the current server never fragments).
+- Coordinator: a client spamming messages (over 80 per 2 s) is disconnected instead of consuming the room's CPU.
+- Android: WebSocket frame writes are now synchronized, closing a race where a keepalive pong from the read thread could corrupt the stream and drop the connection mid-rehearsal.
+- Android: the WebSocket handshake gets its own 5 s read timeout, so a peer that accepts TCP but never answers the upgrade can no longer stall reconnecting forever.
+- Coordinator: static-file path guard could be bypassed into a sibling directory whose name shares the `web` prefix; the room token is now compared in constant time; room-state broadcasts are serialized once instead of once per client.
+
 ## 1.1.0 - 2026-07-01
 
 ### Changed
