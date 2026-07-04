@@ -91,10 +91,20 @@ const RECONNECT_ALARM_PERIOD_MINUTES = 1;
 // Number of LAN probes in flight at once. High enough to cover a /24 quickly
 // while staying under Chrome's ~256 total socket budget for the service worker.
 const LAN_SCAN_CONCURRENCY = 150;
-const LAN_SCAN_TIMEOUT_MS = 400;
+const LAN_SCAN_FAST_TIMEOUT_MS = 400;
+// Weak rehearsal Wi-Fi can answer just after the fast LAN probe window. Keep the
+// normal path snappy, then make a slower second pass over likely subnets.
+const LAN_SCAN_WEAK_SIGNAL_TIMEOUT_MS = 900;
+const LAN_SCAN_WEAK_SIGNAL_CONCURRENCY = 100;
+const LAN_SCAN_WEAK_SIGNAL_SUBNET_LIMIT = 6;
+const DIRECT_PROBE_TIMEOUT_MS = 1000;
+const DIRECT_WEAK_SIGNAL_TIMEOUT_MS = 2500;
+const ABSOLUTE_ROOM_PROBE_TIMEOUT_MS = 1500;
+const ABSOLUTE_ROOM_WEAK_SIGNAL_TIMEOUT_MS = 3500;
 // First-time mDNS resolution can take a beat longer than a direct host hit, so
 // give the .local probes a bit more headroom than the 1000 ms direct probes.
 const MDNS_PROBE_TIMEOUT_MS = 1500;
+const MDNS_WEAK_SIGNAL_TIMEOUT_MS = 3000;
 // Hostname stem the server advertises over mDNS. The OS resolver (Windows 10
 // 1703+, macOS, Linux+Avahi) resolves "<stem>[-<roomcode>].local" to the
 // server's IP, so a single fetch reaches the room on any subnet -- no LAN scan.
@@ -273,10 +283,14 @@ async function connect() {
       await refreshRoomEndpoint();
       chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
     } catch (error) {
-      connectionState = "error";
-      connectionDetail = error.message;
-      scheduleReconnect();
-      return;
+      if (wsUrl && reconnectAttempts > 0) {
+        connectionDetail = `Discovery was slow (${error.message}); trying the last known room endpoint`;
+      } else {
+        connectionState = "error";
+        connectionDetail = error.message;
+        scheduleReconnect();
+        return;
+      }
     }
   }
 
@@ -1251,24 +1265,31 @@ async function resolveRoomEndpoint(input) {
   }
 
   // Try previously-successful hosts first, then localhost, then the mDNS name
-  // the server advertises, then (last) the LAN brute-force scan.
+  // the server advertises, then (last) the LAN brute-force scan. The first pass
+  // is fast; if it misses, a slower pass gives weak Wi-Fi a chance without
+  // slowing down normal joins.
   const errors = [];
-  for (const candidate of [...knownHostCandidates(locator), ...candidates]) {
-    const result = await tryResolveRoomCandidate(candidate, 1000);
-    if (result.endpoint) {
-      rememberHost(hostFromUrl(result.endpoint.roomUrl));
-      return result.endpoint;
-    }
-    errors.push(result.error);
+  const rememberedCandidates = uniqueCandidates(knownHostCandidates(locator));
+  const directCandidates = uniqueCandidates([...rememberedCandidates, ...candidates]);
+  const directResult = await resolveFromCandidates(directCandidates, DIRECT_PROBE_TIMEOUT_MS, errors);
+  if (directResult) {
+    return directResult;
   }
 
-  for (const candidate of mdnsCandidates(locator)) {
-    const result = await tryResolveRoomCandidate(candidate, MDNS_PROBE_TIMEOUT_MS);
-    if (result.endpoint) {
-      rememberHost(hostFromUrl(result.endpoint.roomUrl));
-      return result.endpoint;
+  const mdnsResult = await resolveFromCandidates(mdnsCandidates(locator), MDNS_PROBE_TIMEOUT_MS, errors);
+  if (mdnsResult) {
+    return mdnsResult;
+  }
+
+  if (rememberedCandidates.length) {
+    const slowRememberedResult = await resolveFromCandidates(
+      rememberedCandidates,
+      DIRECT_WEAK_SIGNAL_TIMEOUT_MS,
+      errors
+    );
+    if (slowRememberedResult) {
+      return slowRememberedResult;
     }
-    errors.push(result.error);
   }
 
   if (isRoomCode(locator) || isPort(locator)) {
@@ -1281,18 +1302,92 @@ async function resolveRoomEndpoint(input) {
     errors.push(scanResult.error);
   }
 
+  const slowDirectCandidates = rememberedCandidates.length
+    ? withoutCandidates(directCandidates, rememberedCandidates)
+    : directCandidates;
+  const slowDirectResult = await resolveFromCandidates(
+    slowDirectCandidates,
+    DIRECT_WEAK_SIGNAL_TIMEOUT_MS,
+    errors
+  );
+  if (slowDirectResult) {
+    return slowDirectResult;
+  }
+
+  const slowMdnsResult = await resolveFromCandidates(
+    mdnsCandidates(locator),
+    MDNS_WEAK_SIGNAL_TIMEOUT_MS,
+    errors
+  );
+  if (slowMdnsResult) {
+    return slowMdnsResult;
+  }
+
+  if (isRoomCode(locator) || isPort(locator)) {
+    connectionDetail = isRoomCode(locator)
+      ? `Retrying weak-signal scan for room ${locator.toUpperCase()}`
+      : `Retrying weak-signal scan on port ${locator}`;
+    const slowScanResult = await scanLanForRoom(locator, {
+      timeoutMs: LAN_SCAN_WEAK_SIGNAL_TIMEOUT_MS,
+      concurrency: LAN_SCAN_WEAK_SIGNAL_CONCURRENCY,
+      subnets: weakSignalScanSubnets(),
+      statusPrefix: "Retrying weak-signal scan"
+    });
+    if (slowScanResult.endpoint) {
+      rememberHost(hostFromUrl(slowScanResult.endpoint.roomUrl));
+      return slowScanResult.endpoint;
+    }
+
+    errors.push(slowScanResult.error);
+  }
+
   throw new Error(`No BandCue room found for "${locator}". ${errors.join("; ")}`);
 }
 
 async function resolveAbsoluteRoomEndpoint(locator) {
   const candidate = absoluteRoomDiscoveryCandidate(locator);
-  const result = await tryResolveRoomCandidate(candidate, 1500);
+  const result = await tryResolveRoomCandidate(candidate, ABSOLUTE_ROOM_PROBE_TIMEOUT_MS);
   if (result.endpoint) {
     rememberHost(hostFromUrl(result.endpoint.roomUrl));
     return result.endpoint;
   }
 
-  throw new Error(`The scanned URL is not an active BandCue room. ${result.error}`);
+  const slowResult = await tryResolveRoomCandidate(candidate, ABSOLUTE_ROOM_WEAK_SIGNAL_TIMEOUT_MS);
+  if (slowResult.endpoint) {
+    rememberHost(hostFromUrl(slowResult.endpoint.roomUrl));
+    return slowResult.endpoint;
+  }
+
+  throw new Error(`The scanned URL is not an active BandCue room. ${result.error}; ${slowResult.error}`);
+}
+
+async function resolveFromCandidates(candidates, timeoutMs, errors) {
+  for (const candidate of candidates) {
+    const result = await tryResolveRoomCandidate(candidate, timeoutMs);
+    if (result.endpoint) {
+      rememberHost(hostFromUrl(result.endpoint.roomUrl));
+      return result.endpoint;
+    }
+    errors.push(result.error);
+  }
+  return undefined;
+}
+
+function uniqueCandidates(candidates) {
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = candidate.apiUrl;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function withoutCandidates(candidates, excluded) {
+  const excludedUrls = new Set(excluded.map((candidate) => candidate.apiUrl));
+  return candidates.filter((candidate) => !excludedUrls.has(candidate.apiUrl));
 }
 
 // Direct candidates for hosts known to have served a room, for room-code/port
@@ -1303,7 +1398,18 @@ function knownHostCandidates(locator) {
   }
   const port = isPort(locator) ? Number.parseInt(locator, 10) : DEFAULT_ROOM_PORT;
   const expectedRoomCode = isRoomCode(locator) ? locator.toUpperCase() : undefined;
-  return knownHosts.map((host) => discoveryCandidate(host, port, expectedRoomCode));
+  return knownRoomHosts().map((host) => discoveryCandidate(host, port, expectedRoomCode));
+}
+
+function knownRoomHosts() {
+  const hosts = [];
+  const currentRoomHost = hostFromUrl(roomUrl);
+  for (const host of [currentRoomHost, ...knownHosts]) {
+    if (isRememberableHost(host) && !hosts.includes(host)) {
+      hosts.push(host);
+    }
+  }
+  return hosts;
 }
 
 // mDNS hostnames the server advertises for a room, most-specific first. Keep in
@@ -1355,7 +1461,7 @@ function subnetPrefix(host) {
 // LAN scan subnet order with the subnets of known hosts first.
 function scanSubnetsWithKnownFirst() {
   const ordered = [];
-  for (const host of knownHosts) {
+  for (const host of knownRoomHosts()) {
     const prefix = subnetPrefix(host);
     if (prefix && !ordered.includes(prefix)) {
       ordered.push(prefix);
@@ -1367,6 +1473,10 @@ function scanSubnetsWithKnownFirst() {
     }
   }
   return ordered;
+}
+
+function weakSignalScanSubnets() {
+  return scanSubnetsWithKnownFirst().slice(0, LAN_SCAN_WEAK_SIGNAL_SUBNET_LIMIT);
 }
 
 async function tryResolveRoomCandidate(candidate, timeoutMs) {
@@ -1409,12 +1519,15 @@ async function tryResolveRoomCandidate(candidate, timeoutMs) {
 // of dead hosts to time out. A sequential batch scan made the service worker
 // spend several seconds (and sometimes get killed) before reaching the room's
 // subnet; first-success-wins returns as soon as the real server responds.
-async function scanLanForRoom(roomCode) {
-  const candidates = buildLanScanCandidates(roomCode, scanSubnetsWithKnownFirst());
+async function scanLanForRoom(roomCode, options = {}) {
+  const timeoutMs = options.timeoutMs ?? LAN_SCAN_FAST_TIMEOUT_MS;
+  const subnets = options.subnets ?? scanSubnetsWithKnownFirst();
+  const statusPrefix = options.statusPrefix ?? "Scanning local network";
+  const candidates = buildLanScanCandidates(roomCode, subnets);
   const expectedRoomCode = isRoomCode(roomCode) ? roomCode.toUpperCase() : undefined;
   const port = isPort(roomCode) ? Number.parseInt(roomCode, 10) : DEFAULT_ROOM_PORT;
   const total = candidates.length;
-  const concurrency = Math.min(LAN_SCAN_CONCURRENCY, total);
+  const concurrency = Math.min(options.concurrency ?? LAN_SCAN_CONCURRENCY, total);
 
   return new Promise((resolve) => {
     let next = 0;
@@ -1436,7 +1549,7 @@ async function scanLanForRoom(roomCode) {
       while (active < concurrency && next < total) {
         const candidate = candidates[next++];
         active += 1;
-        tryResolveRoomCandidate(candidate, LAN_SCAN_TIMEOUT_MS).then((result) => {
+        tryResolveRoomCandidate(candidate, timeoutMs).then((result) => {
           active -= 1;
           checked += 1;
           if (settled) {
@@ -1448,8 +1561,8 @@ async function scanLanForRoom(roomCode) {
           }
           if (checked % concurrency === 0) {
             connectionDetail = expectedRoomCode
-              ? `Scanning local network for room ${expectedRoomCode} (${checked}/${total})`
-              : `Scanning local network on port ${port} (${checked}/${total})`;
+              ? `${statusPrefix} for room ${expectedRoomCode} (${checked}/${total})`
+              : `${statusPrefix} on port ${port} (${checked}/${total})`;
           }
           if (active === 0 && next >= total) {
             finish({

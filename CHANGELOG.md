@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 - 2026-07-04
+
+### Fixed
+
+- Songsterr extension: room joins are more tolerant of weak rehearsal Wi-Fi. Direct host, full URL, mDNS, and LAN-scan discovery now get a slower fallback pass, remembered room hosts are tried before broad scans, and reconnects keep trying the last known WebSocket endpoint when rediscovery is flaky.
+
 ## 1.2.0 - 2026-07-02
 
 ### Changed

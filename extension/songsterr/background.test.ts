@@ -192,6 +192,34 @@ describe("discovery constants", () => {
 
     expect(context.formatLanScanSubnets()).toBe(describeLanScanSubnets(DEFAULT_LAN_SCAN_SUBNETS));
   });
+
+  it("retries a direct host join with a longer weak-signal probe", async () => {
+    const { context } = loadBackground([]);
+    const calls: string[] = [];
+    context.fetch = async (url: string) => {
+      calls.push(String(url));
+      if (calls.length === 1) {
+        throw new Error("simulated packet loss");
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          type: "roomState",
+          roomCode: "ABC123",
+          companionUrl: "http://192.168.1.44:4173/?token=TEST"
+        })
+      };
+    };
+
+    const endpoint = await context.resolveRoomEndpoint("192.168.1.44:4173");
+
+    expect(calls).toEqual([
+      "http://192.168.1.44:4173/api/room",
+      "http://192.168.1.44:4173/api/room"
+    ]);
+    expect(endpoint.roomUrl).toBe("http://192.168.1.44:4173/?token=TEST");
+    expect(endpoint.wsUrl).toBe("ws://192.168.1.44:4173/ws?token=TEST");
+  });
 });
 
 describe("play count-in pre-opens the tab", () => {
