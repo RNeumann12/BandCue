@@ -1,7 +1,10 @@
 package com.bandcue.songsterr
 
 import org.json.JSONObject
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.URL
 import java.util.Collections
@@ -14,6 +17,10 @@ import java.util.concurrent.TimeUnit
 
 const val DEFAULT_ROOM_PORT = 4173
 val DISCOVERY_LOCAL_HOSTS = listOf("10.0.2.2", "127.0.0.1", "localhost")
+const val MDNS_HOST_STEM = "bandcue"
+const val DISCOVERY_REQUEST_TYPE = "bandcue.discovery.request"
+const val DISCOVERY_RESPONSE_TYPE = "bandcue.discovery.response"
+const val DISCOVERY_PROTOCOL_VERSION = 1
 // Keep in sync with DEFAULT_LAN_SCAN_SUBNETS in src/shared/room-locator.ts
 // (the canonical list) and LAN_SCAN_SUBNETS in extension/songsterr/background.js.
 val LAN_SCAN_SUBNETS = listOf(
@@ -40,6 +47,12 @@ data class RoomDiscoveryCandidate(
 data class RoomEndpoint(
     val roomUrl: String,
     val wsUrl: String
+)
+
+data class BandCueDiscoveryResponse(
+    val roomCode: String,
+    val port: Int,
+    val host: String
 )
 
 fun normalizeRoomLocator(value: String?, defaultPort: Int = DEFAULT_ROOM_PORT): String {
@@ -76,13 +89,12 @@ fun buildRoomDiscoveryCandidates(
     }
 
     if (isPort(value)) {
-        val port = value.toInt()
-        return localCandidates(port) + lanScanCandidates(port = port)
+        return localCandidates(value.toInt())
     }
 
     if (isRoomCode(value)) {
         val roomCode = value.uppercase(Locale.US)
-        return localCandidates(defaultPort, roomCode) + lanScanCandidates(defaultPort, roomCode)
+        return localCandidates(defaultPort, roomCode)
     }
 
     val explicitHost = parseHostAndPort(value, defaultPort)
@@ -123,7 +135,60 @@ fun roomUrlFromDiscovery(state: JSONObject, candidate: RoomDiscoveryCandidate): 
     }
 }
 
-fun resolveRoomEndpoint(locator: String, defaultPort: Int = DEFAULT_ROOM_PORT): RoomEndpoint {
+fun buildLanScanCandidates(locator: String, defaultPort: Int = DEFAULT_ROOM_PORT): List<RoomDiscoveryCandidate> {
+    val value = normalizeRoomLocator(locator, defaultPort)
+    if (!isPort(value) && !isRoomCode(value)) {
+        return emptyList()
+    }
+
+    val expectedRoomCode = if (isRoomCode(value)) value.uppercase(Locale.US) else null
+    val port = if (isPort(value)) value.toInt() else defaultPort
+    return lanScanCandidates(port, expectedRoomCode)
+}
+
+fun mdnsRoomHosts(roomCode: String? = null): List<String> {
+    val hosts = mutableListOf("$MDNS_HOST_STEM.local")
+    if (roomCode != null && isRoomCode(roomCode)) {
+        hosts.add(0, "$MDNS_HOST_STEM-${roomCode.lowercase(Locale.US)}.local")
+    }
+    return hosts
+}
+
+fun buildMdnsDiscoveryCandidates(locator: String, defaultPort: Int = DEFAULT_ROOM_PORT): List<RoomDiscoveryCandidate> {
+    val value = normalizeRoomLocator(locator, defaultPort)
+    if (!isPort(value) && !isRoomCode(value)) {
+        return emptyList()
+    }
+
+    val expectedRoomCode = if (isRoomCode(value)) value.uppercase(Locale.US) else null
+    val port = if (isPort(value)) value.toInt() else defaultPort
+    val roomCode = if (isRoomCode(value)) value else null
+    return mdnsRoomHosts(roomCode).map { host -> roomDiscoveryCandidate(host, port, expectedRoomCode) }
+}
+
+fun buildKnownHostCandidates(
+    locator: String,
+    knownHosts: Collection<String>,
+    defaultPort: Int = DEFAULT_ROOM_PORT
+): List<RoomDiscoveryCandidate> {
+    val value = normalizeRoomLocator(locator, defaultPort)
+    if (!isPort(value) && !isRoomCode(value)) {
+        return emptyList()
+    }
+
+    val expectedRoomCode = if (isRoomCode(value)) value.uppercase(Locale.US) else null
+    val port = if (isPort(value)) value.toInt() else defaultPort
+    return knownHosts
+        .mapNotNull { normalizeKnownHost(it) }
+        .distinct()
+        .map { host -> roomDiscoveryCandidate(host, port, expectedRoomCode) }
+}
+
+fun resolveRoomEndpoint(
+    locator: String,
+    defaultPort: Int = DEFAULT_ROOM_PORT,
+    knownHosts: Collection<String> = emptyList()
+): RoomEndpoint {
     val normalized = normalizeRoomLocator(locator, defaultPort)
     if (isAbsoluteRoomUrl(normalized)) {
         return RoomEndpoint(normalized, roomUrlToWebSocket(normalized))
@@ -134,7 +199,27 @@ fun resolveRoomEndpoint(locator: String, defaultPort: Int = DEFAULT_ROOM_PORT): 
         throw IllegalArgumentException("Use a room URL, room code, port, or host:port.")
     }
 
-    val endpoint = resolveCandidates(candidates)
+    val endpoint = resolveCandidates(
+        uniqueCandidates(buildKnownHostCandidates(normalized, knownHosts, defaultPort) + candidates),
+        timeoutMs = DIRECT_PROBE_TIMEOUT_MS
+    ) ?: resolveUdpDiscovery(normalized, defaultPort)?.let { udpResponse ->
+        resolveCandidates(
+            listOf(roomDiscoveryCandidate(udpResponse.host, udpResponse.port, expectedRoomCodeForLocator(normalized))),
+            timeoutMs = DIRECT_PROBE_TIMEOUT_MS
+        )
+    } ?: resolveCandidates(
+        buildMdnsDiscoveryCandidates(normalized, defaultPort),
+        timeoutMs = MDNS_PROBE_TIMEOUT_MS
+    ) ?: resolveCandidates(
+        buildLanScanCandidates(normalized, defaultPort),
+        timeoutMs = LAN_SCAN_FAST_TIMEOUT_MS
+    ) ?: resolveCandidates(
+        buildKnownHostCandidates(normalized, knownHosts, defaultPort) + buildMdnsDiscoveryCandidates(normalized, defaultPort),
+        timeoutMs = WEAK_SIGNAL_PROBE_TIMEOUT_MS
+    ) ?: resolveCandidates(
+        buildWeakSignalLanScanCandidates(normalized, defaultPort),
+        timeoutMs = LAN_SCAN_WEAK_SIGNAL_TIMEOUT_MS
+    )
     if (endpoint != null) {
         return endpoint
     }
@@ -162,14 +247,26 @@ fun formatLanScanSubnets(): String = LAN_SCAN_SUBNETS.joinToString(", ") { "$it.
 fun manualDiscoveryFallback(port: Int): String =
     "If discovery is blocked by Wi-Fi isolation, firewall, VPN, or a different subnet, enter the host:port shown on the host page, such as 192.168.1.12:$port, or paste the full room URL."
 
-private fun resolveCandidates(candidates: List<RoomDiscoveryCandidate>): RoomEndpoint? {
+fun expectedRoomCodeForLocator(locator: String): String? {
+    val value = normalizeRoomLocator(locator)
+    return if (isRoomCode(value)) value.uppercase(Locale.US) else null
+}
+
+private fun resolveCandidates(
+    candidates: List<RoomDiscoveryCandidate>,
+    timeoutMs: Int
+): RoomEndpoint? {
+    if (candidates.isEmpty()) {
+        return null
+    }
+
     val pool = Executors.newFixedThreadPool(32)
     val completion: CompletionService<RoomEndpoint?> = ExecutorCompletionService(pool)
 
     try {
         var submitted = 0
         for (candidate in candidates) {
-            completion.submit(Callable { tryResolveRoomCandidate(candidate) })
+            completion.submit(Callable { tryResolveRoomCandidate(candidate, timeoutMs) })
             submitted += 1
         }
 
@@ -187,11 +284,11 @@ private fun resolveCandidates(candidates: List<RoomDiscoveryCandidate>): RoomEnd
     return null
 }
 
-private fun tryResolveRoomCandidate(candidate: RoomDiscoveryCandidate): RoomEndpoint? {
+private fun tryResolveRoomCandidate(candidate: RoomDiscoveryCandidate, timeoutMs: Int): RoomEndpoint? {
     return try {
         val connection = URL(candidate.apiUrl).openConnection() as HttpURLConnection
-        connection.connectTimeout = 450
-        connection.readTimeout = 450
+        connection.connectTimeout = timeoutMs
+        connection.readTimeout = timeoutMs
         connection.requestMethod = "GET"
         connection.useCaches = false
         if (connection.responseCode != 200) {
@@ -208,6 +305,86 @@ private fun tryResolveRoomCandidate(candidate: RoomDiscoveryCandidate): RoomEndp
     }
 }
 
+private fun resolveUdpDiscovery(locator: String, defaultPort: Int): BandCueDiscoveryResponse? {
+    val value = normalizeRoomLocator(locator, defaultPort)
+    if (!isPort(value) && !isRoomCode(value)) {
+        return null
+    }
+
+    val discoveryPort = if (isPort(value)) value.toInt() else defaultPort
+    val expectedRoomCode = expectedRoomCodeForLocator(value)
+    return discoverBandCueRooms(expectedRoomCode, discoveryPort).firstOrNull()
+}
+
+fun discoverBandCueRooms(
+    roomCode: String? = null,
+    discoveryPort: Int = DEFAULT_ROOM_PORT,
+    timeoutMs: Int = UDP_DISCOVERY_TIMEOUT_MS
+): List<BandCueDiscoveryResponse> {
+    val request = JSONObject()
+        .put("type", DISCOVERY_REQUEST_TYPE)
+        .put("protocol", DISCOVERY_PROTOCOL_VERSION)
+    if (!roomCode.isNullOrBlank()) {
+        request.put("roomCode", roomCode.uppercase(Locale.US))
+    }
+
+    val payload = request.toString().toByteArray(Charsets.UTF_8)
+    val responses = linkedMapOf<String, BandCueDiscoveryResponse>()
+    return try {
+        DatagramSocket().use { socket ->
+            socket.broadcast = true
+            socket.soTimeout = timeoutMs
+            for (host in broadcastHosts()) {
+                val address = InetAddress.getByName(host)
+                socket.send(DatagramPacket(payload, payload.size, address, discoveryPort))
+            }
+
+            val buffer = ByteArray(2048)
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                try {
+                    socket.receive(packet)
+                } catch (_: Exception) {
+                    break
+                }
+                val raw = String(packet.data, packet.offset, packet.length, Charsets.UTF_8)
+                val parsed = parseDiscoveryResponse(raw, packet.address.hostAddress ?: continue) ?: continue
+                if (roomCode != null && !parsed.roomCode.equals(roomCode, ignoreCase = true)) {
+                    continue
+                }
+                responses["${parsed.host}:${parsed.roomCode}:${parsed.port}"] = parsed
+            }
+        }
+        responses.values.toList()
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+fun parseDiscoveryResponse(raw: String, host: String): BandCueDiscoveryResponse? {
+    return try {
+        val parsed = JSONObject(raw)
+        val port = parsed.optInt("port", -1)
+        if (
+            parsed.optString("type") != DISCOVERY_RESPONSE_TYPE ||
+            parsed.optInt("protocol") != DISCOVERY_PROTOCOL_VERSION ||
+            parsed.optString("roomCode").isBlank() ||
+            port !in 1..65535
+        ) {
+            return null
+        }
+
+        BandCueDiscoveryResponse(
+            roomCode = parsed.optString("roomCode").uppercase(Locale.US),
+            port = port,
+            host = host
+        )
+    } catch (_: Exception) {
+        null
+    }
+}
+
 private fun localCandidates(port: Int, expectedRoomCode: String? = null): List<RoomDiscoveryCandidate> =
     DISCOVERY_LOCAL_HOSTS.map { host -> roomDiscoveryCandidate(host, port, expectedRoomCode) }
 
@@ -215,6 +392,23 @@ private fun lanScanCandidates(port: Int, expectedRoomCode: String? = null): List
     return prioritizeScanSubnets(localScanSubnets()).flatMap { subnet ->
         (1..254).map { host -> roomDiscoveryCandidate("$subnet.$host", port, expectedRoomCode) }
     }
+}
+
+private fun buildWeakSignalLanScanCandidates(
+    locator: String,
+    defaultPort: Int,
+    subnetLimit: Int = WEAK_SIGNAL_SUBNET_LIMIT
+): List<RoomDiscoveryCandidate> {
+    val value = normalizeRoomLocator(locator, defaultPort)
+    if (!isPort(value) && !isRoomCode(value)) {
+        return emptyList()
+    }
+
+    val expectedRoomCode = if (isRoomCode(value)) value.uppercase(Locale.US) else null
+    val port = if (isPort(value)) value.toInt() else defaultPort
+    return prioritizeScanSubnets(localScanSubnets())
+        .take(subnetLimit)
+        .flatMap { subnet -> (1..254).map { host -> roomDiscoveryCandidate("$subnet.$host", port, expectedRoomCode) } }
 }
 
 // Extracts the /24 subnet prefix ("a.b.c") from a private-LAN IPv4 address, or
@@ -271,6 +465,61 @@ fun roomDiscoveryCandidate(
     )
 }
 
+private fun uniqueCandidates(candidates: List<RoomDiscoveryCandidate>): List<RoomDiscoveryCandidate> {
+    val seen = linkedSetOf<String>()
+    return candidates.filter { seen.add(it.apiUrl) }
+}
+
+private fun normalizeKnownHost(host: String?): String? {
+    val trimmed = host?.trim().orEmpty()
+    if (trimmed.isBlank() || trimmed == "localhost" || trimmed == "127.0.0.1") {
+        return null
+    }
+    return try {
+        URL("http://$trimmed").host.takeIf { it.isNotBlank() }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun broadcastHosts(): List<String> {
+    val hosts = linkedSetOf("255.255.255.255")
+    try {
+        Collections.list(NetworkInterface.getNetworkInterfaces())
+            .filter { runCatching { it.isUp && !it.isLoopback }.getOrDefault(false) }
+            .flatMap { iface ->
+                iface.interfaceAddresses
+                    .mapNotNull { address -> broadcastAddress(address.address?.hostAddress, address.networkPrefixLength) }
+            }
+            .forEach { hosts.add(it) }
+    } catch (_: Exception) {
+        // The global broadcast address above is still worth trying.
+    }
+    return hosts.toList()
+}
+
+private fun broadcastAddress(address: String?, prefixLength: Short): String? {
+    val match = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$")
+        .matchEntire(address?.trim().orEmpty()) ?: return null
+    if (prefixLength !in 0..32) {
+        return null
+    }
+    val octets = match.groupValues.drop(1).map { it.toInt() }
+    if (octets.any { it > 255 }) {
+        return null
+    }
+
+    val value = octets.fold(0) { result, part -> (result shl 8) or part }
+    val mask = if (prefixLength.toInt() == 0) 0 else (-1 shl (32 - prefixLength.toInt()))
+    val broadcast = value or mask.inv()
+    return listOf(
+        (broadcast ushr 24) and 255,
+        (broadcast ushr 16) and 255,
+        (broadcast ushr 8) and 255,
+        broadcast and 255
+    ).joinToString(".")
+}
+
 private fun parseHostAndPort(value: String, defaultPort: Int): Pair<String, Int>? {
     return try {
         val url = URL("http://$value")
@@ -285,3 +534,11 @@ private fun parseHostAndPort(value: String, defaultPort: Int): Pair<String, Int>
         null
     }
 }
+
+private const val DIRECT_PROBE_TIMEOUT_MS = 1000
+private const val MDNS_PROBE_TIMEOUT_MS = 1500
+private const val WEAK_SIGNAL_PROBE_TIMEOUT_MS = 3000
+private const val LAN_SCAN_FAST_TIMEOUT_MS = 450
+private const val LAN_SCAN_WEAK_SIGNAL_TIMEOUT_MS = 900
+private const val UDP_DISCOVERY_TIMEOUT_MS = 900
+private const val WEAK_SIGNAL_SUBNET_LIMIT = 6

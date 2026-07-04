@@ -48,7 +48,7 @@ class RoomLocatorTest {
 
     @Test
     fun buildsDocumentedLanScanCandidates() {
-        val candidates = buildRoomDiscoveryCandidates("A1B2C3", 5000)
+        val candidates = buildLanScanCandidates("A1B2C3", 5000)
 
         assertEquals(
             listOf(
@@ -70,6 +70,63 @@ class RoomLocatorTest {
         assertTrue(candidates.any { it.apiUrl == "http://172.20.10.254:5000/api/room" })
         assertTrue(candidates.all { it.expectedRoomCode == "A1B2C3" })
         assertTrue(formatLanScanSubnets().contains("192.168.86.1-254"))
+    }
+
+    @Test
+    fun directDiscoveryCandidatesDoNotIncludeFullLanScan() {
+        val candidates = buildRoomDiscoveryCandidates("A1B2C3", 5000)
+
+        assertEquals(
+            listOf(
+                "http://10.0.2.2:5000/api/room",
+                "http://127.0.0.1:5000/api/room",
+                "http://localhost:5000/api/room"
+            ),
+            candidates.map { it.apiUrl }
+        )
+    }
+
+    @Test
+    fun buildsMdnsCandidatesForRoomCodesAndPorts() {
+        val roomCandidates = buildMdnsDiscoveryCandidates("A1B2C3", 5000)
+        val portCandidates = buildMdnsDiscoveryCandidates("5000")
+
+        assertEquals(
+            listOf(
+                "http://bandcue-a1b2c3.local:5000/api/room",
+                "http://bandcue.local:5000/api/room"
+            ),
+            roomCandidates.map { it.apiUrl }
+        )
+        assertEquals(listOf("http://bandcue.local:5000/api/room"), portCandidates.map { it.apiUrl })
+    }
+
+    @Test
+    fun buildsKnownHostCandidatesForFastReconnects() {
+        val candidates = buildKnownHostCandidates(
+            "A1B2C3",
+            listOf("192.168.178.40", "localhost", "192.168.178.40"),
+            5000
+        )
+
+        assertEquals(listOf("http://192.168.178.40:5000/api/room"), candidates.map { it.apiUrl })
+        assertEquals("A1B2C3", candidates.first().expectedRoomCode)
+    }
+
+    @Test
+    fun parsesUdpDiscoveryResponses() {
+        val response = parseDiscoveryResponse(
+            JSONObject()
+                .put("type", DISCOVERY_RESPONSE_TYPE)
+                .put("protocol", DISCOVERY_PROTOCOL_VERSION)
+                .put("roomCode", "a1b2c3")
+                .put("port", 4173)
+                .toString(),
+            "192.168.1.12"
+        )
+
+        assertEquals(BandCueDiscoveryResponse("A1B2C3", 4173, "192.168.1.12"), response)
+        assertNull(parseDiscoveryResponse("""{"type":"wrong"}""", "192.168.1.12"))
     }
 
     @Test

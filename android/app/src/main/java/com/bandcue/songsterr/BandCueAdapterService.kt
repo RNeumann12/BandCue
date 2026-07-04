@@ -123,9 +123,15 @@ class BandCueAdapterService : Service() {
                 val shouldResolve = lastEndpoint == null ||
                     (reconnectAttempts > 0 && reconnectAttempts % RESOLVE_EVERY_N_ATTEMPTS == 0)
                 val endpoint = if (shouldResolve) {
-                    resolveRoomEndpoint(roomLocator).also { lastEndpoint = it }
+                    resolveRoomEndpoint(roomLocator, knownHosts = knownRoomHosts()).also {
+                        lastEndpoint = it
+                        rememberRoomHost(it.roomUrl)
+                    }
                 } else {
-                    lastEndpoint ?: resolveRoomEndpoint(roomLocator).also { lastEndpoint = it }
+                    lastEndpoint ?: resolveRoomEndpoint(roomLocator, knownHosts = knownRoomHosts()).also {
+                        lastEndpoint = it
+                        rememberRoomHost(it.roomUrl)
+                    }
                 }
                 if (!shouldReconnect) {
                     return@execute
@@ -783,6 +789,32 @@ class BandCueAdapterService : Service() {
         updateNotification()
     }
 
+    private fun knownRoomHosts(): Set<String> {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getStringSet(PREF_KNOWN_HOSTS, emptySet())
+            ?: emptySet()
+    }
+
+    private fun rememberRoomHost(roomUrl: String) {
+        val host = roomHost(roomUrl) ?: return
+        if (host == "localhost" || host == "127.0.0.1") {
+            return
+        }
+        val updated = linkedSetOf(host)
+        updated.addAll(knownRoomHosts().filter { it != host })
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+            .putStringSet(PREF_KNOWN_HOSTS, updated.take(8).toSet())
+            .apply()
+    }
+
+    private fun roomHost(roomUrl: String): String? {
+        return try {
+            java.net.URL(roomUrl).host.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun updateNotification() {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification("$connectionState - $connectionDetail"))
@@ -852,6 +884,7 @@ class BandCueAdapterService : Service() {
         private const val PREFS_NAME = "bandcue-songsterr"
         private const val PREF_AUTO_CONNECT = "autoConnect"
         private const val PREF_INSTRUMENT = "instrument"
+        private const val PREF_KNOWN_HOSTS = "knownHosts"
         private const val RECONNECT_BASE_MS = 1000L
         private const val RECONNECT_CAP_MS = 20000L
         private const val RESOLVE_EVERY_N_ATTEMPTS = 4
