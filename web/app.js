@@ -30,6 +30,8 @@ import {
   formatMs,
   formatSignedMs,
   formatSongMeta,
+  DEFAULT_HOST_HOTKEYS,
+  hostHotkeyActionForEvent,
   parseDurationInput
 } from "./host-logic.js";
 
@@ -157,52 +159,15 @@ if (isHost) {
   elements.hostPanel.hidden = false;
   elements.setlistPanel.hidden = false;
   elements.timingPanel.hidden = false;
+  applyHostHotkeyHints();
+  document.addEventListener("keydown", handleHostHotkey);
   renderSetlist();
 }
 
-elements.playButton?.addEventListener("click", () => {
-  if (transportRequestPending) {
-    return;
-  }
-
-  if (!canHostPlay(lastState)) {
-    setText(elements.hostWarning, playBlockedReason(lastState));
-    return;
-  }
-
-  transportRequestPending = true;
-  send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
-});
-
-elements.stopButton?.addEventListener("click", () => {
-  if (transportRequestPending) {
-    return;
-  }
-
-  // A manual Stop ends any auto-run: don't treat the resulting stop as a song
-  // finishing and advance into the next song.
-  abortSetlistRunner("Setlist mode off (stopped).");
-  transportRequestPending = true;
-  send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
-});
-
-elements.setlistModeToggle?.addEventListener("change", () => {
-  if (elements.setlistModeToggle.checked) {
-    startSetlistRun();
-  } else {
-    const wasActive = lastState && lastState.transport.status !== "stopped";
-    abortSetlistRunner("Setlist mode off.");
-    if (wasActive) {
-      send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
-    }
-  }
-});
-
-elements.armButton?.addEventListener("click", () => {
-  const nextArmed = !lastState?.safety?.armed;
-  publishSafety({ armed: nextArmed });
-});
-
+elements.playButton?.addEventListener("click", requestPlay);
+elements.stopButton?.addEventListener("click", requestStop);
+elements.setlistModeToggle?.addEventListener("change", handleSetlistModeToggle);
+elements.armButton?.addEventListener("click", toggleArm);
 elements.controlModeSelect?.addEventListener("change", () => {
   publishSafety({ controlMode: elements.controlModeSelect.value });
 });
@@ -241,15 +206,8 @@ elements.setlistItems?.addEventListener("click", (event) => {
   }
 });
 
-elements.previousSongButton?.addEventListener("click", () => {
-  if (!setlist.length) return;
-  selectCurrentSong(previousSongIndex(currentSongIndex, setlist.length));
-});
-
-elements.nextSongButton?.addEventListener("click", () => {
-  if (!setlist.length) return;
-  selectCurrentSong(nextSongIndex(currentSongIndex, setlist.length));
-});
+elements.previousSongButton?.addEventListener("click", selectPreviousSong);
+elements.nextSongButton?.addEventListener("click", selectNextSong);
 
 elements.clearSongButton?.addEventListener("click", () => {
   currentSongIndex = -1;
@@ -257,9 +215,7 @@ elements.clearSongButton?.addEventListener("click", () => {
   renderSetlist();
 });
 
-elements.openSongButton?.addEventListener("click", () => {
-  openCurrentSong();
-});
+elements.openSongButton?.addEventListener("click", openCurrentSong);
 
 elements.exportSetlistButton?.addEventListener("click", () => {
   exportSetlist();
@@ -295,6 +251,104 @@ setInterval(updateCountdown, 60);
 // Re-evaluate the loading->play settle on a timer: once an adapter is stably
 // ready it stops sending status, so room-state events alone may not fire again.
 setInterval(tickSetlistLoading, 250);
+
+function requestPlay() {
+  if (transportRequestPending) {
+    return;
+  }
+
+  if (!canHostPlay(lastState)) {
+    setText(elements.hostWarning, playBlockedReason(lastState));
+    return;
+  }
+
+  transportRequestPending = true;
+  send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
+}
+
+function requestStop() {
+  if (transportRequestPending) {
+    return;
+  }
+
+  if (!lastState || lastState.transport.status === "stopped") {
+    return;
+  }
+
+  // A manual Stop ends any auto-run: don't treat the resulting stop as a song
+  // finishing and advance into the next song.
+  abortSetlistRunner("Setlist mode off (stopped).");
+  transportRequestPending = true;
+  send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
+}
+
+function handleSetlistModeToggle() {
+  if (elements.setlistModeToggle.checked) {
+    startSetlistRun();
+  } else {
+    const wasActive = lastState && lastState.transport.status !== "stopped";
+    abortSetlistRunner("Setlist mode off.");
+    if (wasActive) {
+      send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
+    }
+  }
+}
+
+function toggleArm() {
+  const nextArmed = !lastState?.safety?.armed;
+  publishSafety({ armed: nextArmed });
+}
+
+function selectPreviousSong() {
+  if (!setlist.length) return;
+  selectCurrentSong(previousSongIndex(currentSongIndex, setlist.length));
+}
+
+function selectNextSong() {
+  if (!setlist.length) return;
+  selectCurrentSong(nextSongIndex(currentSongIndex, setlist.length));
+}
+
+function toggleSetlistMode() {
+  if (!elements.setlistModeToggle) {
+    return;
+  }
+
+  elements.setlistModeToggle.checked = !elements.setlistModeToggle.checked;
+  handleSetlistModeToggle();
+}
+
+function handleHostHotkey(event) {
+  const action = hostHotkeyActionForEvent(event);
+  if (!action) {
+    return;
+  }
+
+  event.preventDefault();
+  const handler = {
+    "toggle-arm": toggleArm,
+    play: requestPlay,
+    stop: requestStop,
+    "next-song": selectNextSong,
+    "previous-song": selectPreviousSong,
+    "open-current-song": openCurrentSong,
+    "toggle-setlist-mode": toggleSetlistMode
+  }[action];
+  handler?.();
+}
+
+function applyHostHotkeyHints() {
+  for (const hotkey of DEFAULT_HOST_HOTKEYS) {
+    const element = document.querySelector(`[data-hotkey-action="${hotkey.action}"]`);
+    if (!element) {
+      continue;
+    }
+
+    const label = element.dataset.hotkeyLabel || element.textContent.trim() || hotkey.action;
+    element.title = `${label} (${hotkey.label})`;
+    element.setAttribute("aria-keyshortcuts", hotkey.label.replace("Ctrl", "Control"));
+  }
+}
 
 function connect() {
   if (reconnectTimer) {

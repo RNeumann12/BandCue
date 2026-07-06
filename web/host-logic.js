@@ -338,6 +338,52 @@ export function shouldAdvanceSetlistOnStop(state, previousTransportStatus) {
     state.transport.stopReason === "auto-playback-ended";
 }
 
+// --- Host hotkeys ---------------------------------------------------------
+
+export const DEFAULT_HOST_HOTKEYS = Object.freeze([
+  { action: "toggle-arm", key: "a", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+A" },
+  { action: "play", key: "p", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+P" },
+  { action: "stop", key: "s", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+S" },
+  { action: "next-song", key: "n", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+N" },
+  { action: "previous-song", key: "b", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+B" },
+  { action: "open-current-song", key: "o", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+O" },
+  { action: "toggle-setlist-mode", key: "r", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+R" }
+]);
+
+export function hostHotkeyActionForEvent(event) {
+  if (!event || event.repeat || isEditableHotkeyTarget(event.target)) {
+    return undefined;
+  }
+
+  const key = String(event.key || "").toLowerCase();
+  const match = DEFAULT_HOST_HOTKEYS.find((hotkey) => (
+    hotkey.key === key &&
+    Boolean(event.ctrlKey) === hotkey.ctrlKey &&
+    Boolean(event.altKey) === hotkey.altKey &&
+    Boolean(event.shiftKey) === hotkey.shiftKey &&
+    Boolean(event.metaKey) === hotkey.metaKey
+  ));
+
+  return match?.action;
+}
+
+function isEditableHotkeyTarget(target) {
+  if (!target || typeof target !== "object") {
+    return false;
+  }
+
+  if (target.isContentEditable) {
+    return true;
+  }
+
+  const tagName = String(target.tagName || "").toLowerCase();
+  if (["input", "select", "textarea"].includes(tagName)) {
+    return true;
+  }
+
+  return typeof target.closest === "function" && Boolean(target.closest("[contenteditable=''], [contenteditable='true']"));
+}
+
 export function collectWarnings(state, readyAdapters, desktopAdapters) {
   const warnings = [];
 

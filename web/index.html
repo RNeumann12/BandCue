@@ -48,9 +48,9 @@
 
       <section class="host-panel" id="hostPanel" hidden>
         <div class="host-actions">
-          <button class="secondary arm" id="armButton" type="button">Arm</button>
-          <button class="primary" id="playButton" type="button">Play</button>
-          <button class="secondary" id="stopButton" type="button">Stop</button>
+          <button class="secondary arm" id="armButton" type="button" data-hotkey-action="toggle-arm">Arm</button>
+          <button class="primary" id="playButton" type="button" data-hotkey-action="play">Play</button>
+          <button class="secondary" id="stopButton" type="button" data-hotkey-action="stop">Stop</button>
         </div>
         <div class="safety-controls">
           <label>
@@ -62,6 +62,16 @@
             </select>
           </label>
           <span class="safety-state" id="safetyState">Not armed</span>
+        </div>
+        <div class="hotkey-hints" aria-label="Host keyboard shortcuts">
+          <span>Hotkeys</span>
+          <kbd>Ctrl+Alt+A</kbd> Arm
+          <kbd>Ctrl+Alt+P</kbd> Play
+          <kbd>Ctrl+Alt+S</kbd> Stop
+          <kbd>Ctrl+Alt+N</kbd> Next
+          <kbd>Ctrl+Alt+B</kbd> Previous
+          <kbd>Ctrl+Alt+O</kbd> Open
+          <kbd>Ctrl+Alt+R</kbd> Setlist
         </div>
         <p class="host-warning" id="hostWarning"></p>
       </section>
@@ -144,17 +154,17 @@
             </div>
           </form>
           <div class="setlist-controls">
-            <button class="secondary compact" id="previousSongButton" type="button">Previous</button>
-            <button class="secondary compact" id="nextSongButton" type="button">Next</button>
+            <button class="secondary compact" id="previousSongButton" type="button" data-hotkey-action="previous-song">Previous</button>
+            <button class="secondary compact" id="nextSongButton" type="button" data-hotkey-action="next-song">Next</button>
             <button class="secondary compact" id="clearSongButton" type="button">Clear Current</button>
-            <button class="secondary compact" id="openSongButton" type="button">Open Current Song</button>
+            <button class="secondary compact" id="openSongButton" type="button" data-hotkey-action="open-current-song">Open Current Song</button>
             <button class="secondary compact" id="exportSetlistButton" type="button">Export</button>
             <button class="secondary compact" id="importSetlistButton" type="button">Import</button>
             <input id="importSetlistInput" type="file" accept="application/json,.json" hidden />
           </div>
           <div class="setlist-mode-row">
             <label class="setlist-mode">
-              <input id="setlistModeToggle" type="checkbox" />
+              <input id="setlistModeToggle" type="checkbox" data-hotkey-action="toggle-setlist-mode" data-hotkey-label="Setlist mode" />
               <span>Setlist mode: auto-load &amp; play each song, advance at the end</span>
             </label>
             <span class="small" id="setlistModeStatus"></span>

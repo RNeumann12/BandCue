@@ -263,7 +263,37 @@ button:disabled {
   color: white;
 }
 
+.hotkey-hints {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.hotkey-hints span {
+  color: var(--accent);
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+kbd {
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 0.72rem;
+  font-weight: 900;
+}
+
 .host-warning {
+  grid-column: 1 / -1;
   margin: 0;
   color: var(--muted);
   font-weight: 800;

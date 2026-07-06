@@ -9,6 +9,7 @@ import {
   canHostPlay,
   clampManualOffset,
   collectWarnings,
+  DEFAULT_HOST_HOTKEYS,
   formatElapsed,
   formatMs,
   formatSignedMs,
@@ -17,6 +18,7 @@ import {
   getReadyAdapters,
   getSongsterrUrl,
   getTimingQuality,
+  hostHotkeyActionForEvent,
   isOpenableSong,
   median,
   nextSongIndex,
@@ -304,6 +306,54 @@ describe("transport and safety decisions", () => {
     expect(playBlockedReason(armedStoppedState([]))).toMatch(/No ready desktop adapter/);
     expect(playBlockedReason({ ...armedStoppedState([readyAdapter()]), safety: { armed: false } }))
       .toMatch(/Arm playback/);
+  });
+});
+
+describe("host hotkeys", () => {
+  const eventFor = (key: string, overrides: Record<string, unknown> = {}) => ({
+    key,
+    ctrlKey: true,
+    altKey: true,
+    shiftKey: false,
+    metaKey: false,
+    repeat: false,
+    ...overrides
+  });
+
+  it("maps every default host hotkey action", () => {
+    for (const hotkey of DEFAULT_HOST_HOTKEYS) {
+      expect(hostHotkeyActionForEvent(eventFor(hotkey.key.toUpperCase()))).toBe(hotkey.action);
+    }
+  });
+
+  it("requires the exact modifier combination", () => {
+    expect(hostHotkeyActionForEvent(eventFor("p", { ctrlKey: false }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", { altKey: false }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", { shiftKey: true }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", { metaKey: true }))).toBeUndefined();
+  });
+
+  it("ignores repeated keydown events and common conflicting shortcuts", () => {
+    expect(hostHotkeyActionForEvent(eventFor("p", { repeat: true }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("s", { altKey: false, shiftKey: true }))).toBeUndefined();
+  });
+
+  it("ignores editable targets", () => {
+    expect(hostHotkeyActionForEvent(eventFor("p", { target: { tagName: "INPUT" } }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", { target: { tagName: "select" } }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", { target: { tagName: "textarea" } }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", { target: { isContentEditable: true } }))).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("p", {
+      target: {
+        tagName: "SPAN",
+        closest: (selector: string) => selector.includes("contenteditable")
+      }
+    }))).toBeUndefined();
+  });
+
+  it("returns undefined for non-hotkey events", () => {
+    expect(hostHotkeyActionForEvent(undefined)).toBeUndefined();
+    expect(hostHotkeyActionForEvent(eventFor("x"))).toBeUndefined();
   });
 });
 
