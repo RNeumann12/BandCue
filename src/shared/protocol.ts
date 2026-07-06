@@ -191,6 +191,11 @@ export interface SetlistSong {
   museScoreSource?: string;
   durationMs?: number;
   durationSource?: SongDurationSource;
+  helixSyncEnabled?: boolean;
+  helixBpm?: number;
+  helixBeatsPerMeasure?: number;
+  helixTargetMeasure?: number;
+  helixOffsetMs?: number;
   notes?: string;
 }
 

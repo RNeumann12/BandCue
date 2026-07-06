@@ -84,6 +84,133 @@ describe("RoomController", () => {
     });
   });
 
+  it("schedules Helix-enabled songs from measure metadata", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1100,
+      song: {
+        id: "song-1",
+        title: "Helix Song",
+        sourceType: "other",
+        helixSyncEnabled: true,
+        helixBpm: 120,
+        helixBeatsPerMeasure: 4,
+        helixTargetMeasure: 2,
+        helixOffsetMs: -80
+      }
+    }, 1100);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    expect(room.getState(1200).transport).toMatchObject({
+      status: "scheduled",
+      leaderId: host.id,
+      sequenceId: 1,
+      scheduledServerTime: 3120
+    });
+    expect(room.getState(1200).safety.armed).toBe(false);
+  });
+
+  it("rejects Helix sync when the musical target leaves too little lead time", () => {
+    const hostMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1100,
+      song: {
+        id: "song-1",
+        title: "Too Soon",
+        sourceType: "other",
+        helixSyncEnabled: true,
+        helixBpm: 200,
+        helixBeatsPerMeasure: 4,
+        helixTargetMeasure: 2,
+        helixOffsetMs: 0
+      }
+    }, 1100);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+    hostMessages.length = 0;
+
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    expect(room.getState(1200).transport.status).toBe("stopped");
+    expect(room.getState(1200).safety.armed).toBe(true);
+    expect(hostMessages.map((message) => JSON.parse(message)).find((message) => message.type === "error"))
+      .toMatchObject({
+        message: expect.stringContaining("Helix sync target is 1200 ms away")
+      });
+  });
+
+  it("still attaches per-device manual offsets to Helix-scheduled play commands", () => {
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "calibrationUpdate",
+      targetClientId: adapter.id,
+      manualOffsetMs: 35
+    }, 1050);
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1100,
+      song: {
+        id: "song-1",
+        title: "Helix Song",
+        sourceType: "songsterr",
+        helixSyncEnabled: true,
+        helixBpm: 120,
+        helixBeatsPerMeasure: 4,
+        helixTargetMeasure: 2,
+        helixOffsetMs: 0
+      }
+    }, 1100);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+    adapterMessages.length = 0;
+
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    const playCommand = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "transportCommand" && message.action === "play");
+    expect(playCommand).toMatchObject({
+      scheduledServerTime: 3200,
+      manualOffsetMs: 35
+    });
+  });
+
   it("stores clock telemetry from clients", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const client = room.addClient(undefined, {

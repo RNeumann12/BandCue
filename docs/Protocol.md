@@ -240,6 +240,11 @@ A targeted failure reply (e.g. a rejected transport request or a non-host mutati
   "museScoreSource": "CCR/Bad Moon Rising",  // optional, relative path or title for MuseScore
   "durationMs": 138000,             // optional
   "durationSource": "adapter",      // adapter | manual
+  "helixSyncEnabled": true,         // optional; Helix sends Play at measure 1 beat 1
+  "helixBpm": 120,                  // optional; constant-BPM v1
+  "helixBeatsPerMeasure": 4,        // optional; defaults to 4 in host UI
+  "helixTargetMeasure": 2,          // optional; start after measure 1 by default
+  "helixOffsetMs": -80,             // optional; whole-room offset against Helix timeline
   "notes": "capo 2"                 // optional
 }
 ```
@@ -248,6 +253,9 @@ A single song can target multiple apps. `song-sources.ts` resolves each app's re
 dedicated field (`songsterrUrl` / `museScoreSource`) wins, else `source` is used when the
 primary `sourceType` matches that app. For Songsterr adapters, `songsterrBassUrl` and
 `songsterrDrumUrl` override the main Songsterr URL for members who selected those instruments.
+When `helixSyncEnabled` is true, the server schedules Play from the Helix fields instead of the
+normal adaptive count-in. The target must still leave enough lead time for the room; otherwise Play
+is rejected rather than started late.
 
 ### `SongCatalogStatus` / `SongCatalogEntry` / `SongCatalogMatch`
 Privacy-safe local MuseScore library data published by a bridge/helper. Entries carry only a

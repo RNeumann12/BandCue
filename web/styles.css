@@ -376,6 +376,39 @@ label {
   text-transform: uppercase;
 }
 
+.helix-sync {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(140px, 1fr) repeat(4, minmax(110px, 0.8fr));
+  gap: 10px;
+  align-items: end;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.helix-sync legend {
+  color: var(--accent);
+  font-size: 0.74rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  padding: 0 5px;
+}
+
+.helix-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 45px;
+  cursor: pointer;
+}
+
+.helix-toggle input {
+  width: 18px;
+  height: 18px;
+}
+
 input,
 select {
   width: 100%;
@@ -747,6 +780,7 @@ body[data-transport="running"] .countdown {
   .transport-deck,
   .grid,
   .setlist-form,
+  .helix-sync,
   .timing-row {
     grid-template-columns: 1fr;
   }

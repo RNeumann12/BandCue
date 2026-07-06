@@ -18,6 +18,7 @@ import {
   getReadyAdapters,
   getSongsterrUrl,
   getTimingQuality,
+  helixDelayMsForSong,
   hostHotkeyActionForEvent,
   isOpenableSong,
   median,
@@ -28,6 +29,7 @@ import {
   playBlockedReason,
   previousSongIndex,
   sanitizeDurationMs,
+  sanitizeHelixBpm,
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
   summarizeClock
@@ -126,6 +128,32 @@ describe("song normalization", () => {
   it("preserves a valid adapter duration source from storage", () => {
     expect(normalizeStoredSong({ title: "A", durationMs: 2000, durationSource: "adapter" }))
       .toMatchObject({ durationMs: 2000, durationSource: "adapter" });
+  });
+
+  it("preserves Helix sync metadata from storage", () => {
+    expect(normalizeStoredSong({
+      title: "A",
+      helixSyncEnabled: true,
+      helixBpm: 123.456,
+      helixBeatsPerMeasure: 3,
+      helixTargetMeasure: 2,
+      helixOffsetMs: -80
+    })).toMatchObject({
+      helixSyncEnabled: true,
+      helixBpm: 123.46,
+      helixBeatsPerMeasure: 3,
+      helixTargetMeasure: 2,
+      helixOffsetMs: -80
+    });
+  });
+
+  it("defaults old stored songs to Helix sync disabled", () => {
+    expect(normalizeStoredSong({ title: "Old song" })).toMatchObject({
+      helixSyncEnabled: false,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 2,
+      helixOffsetMs: 0
+    });
   });
 
   it("trims alternate Songsterr URLs from storage", () => {
@@ -309,6 +337,48 @@ describe("transport and safety decisions", () => {
   });
 });
 
+describe("Helix sync timing", () => {
+  it("sanitizes BPM with the supported range and precision", () => {
+    expect(sanitizeHelixBpm(123.456)).toBe(123.46);
+    expect(sanitizeHelixBpm(19.9)).toBeUndefined();
+    expect(sanitizeHelixBpm(401)).toBeUndefined();
+    expect(sanitizeHelixBpm("abc")).toBeUndefined();
+  });
+
+  it("converts measures to milliseconds and applies signed offset", () => {
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBpm: 120,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 2,
+      helixOffsetMs: 0
+    })).toBe(2000);
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBpm: 100,
+      helixBeatsPerMeasure: 3,
+      helixTargetMeasure: 2,
+      helixOffsetMs: 0
+    })).toBe(1800);
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBpm: 120,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 3,
+      helixOffsetMs: -80
+    })).toBe(3920);
+  });
+
+  it("returns undefined when Helix sync is disabled or incomplete", () => {
+    expect(helixDelayMsForSong({ helixSyncEnabled: false })).toBeUndefined();
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 2
+    })).toBeUndefined();
+  });
+});
+
 describe("host hotkeys", () => {
   const eventFor = (key: string, overrides: Record<string, unknown> = {}) => ({
     key,
@@ -452,5 +522,16 @@ describe("formatting", () => {
     expect(formatSongMeta({ sourceType: "musescore", durationMs: 65_000, durationSource: "adapter" }, 2, 4))
       .toBe("2 / 4 - MuseScore - 01:05 (adapter)");
     expect(formatSongMeta({ sourceType: "other" }, 0, 0)).toBe("setlist - Other");
+  });
+
+  it("includes Helix sync timing in song meta", () => {
+    expect(formatSongMeta({
+      sourceType: "other",
+      helixSyncEnabled: true,
+      helixBpm: 120,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 2,
+      helixOffsetMs: -80
+    }, 1, 1)).toBe("1 / 1 - Other - Helix: 120 BPM, 4/4, start M2, -80 ms");
   });
 });

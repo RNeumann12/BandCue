@@ -22,6 +22,11 @@ export function normalizeDurationSource(value) {
   return value === "adapter" || value === "manual" ? value : "manual";
 }
 
+export const HELIX_MIN_BPM = 20;
+export const HELIX_MAX_BPM = 400;
+export const HELIX_MAX_BEATS_PER_MEASURE = 16;
+export const HELIX_MAX_TARGET_MEASURE = 128;
+
 // Trim a setlist song for publishing/persisting: drop empty optional fields and
 // only keep a duration source when there is a usable duration.
 export function normalizeSong(song) {
@@ -40,6 +45,11 @@ export function normalizeSong(song) {
     museScoreSource: song.museScoreSource || undefined,
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
+    helixSyncEnabled: Boolean(song.helixSyncEnabled),
+    helixBpm: sanitizeHelixBpm(song.helixBpm),
+    helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure),
+    helixTargetMeasure: sanitizeHelixTargetMeasure(song.helixTargetMeasure),
+    helixOffsetMs: clampHelixOffsetMs(song.helixOffsetMs),
     notes: song.notes || undefined
   };
 }
@@ -66,8 +76,71 @@ export function normalizeStoredSong(song) {
     museScoreSource: typeof song.museScoreSource === "string" ? song.museScoreSource.trim() : "",
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
+    helixSyncEnabled: Boolean(song.helixSyncEnabled),
+    helixBpm: sanitizeHelixBpm(Number(song.helixBpm)),
+    helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(Number(song.helixBeatsPerMeasure)) ?? 4,
+    helixTargetMeasure: sanitizeHelixTargetMeasure(Number(song.helixTargetMeasure)) ?? 2,
+    helixOffsetMs: clampHelixOffsetMs(Number(song.helixOffsetMs)),
     notes: typeof song.notes === "string" ? song.notes.trim() : ""
   };
+}
+
+export function sanitizeHelixBpm(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(number * 100) / 100;
+  return rounded >= HELIX_MIN_BPM && rounded <= HELIX_MAX_BPM ? rounded : undefined;
+}
+
+export function sanitizeHelixBeatsPerMeasure(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(number);
+  return rounded >= 1 && rounded <= HELIX_MAX_BEATS_PER_MEASURE ? rounded : undefined;
+}
+
+export function sanitizeHelixTargetMeasure(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(number);
+  return rounded >= 1 && rounded <= HELIX_MAX_TARGET_MEASURE ? rounded : undefined;
+}
+
+export function clampHelixOffsetMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return 0;
+  }
+
+  return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(number)));
+}
+
+export function helixMeasureDurationMs(bpm, beatsPerMeasure) {
+  return beatsPerMeasure * 60000 / bpm;
+}
+
+export function helixDelayMsForSong(song) {
+  if (!song?.helixSyncEnabled) {
+    return undefined;
+  }
+
+  const bpm = sanitizeHelixBpm(song.helixBpm);
+  const beatsPerMeasure = sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure);
+  const targetMeasure = sanitizeHelixTargetMeasure(song.helixTargetMeasure);
+  if (!bpm || !beatsPerMeasure || !targetMeasure) {
+    return undefined;
+  }
+
+  return Math.round((targetMeasure - 1) * helixMeasureDurationMs(bpm, beatsPerMeasure) + clampHelixOffsetMs(song.helixOffsetMs));
 }
 
 // Setlist navigation. -1 means "no selection". length 0 yields -1.
@@ -503,5 +576,23 @@ export function formatSongMeta(song, index, total) {
   const duration = song.durationMs
     ? ` - ${formatElapsed(song.durationMs)} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
     : "";
-  return `${position} - ${source}${duration}${reference}`;
+  const helix = formatHelixMeta(song);
+  return `${position} - ${source}${duration}${helix}${reference}`;
+}
+
+export function formatHelixMeta(song) {
+  if (!song?.helixSyncEnabled) {
+    return "";
+  }
+
+  const bpm = sanitizeHelixBpm(song.helixBpm);
+  const beatsPerMeasure = sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure);
+  const targetMeasure = sanitizeHelixTargetMeasure(song.helixTargetMeasure);
+  if (!bpm || !beatsPerMeasure || !targetMeasure) {
+    return " - Helix: needs BPM";
+  }
+
+  const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
+  const offset = offsetMs ? `, ${formatSignedMs(offsetMs)}` : "";
+  return ` - Helix: ${bpm} BPM, ${beatsPerMeasure}/4, start M${targetMeasure}${offset}`;
 }

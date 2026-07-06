@@ -1,4 +1,5 @@
 import type { ControlMode, RoomClientSummary, TransportAction, TransportState } from "./protocol.js";
+import type { SetlistSong } from "./protocol.js";
 
 export const DEFAULT_SCHEDULE_DELAY_MS = 1500;
 
@@ -6,6 +7,10 @@ export const DEFAULT_SCHEDULE_DELAY_MS = 1500;
 // latency (e.g. Bluetooth speakers/headphones) on top of the automatic clock
 // offset compensation. Mirrored in web/host-logic.js and the manual-offset input.
 export const MANUAL_OFFSET_LIMIT_MS = 5000;
+export const HELIX_MIN_BPM = 20;
+export const HELIX_MAX_BPM = 400;
+export const HELIX_MAX_BEATS_PER_MEASURE = 16;
+export const HELIX_MAX_TARGET_MEASURE = 128;
 
 // Upper bound for the dynamic count-in so one terrible outlier cannot stretch
 // the wait absurdly; beyond this the device is better served by calibration.
@@ -48,6 +53,64 @@ export interface TransportDecision {
 export interface SafetyOptions {
   armed?: boolean;
   controlMode?: ControlMode;
+}
+
+export function sanitizeHelixBpm(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value * 100) / 100;
+  return rounded >= HELIX_MIN_BPM && rounded <= HELIX_MAX_BPM ? rounded : undefined;
+}
+
+export function sanitizeHelixBeatsPerMeasure(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded >= 1 && rounded <= HELIX_MAX_BEATS_PER_MEASURE ? rounded : undefined;
+}
+
+export function sanitizeHelixTargetMeasure(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded >= 1 && rounded <= HELIX_MAX_TARGET_MEASURE ? rounded : undefined;
+}
+
+export function clampHelixOffsetMs(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(value)));
+}
+
+export function helixMeasureDurationMs(bpm: number, beatsPerMeasure: number): number {
+  return beatsPerMeasure * 60_000 / bpm;
+}
+
+export function helixDelayMsForSong(song: Pick<
+  SetlistSong,
+  "helixSyncEnabled" | "helixBpm" | "helixBeatsPerMeasure" | "helixTargetMeasure" | "helixOffsetMs"
+>): number | undefined {
+  if (!song.helixSyncEnabled) {
+    return undefined;
+  }
+
+  const bpm = sanitizeHelixBpm(song.helixBpm);
+  const beatsPerMeasure = sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure);
+  const targetMeasure = sanitizeHelixTargetMeasure(song.helixTargetMeasure);
+  if (!bpm || !beatsPerMeasure || !targetMeasure) {
+    return undefined;
+  }
+
+  const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
+  return Math.round((targetMeasure - 1) * helixMeasureDurationMs(bpm, beatsPerMeasure) + offsetMs);
 }
 
 export function hasReadyTransportCapability(client: RoomClientSummary): boolean {

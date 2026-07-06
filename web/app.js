@@ -26,6 +26,7 @@ import {
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
   collectWarnings,
+  clampHelixOffsetMs,
   formatElapsed,
   formatMs,
   formatSignedMs,
@@ -91,6 +92,11 @@ const elements = {
   songSongsterrDrumUrlInput: document.querySelector("#songSongsterrDrumUrlInput"),
   songMuseScoreSourceInput: document.querySelector("#songMuseScoreSourceInput"),
   songDurationInput: document.querySelector("#songDurationInput"),
+  songHelixSyncInput: document.querySelector("#songHelixSyncInput"),
+  songHelixBpmInput: document.querySelector("#songHelixBpmInput"),
+  songHelixBeatsInput: document.querySelector("#songHelixBeatsInput"),
+  songHelixTargetMeasureInput: document.querySelector("#songHelixTargetMeasureInput"),
+  songHelixOffsetInput: document.querySelector("#songHelixOffsetInput"),
   songNotesInput: document.querySelector("#songNotesInput"),
   previousSongButton: document.querySelector("#previousSongButton"),
   nextSongButton: document.querySelector("#nextSongButton"),
@@ -946,6 +952,7 @@ function readSongForm() {
   }
 
   const durationMs = parseDurationInput(elements.songDurationInput.value);
+  const helixSyncEnabled = elements.songHelixSyncInput.checked;
   return {
     title,
     sourceType: elements.songSourceTypeInput.value,
@@ -956,6 +963,13 @@ function readSongForm() {
     museScoreSource: elements.songMuseScoreSourceInput.value.trim(),
     durationMs,
     durationSource: durationMs ? "manual" : undefined,
+    helixSyncEnabled,
+    helixBpm: elements.songHelixBpmInput.value ? Number(elements.songHelixBpmInput.value) : undefined,
+    helixBeatsPerMeasure: elements.songHelixBeatsInput.value ? Number(elements.songHelixBeatsInput.value) : undefined,
+    helixTargetMeasure: elements.songHelixTargetMeasureInput.value
+      ? Number(elements.songHelixTargetMeasureInput.value)
+      : undefined,
+    helixOffsetMs: clampHelixOffsetMs(Number(elements.songHelixOffsetInput.value || 0)),
     notes: elements.songNotesInput.value.trim()
   };
 }
@@ -970,6 +984,7 @@ function addSetlistSong() {
   persistSetlist();
   publishSetlist();
   elements.setlistForm.reset();
+  resetHelixFormDefaults();
 
   if (currentSongIndex < 0) {
     currentSongIndex = 0;
@@ -994,6 +1009,11 @@ function startEditSong(index) {
   elements.songSongsterrDrumUrlInput.value = song.songsterrDrumUrl || "";
   elements.songMuseScoreSourceInput.value = song.museScoreSource || "";
   elements.songDurationInput.value = song.durationMs ? formatElapsed(song.durationMs) : "";
+  elements.songHelixSyncInput.checked = Boolean(song.helixSyncEnabled);
+  elements.songHelixBpmInput.value = song.helixBpm || "";
+  elements.songHelixBeatsInput.value = song.helixBeatsPerMeasure || 4;
+  elements.songHelixTargetMeasureInput.value = song.helixTargetMeasure || 2;
+  elements.songHelixOffsetInput.value = song.helixOffsetMs || 0;
   elements.songNotesInput.value = song.notes || "";
 
   setText(elements.setlistSubmitButton, "Save Changes");
@@ -1034,8 +1054,15 @@ function cancelEditSong() {
 function resetEditState() {
   editingSongIndex = -1;
   elements.setlistForm.reset();
+  resetHelixFormDefaults();
   setText(elements.setlistSubmitButton, "Add Song");
   elements.cancelEditButton.hidden = true;
+}
+
+function resetHelixFormDefaults() {
+  elements.songHelixBeatsInput.value = "4";
+  elements.songHelixTargetMeasureInput.value = "2";
+  elements.songHelixOffsetInput.value = "0";
 }
 
 function selectCurrentSong(index) {

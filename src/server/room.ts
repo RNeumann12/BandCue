@@ -26,7 +26,12 @@ import type {
 import {
   DEFAULT_SCHEDULE_DELAY_MS,
   MANUAL_OFFSET_LIMIT_MS,
+  clampHelixOffsetMs,
   decideTransportRequest,
+  helixDelayMsForSong,
+  sanitizeHelixBeatsPerMeasure,
+  sanitizeHelixBpm,
+  sanitizeHelixTargetMeasure,
   scheduleDelayForClients
 } from "../shared/transport.js";
 import {
@@ -438,9 +443,15 @@ export class RoomController {
     // A play's count-in adapts to the room: a transport-capable client on a
     // slow or jittery path gets a longer lead so its command still lands and
     // preps before the downbeat.
-    const delayMs = request.action === "play"
+    const requiredLeadMs = request.action === "play"
       ? scheduleDelayForClients(this.clients.values(), this.scheduleDelayMs)
       : this.scheduleDelayMs;
+    const delayMs = request.action === "play"
+      ? this.delayForPlayRequest(requiredLeadMs, client)
+      : this.scheduleDelayMs;
+    if (delayMs === undefined) {
+      return;
+    }
     const decision = decideTransportRequest(
       this.transport,
       client,
@@ -489,6 +500,32 @@ export class RoomController {
     if (request.action === "play") {
       this.markRunningAt(command.scheduledServerTime);
     }
+  }
+
+  private delayForPlayRequest(requiredLeadMs: number, client: RoomClientSummary): number | undefined {
+    const song = this.currentSong?.song;
+    if (!song?.helixSyncEnabled) {
+      return requiredLeadMs;
+    }
+
+    const helixDelayMs = helixDelayMsForSong(song);
+    if (helixDelayMs === undefined) {
+      this.send(client, {
+        type: "error",
+        message: "Helix sync is enabled for this song, but it needs a valid BPM, beats per measure, and target measure."
+      });
+      return undefined;
+    }
+
+    if (helixDelayMs < requiredLeadMs) {
+      this.send(client, {
+        type: "error",
+        message: `Helix sync target is ${helixDelayMs} ms away, but this room needs ${requiredLeadMs} ms of lead time. Use a later target measure or a larger positive Helix offset.`
+      });
+      return undefined;
+    }
+
+    return helixDelayMs;
   }
 
   private handleOpenSongRequest(
@@ -881,6 +918,11 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     museScoreSource: trimText(song.museScoreSource ?? "", 500) || undefined,
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationSource(song.durationSource),
+    helixSyncEnabled: Boolean(song.helixSyncEnabled),
+    helixBpm: sanitizeHelixBpm(song.helixBpm),
+    helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure),
+    helixTargetMeasure: sanitizeHelixTargetMeasure(song.helixTargetMeasure),
+    helixOffsetMs: clampHelixOffsetMs(song.helixOffsetMs),
     notes: trimText(song.notes ?? "", 500) || undefined
   };
 }
