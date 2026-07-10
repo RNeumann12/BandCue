@@ -80,7 +80,7 @@ Reports the client's summarized clock so the host can show timing quality.
 ```
 
 ### `calibrationUpdate` *(host only)*
-Sets a per-device manual start offset (clamped to ±1000 ms). Negative = earlier, positive = later.
+Sets a per-device manual start offset (clamped to ±5000 ms). Negative = earlier, positive = later.
 
 ```jsonc
 { "type": "calibrationUpdate", "targetClientId": "…", "manualOffsetMs": -30 }

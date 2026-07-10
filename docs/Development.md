@@ -38,6 +38,7 @@ step needed for development).
 ```powershell
 npm run check    # type-check only (tsc --noEmit) — fast feedback
 npm test         # run the vitest unit suite once
+npm run verify   # type-check + full Vitest suite (also runs before release packaging)
 npm run build    # emit compiled JS (tsc -p tsconfig.json)
 ```
 

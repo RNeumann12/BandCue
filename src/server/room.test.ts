@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
-import { RoomController } from "./room.js";
+import { MAX_SETLIST_SONGS, RoomController } from "./room.js";
 
 describe("RoomController", () => {
   it("broadcast state reflects a scheduled mock transport command", () => {
@@ -373,6 +373,40 @@ describe("RoomController", () => {
         controlPath: "windows-sendkeys"
       }
     });
+  });
+
+  it("caps adapter status text before rebroadcasting it", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const client = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "MuseScore",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(client.id, {
+      type: "adapterStatus",
+      app: "musescore",
+      ready: false,
+      title: `  ${"t".repeat(200)}  `,
+      playbackDetail: "p".repeat(700),
+      detail: "d".repeat(700),
+      lastCommand: {
+        action: "play",
+        status: "failed",
+        at: 1234.8,
+        detail: "c".repeat(700),
+        controlPath: "x".repeat(120)
+      }
+    }, 1200);
+
+    const status = room.getState(1300).clients[0]?.status;
+    expect(status?.title).toHaveLength(140);
+    expect(status?.playbackDetail).toHaveLength(500);
+    expect(status?.detail).toHaveLength(500);
+    expect(status?.lastCommand?.detail).toHaveLength(500);
+    expect(status?.lastCommand?.controlPath).toHaveLength(80);
+    expect(status?.lastCommand?.at).toBe(1235);
   });
 
   it("does not broadcast repeated identical adapter status", () => {
@@ -999,6 +1033,40 @@ describe("RoomController", () => {
         { title: "One", sourceType: "songsterr" },
         { title: "Two", sourceType: "musescore" }
       ]
+    });
+  });
+
+  it("rejects oversized setlists without replacing the current setlist", () => {
+    const hostMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "setlistUpdate",
+      updatedAt: 1100,
+      songs: [{ id: "kept", title: "Keep me", sourceType: "other" }]
+    }, 1100);
+    hostMessages.length = 0;
+
+    room.handleMessage(host.id, {
+      type: "setlistUpdate",
+      updatedAt: 1200,
+      songs: Array.from({ length: MAX_SETLIST_SONGS + 1 }, (_, index) => ({
+        id: `song-${index}`,
+        title: `Song ${index}`,
+        sourceType: "other" as const
+      }))
+    }, 1200);
+
+    expect(room.getState(1300).setlist.songs.map((song) => song.id)).toEqual(["kept"]);
+    expect(hostMessages.map((message) => JSON.parse(message))).toContainEqual({
+      type: "error",
+      message: `A setlist can contain at most ${MAX_SETLIST_SONGS} songs.`
     });
   });
 

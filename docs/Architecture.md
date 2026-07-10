@@ -132,7 +132,7 @@ to the top of the song using that platform's official seek API on a best-effort 
 
 ### Per-client manual offset
 
-The host sends `calibrationUpdate { targetClientId, manualOffsetMs }` (clamped to ±1000 ms). The
+The host sends `calibrationUpdate { targetClientId, manualOffsetMs }` (clamped to ±5000 ms). The
 server stores it on the target's clock and includes it in that client's `transportCommand` as
 `manualOffsetMs`. Negative starts earlier, positive later. The host persists offsets by device
 name locally and re-applies them on reconnect.

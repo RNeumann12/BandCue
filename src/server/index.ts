@@ -11,6 +11,7 @@ import { startDiscoveryResponder } from "./discovery.js";
 import { startMdnsResponder } from "./mdns.js";
 import { loadOrCreateRoomIdentity } from "./room-identity.js";
 import { serverNow } from "./server-clock.js";
+import { parsePort } from "./config.js";
 import { selectLanCandidates } from "../shared/lan-address.js";
 import {
   MAX_WS_MESSAGE_BYTES,
@@ -18,9 +19,9 @@ import {
   parseClientMessagePayload
 } from "./message-guards.js";
 
-const PORT = Number(process.env.PORT ?? 4173);
+const PORT = parsePort(process.env.PORT, "PORT");
 const HOST = process.env.HOST ?? "0.0.0.0";
-const DISCOVERY_PORT = Number(process.env.BANDCUE_DISCOVERY_PORT ?? PORT);
+const DISCOVERY_PORT = parsePort(process.env.BANDCUE_DISCOVERY_PORT, "BANDCUE_DISCOVERY_PORT", PORT);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const publicDir = join(__dirname, "../../web");
 // Reuse the token and room code across restarts so a coordinator restart

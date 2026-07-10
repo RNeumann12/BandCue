@@ -14,6 +14,9 @@
     "url": "https://github.com/RNeumann12/BandCue/issues"
   },
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/server/index.ts",
     "dev:all": "tsx src/tools/start-rehearsal.ts",
@@ -29,7 +32,9 @@
     "test:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Task test",
     "build": "tsc -p tsconfig.json",
     "check": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify": "npm run check && npm test",
+    "prepackage:release": "npm run verify"
   },
   "dependencies": {
     "jsqr": "^1.4.0",

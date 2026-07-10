@@ -146,5 +146,5 @@ uses a gitignored keystore — see the notes in [Development.md](Development.md)
 | `DEFAULT_SCHEDULE_DELAY_MS` | 1500 ms | Count-in delay before a scheduled start ([`transport.ts`](../src/shared/transport.ts)). |
 | `DEFAULT_ROOM_PORT` | 4173 | Default HTTP/discovery port ([`room-locator.ts`](../src/shared/room-locator.ts)). |
 | `RECENT_CLOCK_TTL_MS` | 30 s | How long a client's clock is cached across reconnects ([`room.ts`](../src/server/room.ts)). |
-| Manual offset clamp | ±1000 ms | Range for per-device calibration. |
+| Manual offset clamp | ±5000 ms | Range for per-device calibration. |
 </content>

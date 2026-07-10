@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type WebSocket from "ws";
 import type {
   AdapterStatus,
+  AdapterCommandStatus,
   CalibrationUpdate,
   ClientHello,
   ClientMessage,
@@ -61,6 +62,7 @@ const PLAYBACK_END_SETTLE_MS = 750;
 // transport leader still triggers the leader-disconnect Stop promptly.
 const CLIENT_IDLE_TIMEOUT_MS = 12_000;
 const LIVENESS_SWEEP_INTERVAL_MS = 4_000;
+export const MAX_SETLIST_SONGS = 500;
 
 export class RoomController {
   private readonly clients = new Map<string, RoomClient>();
@@ -305,15 +307,17 @@ export class RoomController {
       app: status.app,
       state: status.state ?? (status.ready ? "ready" : "not-ready"),
       playback: status.playback ?? client.status?.playback,
-      playbackDetail: status.playbackDetail ?? client.status?.playbackDetail,
-      title: status.title ?? client.status?.title,
+      playbackDetail: sanitizeStatusText(status.playbackDetail, client.status?.playbackDetail, 500),
+      title: sanitizeStatusText(status.title, client.status?.title, 140),
       source: trimText(status.source ?? client.status?.source ?? "", 500) || undefined,
       durationMs: sanitizeDurationMs(status.durationMs) ?? client.status?.durationMs,
       durationSource: sanitizeDurationSource(status.durationSource) ?? client.status?.durationSource,
       catalog: sanitizeCatalog(status.catalog) ?? client.status?.catalog,
       songMatch: sanitizeSongMatch(status.songMatch) ?? client.status?.songMatch,
-      detail: status.detail ?? client.status?.detail,
-      lastCommand: status.lastCommand ?? client.status?.lastCommand
+      detail: sanitizeStatusText(status.detail, client.status?.detail, 500),
+      lastCommand: status.lastCommand
+        ? sanitizeLastCommand(status.lastCommand)
+        : client.status?.lastCommand
     };
     const songDurationChanged = this.applyAdapterDurationToCurrentSong(client, nextStatus, now);
     const statusChanged = JSON.stringify(client.status ?? null) !== JSON.stringify(nextStatus);
@@ -387,6 +391,14 @@ export class RoomController {
       this.send(client, {
         type: "error",
         message: "Only a host can update the setlist."
+      });
+      return;
+    }
+
+    if (update.songs.length > MAX_SETLIST_SONGS) {
+      this.send(client, {
+        type: "error",
+        message: `A setlist can contain at most ${MAX_SETLIST_SONGS} songs.`
       });
       return;
     }
@@ -951,6 +963,30 @@ function sanitizeOptionalInteger(
 
 function sanitizeDurationSource(value: SongDurationSource | undefined): SongDurationSource | undefined {
   return value === "adapter" || value === "manual" ? value : undefined;
+}
+
+function sanitizeStatusText(
+  value: string | undefined,
+  previous: string | undefined,
+  maxLength: number
+): string | undefined {
+  return value === undefined ? previous : trimText(value, maxLength) || undefined;
+}
+
+function sanitizeLastCommand(
+  command: NonNullable<AdapterStatus["lastCommand"]>
+): NonNullable<AdapterStatus["lastCommand"]> {
+  return {
+    action: command.action,
+    sequenceId: Number.isFinite(command.sequenceId) ? Math.max(0, Math.round(command.sequenceId ?? 0)) : undefined,
+    status: command.status as AdapterCommandStatus,
+    at: Number.isFinite(command.at) ? Math.max(0, Math.round(command.at)) : 0,
+    detail: trimText(command.detail ?? "", 500) || undefined,
+    controlPath: trimText(command.controlPath ?? "", 80) || undefined,
+    firedAtServerTime: Number.isFinite(command.firedAtServerTime)
+      ? Math.max(0, Math.round(command.firedAtServerTime ?? 0))
+      : undefined
+  };
 }
 
 function sanitizeCatalog(value: AdapterStatus["catalog"]): AdapterStatus["catalog"] | undefined {
