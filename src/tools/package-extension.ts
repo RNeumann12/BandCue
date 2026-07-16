@@ -18,8 +18,10 @@ mkdirSync(outDir, { recursive: true });
 rmIfExists(outFile);
 rmIfExists(versionedOutFile);
 
+// Exclude dev-only files: tests, the per-context type-check configs, and
+// ambient type declarations. None of them are referenced by the manifest.
 const files = walkFiles(extensionDir)
-  .filter((file) => !/\.test\./.test(file))
+  .filter((file) => !/\.test\.|tsconfig[^\\/]*\.json$|\.d\.ts$/.test(file))
   .map((file) => ({
     absolutePath: file,
     zipPath: relative(extensionDir, file).replace(/\\/g, "/"),

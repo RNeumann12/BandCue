@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.2.2 - 2026-07-16
+
+Reliability and project-quality release; no new user-facing features. The
+Android app is unchanged apart from the version bump.
+
+### Changed
+
+- Coordinator: Ctrl+C / SIGTERM now shuts down gracefully — every connected device
+  receives a WebSocket close frame ("Coordinator shutting down") immediately instead
+  of discovering the dead server via its heartbeat timeout.
+- Coordinator: an unexpected error while answering an HTTP request (e.g. QR
+  rendering) now returns a 500 response instead of crashing the whole process
+  mid-rehearsal.
+- The web client and the entire Songsterr extension are now statically type-checked
+  (`checkJs` via `tsconfig.web.json` and per-context configs in
+  `extension/songsterr/`), wired into `npm run check`, `verify`, and CI. This fixed
+  two latent type mismatches in the host setlist form (numeric Helix values assigned
+  to text inputs).
+- CI now also runs the Android JVM unit tests (Gradle 8.10.2, no emulator) and a
+  Playwright browser smoke test that boots the real coordinator, drives the host
+  page, joins a fake adapter, and schedules/stops a play (`npm run test:e2e`).
+
+### Fixed
+
+- The packaged Chrome extension zip no longer risks picking up development-only
+  files; tests, type-check configs, and type declarations are excluded explicitly.
+
+### Docs
+
+- README: removed the dead placeholder demo link; the setlist Export/Import section
+  now links to a documented example file (`examples/setlist.example.json`).
+- A committed personal setlist export was removed from the repository and
+  `bandcue-setlist-*.json` is now gitignored.
+
 ## 1.2.1 - 2026-07-04
 
 ### Fixed

@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": ["background.js", "room-permissions.js", "globals.d.ts"]
+}

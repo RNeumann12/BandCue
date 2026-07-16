@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": ["popup.js", "room-permissions.js", "globals.d.ts"]
+}

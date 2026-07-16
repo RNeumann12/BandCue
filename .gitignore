@@ -14,3 +14,7 @@ android/local.properties
 android/release.keystore
 android/keystore.properties
 .bandcue-room.json
+.bandcue-room.e2e.json
+playwright-report/
+test-results/
+bandcue-setlist-*.json

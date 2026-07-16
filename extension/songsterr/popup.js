@@ -1,21 +1,25 @@
-const roomUrl = document.querySelector("#roomUrl");
-const connect = document.querySelector("#connect");
-const disconnect = document.querySelector("#disconnect");
-const scanQr = document.querySelector("#scanQr");
-const qrScanner = document.querySelector("#qrScanner");
-const qrVideo = document.querySelector("#qrVideo");
-const qrStatus = document.querySelector("#qrStatus");
-const stopQrScan = document.querySelector("#stopQrScan");
-const openCameraScan = document.querySelector("#openCameraScan");
-const play = document.querySelector("#play");
-const stop = document.querySelector("#stop");
-const suppressAutoOpen = document.querySelector("#suppressAutoOpen");
-const instrument = document.querySelector("#instrument");
-const status = document.querySelector("#status");
-const connectionState = document.querySelector("#connectionState");
-const connectionDot = document.querySelector("#connectionDot");
-const adapterState = document.querySelector("#adapterState");
-const commandState = document.querySelector("#commandState");
+// JSDoc casts so property access on the popup's inputs and buttons
+// type-checks (tsconfig.web.json); querySelector alone returns a bare
+// Element. `stopButton`/`statusEl` avoid shadowing window.stop/window.status,
+// which tsc flags in a non-module script.
+const roomUrl = /** @type {HTMLInputElement} */ (document.querySelector("#roomUrl"));
+const connect = /** @type {HTMLButtonElement} */ (document.querySelector("#connect"));
+const disconnect = /** @type {HTMLButtonElement} */ (document.querySelector("#disconnect"));
+const scanQr = /** @type {HTMLButtonElement} */ (document.querySelector("#scanQr"));
+const qrScanner = /** @type {HTMLElement} */ (document.querySelector("#qrScanner"));
+const qrVideo = /** @type {HTMLVideoElement} */ (document.querySelector("#qrVideo"));
+const qrStatus = /** @type {HTMLElement} */ (document.querySelector("#qrStatus"));
+const stopQrScan = /** @type {HTMLButtonElement} */ (document.querySelector("#stopQrScan"));
+const openCameraScan = /** @type {HTMLButtonElement} */ (document.querySelector("#openCameraScan"));
+const play = /** @type {HTMLButtonElement} */ (document.querySelector("#play"));
+const stopButton = /** @type {HTMLButtonElement} */ (document.querySelector("#stop"));
+const suppressAutoOpen = /** @type {HTMLInputElement} */ (document.querySelector("#suppressAutoOpen"));
+const instrument = /** @type {HTMLSelectElement} */ (document.querySelector("#instrument"));
+const statusEl = /** @type {HTMLElement} */ (document.querySelector("#status"));
+const connectionState = /** @type {HTMLElement} */ (document.querySelector("#connectionState"));
+const connectionDot = /** @type {HTMLElement} */ (document.querySelector("#connectionDot"));
+const adapterState = /** @type {HTMLElement} */ (document.querySelector("#adapterState"));
+const commandState = /** @type {HTMLElement} */ (document.querySelector("#commandState"));
 
 // Once the user edits the room field, stop auto-filling it from saved state so
 // they can clear it and type a different room without it being overwritten by
@@ -96,7 +100,7 @@ play.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupTransport", action: "play" }, renderState);
 });
 
-stop.addEventListener("click", () => {
+stopButton.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupTransport", action: "stop" }, renderState);
 });
 
@@ -113,11 +117,11 @@ function renderState(state) {
   connectionState.textContent = formatConnectionState(stateLabel);
   connectionDot.dataset.state = connected ? "connected" : disconnectedByUser ? "off" : stateLabel;
   adapterState.textContent = adapter;
-  status.textContent = detail || "No connection detail yet.";
+  statusEl.textContent = detail || "No connection detail yet.";
   commandState.textContent = command;
   disconnect.disabled = disconnectedByUser || (!connected && !state?.autoConnectEnabled);
   play.disabled = !connected;
-  stop.disabled = !connected;
+  stopButton.disabled = !connected;
 }
 
 function formatConnectionState(value) {

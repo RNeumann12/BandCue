@@ -57,58 +57,68 @@ function reconnectDelayMs(attempt) {
   return Math.max(500, Math.round(exponential + jitter));
 }
 
+// Centralized JSDoc casts so property access on the host UI's inputs, buttons,
+// and forms type-checks under tsconfig.web.json; querySelector alone returns a
+// bare Element. The markup ships with this file, so the casts are trusted.
+const $ = (selector) => /** @type {HTMLElement} */ (document.querySelector(selector));
+const $input = (selector) => /** @type {HTMLInputElement} */ (document.querySelector(selector));
+const $button = (selector) => /** @type {HTMLButtonElement} */ (document.querySelector(selector));
+const $select = (selector) => /** @type {HTMLSelectElement} */ (document.querySelector(selector));
+const $form = (selector) => /** @type {HTMLFormElement} */ (document.querySelector(selector));
+const $$ = (root, selector) => /** @type {HTMLElement[]} */ ([...root.querySelectorAll(selector)]);
+
 const elements = {
-  roomCode: document.querySelector("#roomCode"),
-  transportBadge: document.querySelector("#transportBadge"),
-  countdown: document.querySelector("#countdown"),
-  subline: document.querySelector("#subline"),
-  leaderName: document.querySelector("#leaderName"),
-  elapsedTime: document.querySelector("#elapsedTime"),
-  readySummary: document.querySelector("#readySummary"),
-  currentSongTitle: document.querySelector("#currentSongTitle"),
-  currentSongMeta: document.querySelector("#currentSongMeta"),
-  warnings: document.querySelector("#warnings"),
-  devices: document.querySelector("#devices"),
-  companionUrl: document.querySelector("#companionUrl"),
-  adapterHostPort: document.querySelector("#adapterHostPort"),
-  hostPanel: document.querySelector("#hostPanel"),
-  hostWarning: document.querySelector("#hostWarning"),
-  armButton: document.querySelector("#armButton"),
-  controlModeSelect: document.querySelector("#controlModeSelect"),
-  safetyState: document.querySelector("#safetyState"),
-  playButton: document.querySelector("#playButton"),
-  stopButton: document.querySelector("#stopButton"),
-  setlistPanel: document.querySelector("#setlistPanel"),
-  setlistForm: document.querySelector("#setlistForm"),
-  setlistSubmitButton: document.querySelector("#setlistSubmitButton"),
-  cancelEditButton: document.querySelector("#cancelEditButton"),
-  setlistCount: document.querySelector("#setlistCount"),
-  setlistItems: document.querySelector("#setlistItems"),
-  songTitleInput: document.querySelector("#songTitleInput"),
-  songSourceTypeInput: document.querySelector("#songSourceTypeInput"),
-  songSourceInput: document.querySelector("#songSourceInput"),
-  songSongsterrUrlInput: document.querySelector("#songSongsterrUrlInput"),
-  songSongsterrBassUrlInput: document.querySelector("#songSongsterrBassUrlInput"),
-  songSongsterrDrumUrlInput: document.querySelector("#songSongsterrDrumUrlInput"),
-  songMuseScoreSourceInput: document.querySelector("#songMuseScoreSourceInput"),
-  songDurationInput: document.querySelector("#songDurationInput"),
-  songHelixSyncInput: document.querySelector("#songHelixSyncInput"),
-  songHelixBpmInput: document.querySelector("#songHelixBpmInput"),
-  songHelixBeatsInput: document.querySelector("#songHelixBeatsInput"),
-  songHelixTargetMeasureInput: document.querySelector("#songHelixTargetMeasureInput"),
-  songHelixOffsetInput: document.querySelector("#songHelixOffsetInput"),
-  songNotesInput: document.querySelector("#songNotesInput"),
-  previousSongButton: document.querySelector("#previousSongButton"),
-  nextSongButton: document.querySelector("#nextSongButton"),
-  clearSongButton: document.querySelector("#clearSongButton"),
-  openSongButton: document.querySelector("#openSongButton"),
-  exportSetlistButton: document.querySelector("#exportSetlistButton"),
-  importSetlistButton: document.querySelector("#importSetlistButton"),
-  importSetlistInput: document.querySelector("#importSetlistInput"),
-  setlistModeToggle: document.querySelector("#setlistModeToggle"),
-  setlistModeStatus: document.querySelector("#setlistModeStatus"),
-  timingPanel: document.querySelector("#timingPanel"),
-  timingRows: document.querySelector("#timingRows")
+  roomCode: $("#roomCode"),
+  transportBadge: $("#transportBadge"),
+  countdown: $("#countdown"),
+  subline: $("#subline"),
+  leaderName: $("#leaderName"),
+  elapsedTime: $("#elapsedTime"),
+  readySummary: $("#readySummary"),
+  currentSongTitle: $("#currentSongTitle"),
+  currentSongMeta: $("#currentSongMeta"),
+  warnings: $("#warnings"),
+  devices: $("#devices"),
+  companionUrl: $("#companionUrl"),
+  adapterHostPort: $("#adapterHostPort"),
+  hostPanel: $("#hostPanel"),
+  hostWarning: $("#hostWarning"),
+  armButton: $button("#armButton"),
+  controlModeSelect: $select("#controlModeSelect"),
+  safetyState: $("#safetyState"),
+  playButton: $button("#playButton"),
+  stopButton: $button("#stopButton"),
+  setlistPanel: $("#setlistPanel"),
+  setlistForm: $form("#setlistForm"),
+  setlistSubmitButton: $button("#setlistSubmitButton"),
+  cancelEditButton: $button("#cancelEditButton"),
+  setlistCount: $("#setlistCount"),
+  setlistItems: $("#setlistItems"),
+  songTitleInput: $input("#songTitleInput"),
+  songSourceTypeInput: $select("#songSourceTypeInput"),
+  songSourceInput: $input("#songSourceInput"),
+  songSongsterrUrlInput: $input("#songSongsterrUrlInput"),
+  songSongsterrBassUrlInput: $input("#songSongsterrBassUrlInput"),
+  songSongsterrDrumUrlInput: $input("#songSongsterrDrumUrlInput"),
+  songMuseScoreSourceInput: $input("#songMuseScoreSourceInput"),
+  songDurationInput: $input("#songDurationInput"),
+  songHelixSyncInput: $input("#songHelixSyncInput"),
+  songHelixBpmInput: $input("#songHelixBpmInput"),
+  songHelixBeatsInput: $input("#songHelixBeatsInput"),
+  songHelixTargetMeasureInput: $input("#songHelixTargetMeasureInput"),
+  songHelixOffsetInput: $input("#songHelixOffsetInput"),
+  songNotesInput: $input("#songNotesInput"),
+  previousSongButton: $button("#previousSongButton"),
+  nextSongButton: $button("#nextSongButton"),
+  clearSongButton: $button("#clearSongButton"),
+  openSongButton: $button("#openSongButton"),
+  exportSetlistButton: $button("#exportSetlistButton"),
+  importSetlistButton: $button("#importSetlistButton"),
+  importSetlistInput: $input("#importSetlistInput"),
+  setlistModeToggle: $input("#setlistModeToggle"),
+  setlistModeStatus: $("#setlistModeStatus"),
+  timingPanel: $("#timingPanel"),
+  timingRows: $("#timingRows")
 };
 
 const SETLIST_STORAGE_KEY = "bandcue:setlist";
@@ -189,7 +199,7 @@ elements.cancelEditButton?.addEventListener("click", () => {
 
 elements.setlistItems?.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : undefined;
-  const button = target?.closest("button[data-setlist-action]");
+  const button = /** @type {HTMLButtonElement | null} */ (target?.closest("button[data-setlist-action]") ?? null);
   if (!button) {
     return;
   }
@@ -345,7 +355,7 @@ function handleHostHotkey(event) {
 
 function applyHostHotkeyHints() {
   for (const hotkey of DEFAULT_HOST_HOTKEYS) {
-    const element = document.querySelector(`[data-hotkey-action="${hotkey.action}"]`);
+    const element = /** @type {HTMLElement | null} */ (document.querySelector(`[data-hotkey-action="${hotkey.action}"]`));
     if (!element) {
       continue;
     }
@@ -660,7 +670,7 @@ function renderDevices(clients) {
     updateDeviceCard(card, device);
   }
 
-  for (const card of Array.from(elements.devices.querySelectorAll("[data-device-key]"))) {
+  for (const card of $$(elements.devices, "[data-device-key]")) {
     if (!expectedKeys.has(card.dataset.deviceKey)) {
       card.remove();
     }
@@ -718,7 +728,7 @@ function updateDeviceCard(card, device) {
 }
 
 function getDeviceCardByKey(key) {
-  return Array.from(elements.devices.querySelectorAll("[data-device-key]"))
+  return $$(elements.devices, "[data-device-key]")
     .find((card) => card.dataset.deviceKey === key);
 }
 
@@ -844,7 +854,7 @@ function renderTimingRows(state) {
     updateTimingRow(row, device);
   }
 
-  for (const row of Array.from(elements.timingRows.querySelectorAll("[data-timing-key]"))) {
+  for (const row of $$(elements.timingRows, "[data-timing-key]")) {
     if (!expectedKeys.has(row.dataset.timingKey)) {
       row.remove();
     }
@@ -911,7 +921,7 @@ function updateTimingRow(row, device) {
 }
 
 function getTimingRowByKey(key) {
-  return Array.from(elements.timingRows.querySelectorAll("[data-timing-key]"))
+  return $$(elements.timingRows, "[data-timing-key]")
     .find((row) => row.dataset.timingKey === key);
 }
 
@@ -1010,10 +1020,10 @@ function startEditSong(index) {
   elements.songMuseScoreSourceInput.value = song.museScoreSource || "";
   elements.songDurationInput.value = song.durationMs ? formatElapsed(song.durationMs) : "";
   elements.songHelixSyncInput.checked = Boolean(song.helixSyncEnabled);
-  elements.songHelixBpmInput.value = song.helixBpm || "";
-  elements.songHelixBeatsInput.value = song.helixBeatsPerMeasure || 4;
-  elements.songHelixTargetMeasureInput.value = song.helixTargetMeasure || 2;
-  elements.songHelixOffsetInput.value = song.helixOffsetMs || 0;
+  elements.songHelixBpmInput.value = song.helixBpm ? String(song.helixBpm) : "";
+  elements.songHelixBeatsInput.value = String(song.helixBeatsPerMeasure || 4);
+  elements.songHelixTargetMeasureInput.value = String(song.helixTargetMeasure || 2);
+  elements.songHelixOffsetInput.value = String(song.helixOffsetMs || 0);
   elements.songNotesInput.value = song.notes || "";
 
   setText(elements.setlistSubmitButton, "Save Changes");

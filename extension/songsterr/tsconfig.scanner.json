@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": ["scanner.js", "globals.d.ts"]
+}

@@ -5,6 +5,12 @@ let durationObserver;
 let lastObservedDurationMs;
 const observedMediaElements = new WeakSet();
 
+// The "audio, video" selector guarantees media elements, but querySelectorAll
+// types them as bare Elements; centralize the JSDoc cast (tsconfig.web.json).
+function queryMediaElements() {
+  return /** @type {HTMLMediaElement[]} */ ([...document.querySelectorAll("audio, video")]);
+}
+
 function reportStatus() {
   observeDurationSources();
   const durationMs = readSongDurationMs();
@@ -205,7 +211,7 @@ async function controlSongsterr(action, resetBeforePlay = false, prepared = unde
 }
 
 function inferPlaybackState() {
-  const mediaElements = [...document.querySelectorAll("audio, video")];
+  const mediaElements = queryMediaElements();
   if (mediaElements.some((media) => !media.paused && !media.ended)) {
     return "playing";
   }
@@ -233,7 +239,7 @@ function readSongDurationMs() {
 }
 
 function readMediaDurationMs() {
-  const durations = [...document.querySelectorAll("audio, video")]
+  const durations = queryMediaElements()
     .map((media) => media.duration)
     .filter((duration) => Number.isFinite(duration) && duration > 0);
   const durationSeconds = Math.max(0, ...durations);
@@ -335,7 +341,7 @@ function startDurationObservation() {
 }
 
 function observeDurationSources() {
-  for (const media of document.querySelectorAll("audio, video")) {
+  for (const media of queryMediaElements()) {
     if (observedMediaElements.has(media)) {
       continue;
     }
@@ -348,7 +354,7 @@ function observeDurationSources() {
 }
 
 async function controlMediaElement(action) {
-  const mediaElements = [...document.querySelectorAll("audio, video")];
+  const mediaElements = queryMediaElements();
   if (!mediaElements.length) {
     return { ok: false };
   }
@@ -506,7 +512,7 @@ function resetSongsterrPosition() {
   // timeline, so currentTime = 0 alone does not move it. Backspace is
   // Songsterr's documented "go to the beginning" shortcut, so dispatch it
   // regardless of any incidental media elements on the page.
-  const mediaElements = [...document.querySelectorAll("audio, video")];
+  const mediaElements = queryMediaElements();
   for (const media of mediaElements) {
     try {
       media.currentTime = 0;
@@ -541,7 +547,7 @@ function clickTransportButton(action) {
     return "";
   }
 
-  best.element.click();
+  /** @type {HTMLElement} */ (best.element).click();
   return best.label || best.element.tagName.toLowerCase();
 }
 

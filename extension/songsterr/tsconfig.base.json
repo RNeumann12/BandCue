@@ -1,0 +1,21 @@
+{
+  // Shared options for the extension's type checks. The extension's files are
+  // classic (non-module) scripts, so every file in one tsc program shares a
+  // global scope. To avoid false redeclaration clashes between scripts that
+  // never actually share a context (service worker vs popup vs content
+  // script), each execution context gets its own tsconfig.*.json extending
+  // this one, and `npm run check` runs them all.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["chrome"],
+    "typeRoots": ["../../node_modules/@types"]
+  }
+}

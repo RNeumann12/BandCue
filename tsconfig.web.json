@@ -1,0 +1,21 @@
+{
+  // Type-checks the static web client's plain-JS modules, which ship without a
+  // build step. Deliberately not "strict": strictNullChecks against
+  // hand-written DOM code would drown the real findings; checkJs alone already
+  // catches wrong property names, bad call signatures, and type mismatches.
+  // The extension's classic scripts are checked by the per-context configs in
+  // extension/songsterr/. Run via `npm run check`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": []
+  },
+  "include": ["web/*.js"]
+}

@@ -20,9 +20,7 @@ that mirror the countdown, the current song, and who's leading.
 
 > **Free and open. Built to solve a real band's problem.**
 
-**[▶ Watch the 60-second demo](#)** · **[⬇ Download the latest release](https://github.com/RNeumann12/BandCue/releases)** · **[📖 Docs](#documentation)**
-
-> _Replace the demo link above with your video/GIF before sharing — see the README notes below._
+**[⬇ Download the latest release](https://github.com/RNeumann12/BandCue/releases)** · **[📖 Docs](#documentation)**
 
 ---
 
@@ -204,6 +202,7 @@ reference, optional notes, and (once known) a duration.
 
 - **Make Current**, **Previous**, **Next** publish the current song to every companion.
 - **Export** / **Import** move setlists between host browsers (the setlist is stored locally).
+  See [examples/setlist.example.json](examples/setlist.example.json) for the file format.
 - **Open Current Song** asks connected adapters to open the current song's source. The Songsterr
   adapter also opens the current URL automatically before a transport command when no matching
   tab is present.

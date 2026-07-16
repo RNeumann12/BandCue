@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "exportedAt": "2026-01-01T00:00:00.000Z",
+  "songs": [
+    {
+      "id": "example-songsterr-song",
+      "title": "Example Songsterr Song",
+      "sourceType": "songsterr",
+      "songsterrUrl": "https://www.songsterr.com/a/wsa/artist-song-tab-s12345",
+      "songsterrBassUrl": "https://www.songsterr.com/a/wsa/artist-song-bass-tab-s12345",
+      "songsterrDrumUrl": "https://www.songsterr.com/a/wsa/artist-song-drum-tab-s12345",
+      "notes": "Optional per-song notes shown on the host page."
+    },
+    {
+      "id": "example-musescore-song",
+      "title": "Example MuseScore Song",
+      "sourceType": "musescore",
+      "museScoreSource": "Scores/Example MuseScore Song.mscz",
+      "durationMs": 215000,
+      "notes": "museScoreSource matches a file from the adapter's scanned score folders."
+    },
+    {
+      "id": "example-helix-song",
+      "title": "Example Song With Helix Sync",
+      "sourceType": "songsterr",
+      "songsterrUrl": "https://www.songsterr.com/a/wsa/artist-other-song-tab-s67890",
+      "helixSyncEnabled": true,
+      "helixBpm": 120,
+      "helixBeatsPerMeasure": 4,
+      "helixTargetMeasure": 2,
+      "helixOffsetMs": 0,
+      "notes": "Play starts on the downbeat of the target measure at this BPM."
+    }
+  ]
+}

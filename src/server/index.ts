@@ -54,7 +54,25 @@ function contentType(pathname: string): string {
   return "text/html; charset=utf-8";
 }
 
+// Any throw or rejection escaping this handler would become an unhandled
+// rejection and kill the coordinator mid-rehearsal, so the whole body is
+// fenced and failures answer 500 instead.
 const server = createServer(async (req, res) => {
+  try {
+    await handleHttpRequest(req, res);
+  } catch (error) {
+    console.error("HTTP request failed:", error);
+    if (!res.headersSent) {
+      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
+    }
+    res.end("Internal server error");
+  }
+});
+
+async function handleHttpRequest(
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse
+): Promise<void> {
   const url = new URL(req.url ?? "/", baseUrl);
 
   if (url.pathname === "/api/room") {
@@ -100,7 +118,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     res.end("Not found");
   }
-});
+}
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_MESSAGE_BYTES });
 
@@ -234,13 +252,55 @@ const lanWatchTimer = setInterval(() => {
 }, LAN_ADDRESS_CHECK_INTERVAL_MS);
 lanWatchTimer.unref?.();
 
+let discoverySocket: ReturnType<typeof startDiscoveryResponder> | undefined;
+let mdnsResponder: ReturnType<typeof startMdnsResponder> | undefined;
+
+// Coordinator restarts happen mid-rehearsal (new Wi-Fi, config change). Close
+// every client with a WebSocket close frame so devices show "coordinator shut
+// down" immediately instead of waiting out their heartbeat timeout.
+let shuttingDown = false;
+function shutdown(signal: string): void {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  console.log(`Received ${signal}, shutting down...`);
+
+  for (const client of wss.clients) {
+    try {
+      client.close(1001, "Coordinator shutting down");
+    } catch {
+      // Best effort; the process is exiting either way.
+    }
+  }
+  room.stopLivenessSweep();
+  clearInterval(wsPingTimer);
+  clearInterval(lanWatchTimer);
+  try {
+    discoverySocket?.close();
+  } catch {
+    // Socket may not be bound yet.
+  }
+  mdnsResponder?.destroy();
+  wss.close();
+  server.close(() => {
+    process.exit(0);
+  });
+  // Close frames are queued synchronously above; don't let a stuck TCP peer
+  // keep the process alive past this point.
+  setTimeout(() => process.exit(0), 2_000).unref?.();
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
 server.listen(PORT, HOST, () => {
-  startDiscoveryResponder({
+  discoverySocket = startDiscoveryResponder({
     roomCode: ROOM_CODE,
     port: PORT,
     discoveryPort: DISCOVERY_PORT
   });
-  startMdnsResponder({
+  mdnsResponder = startMdnsResponder({
     roomCode: ROOM_CODE,
     port: PORT,
     address: lanAddress

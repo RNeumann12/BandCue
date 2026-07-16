@@ -1,6 +1,6 @@
 {
   "name": "bandcue",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "description": "Local-first playback sync for band rehearsals — press play once and every device (Songsterr, MuseScore) starts on the same beat.",
   "license": "MIT",
@@ -31,8 +31,11 @@
     "build:android:release": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Task assembleRelease",
     "test:android": "powershell -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Task test",
     "build": "tsc -p tsconfig.json",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && npm run check:web && npm run check:extension",
+    "check:web": "tsc -p tsconfig.web.json",
+    "check:extension": "tsc -p extension/songsterr/tsconfig.background.json && tsc -p extension/songsterr/tsconfig.popup.json && tsc -p extension/songsterr/tsconfig.scanner.json && tsc -p extension/songsterr/tsconfig.content.json",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "verify": "npm run check && npm test",
     "prepackage:release": "npm run verify"
   },
@@ -43,6 +46,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/chrome": "^0.2.2",
     "@types/multicast-dns": "^7.2.4",
     "@types/node": "^24.0.0",
     "@types/qrcode": "^1.5.5",

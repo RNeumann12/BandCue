@@ -1,7 +1,9 @@
-const camera = document.querySelector("#camera");
-const statusText = document.querySelector("#status");
-const start = document.querySelector("#start");
-const closeButton = document.querySelector("#close");
+// JSDoc casts so property access type-checks (tsconfig.web.json);
+// querySelector alone returns a bare Element.
+const camera = /** @type {HTMLVideoElement} */ (document.querySelector("#camera"));
+const statusText = /** @type {HTMLElement} */ (document.querySelector("#status"));
+const start = /** @type {HTMLButtonElement} */ (document.querySelector("#start"));
+const closeButton = /** @type {HTMLButtonElement} */ (document.querySelector("#close"));
 
 let stream;
 let scanTimer;
