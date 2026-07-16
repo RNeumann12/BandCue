@@ -109,6 +109,7 @@ Parsed by `parseArgs` in [`musescore-windows.ts`](../src/adapters/musescore-wind
 | --- | --- | --- |
 | `--score-folder <path>` (repeatable) / `BANDCUE_MUSESCORE_FOLDERS` (`;`-separated) | none | Folders to scan for `.mscz`/`.mscx`. Enables publishing + auto-open. |
 | `--score-recursive <bool>` / `BANDCUE_MUSESCORE_RECURSIVE` | **on** (`0` disables) | Scan folders recursively. |
+| `--close-old-instances <bool>` / `BANDCUE_MUSESCORE_CLOSE_OLD` | **on** (`0` disables) | After auto-open confirms the new MuseScore window, close the previous instances gracefully (WM_CLOSE, never force-killed). |
 
 ### Examples
 

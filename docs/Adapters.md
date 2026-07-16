@@ -167,6 +167,12 @@ npm run dev:musescore -- --score-folder "C:\Users\you\Documents\MuseScore4\Score
 - The host UI shows `matched` / `ambiguous` / `missing` / `not-applicable` and warns when the
   active score title doesn't match the current MuseScore setlist item.
 - Auto-open requires **exactly one** match; ambiguous or missing matches are reported, not opened.
+- MuseScore 4 opens each score in a **new instance**, and keystroke control gets unreliable when
+  several instances are running. After an auto-open, the helper waits for the new window to
+  appear (up to 15 s), then closes the previous MuseScore instances gracefully (WM_CLOSE — an
+  unsaved-changes prompt keeps the old instance alive and is reported instead of force-killed).
+  Disable with `--close-old-instances 0`. Status polling and keystroke commands also prefer the
+  **newest** MuseScore window, so a lingering old instance no longer receives play/stop keys.
 
 ### MuseScore Bridge API
 

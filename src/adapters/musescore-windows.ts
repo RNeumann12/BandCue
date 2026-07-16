@@ -74,7 +74,17 @@ interface Args {
   bridgeFallbackMs: number;
   scoreFolders: string[];
   scoreCatalogRecursive: boolean;
+  closeOldInstances: boolean;
 }
+
+// How long to wait for the freshly opened score's window before giving up on
+// confirming it (the open itself may still succeed on a slow machine).
+const OPEN_SCORE_WINDOW_TIMEOUT_MS = 15_000;
+// Extra time for the new window's title to reflect the loaded score.
+const OPEN_SCORE_TITLE_TIMEOUT_MS = 5_000;
+// Grace period per old instance to exit after WM_CLOSE before it is reported
+// as lingering (a "save changes?" prompt keeps it alive on purpose).
+const OPEN_SCORE_CLOSE_WAIT_MS = 4_000;
 
 interface MuseScoreStatus {
   ready: boolean;
@@ -505,7 +515,7 @@ $titleMatch = '${escapePowerShellSingleQuoted(args.titleMatch ?? "")}'
 $process = Get-Process | Where-Object {
   $_.MainWindowHandle -ne 0 -and ($_.ProcessName -match $processMatch) -and
     (-not $titleMatch -or $_.MainWindowTitle -match $titleMatch)
-} | Select-Object -First 1
+} | Sort-Object -Property StartTime -Descending | Select-Object -First 1
 if ($process) {
   [PSCustomObject]@{
     processId = $process.Id
@@ -579,7 +589,7 @@ $titleMatch = '${escapePowerShellSingleQuoted(args.titleMatch ?? "")}'
 $process = Get-Process | Where-Object {
   $_.MainWindowHandle -ne 0 -and ($_.ProcessName -match $processMatch) -and
     (-not $titleMatch -or $_.MainWindowTitle -match $titleMatch)
-} | Select-Object -First 1
+} | Sort-Object -Property StartTime -Descending | Select-Object -First 1
 if (-not $process) { exit 2 }
 $activated = $false
 for ($attempt = 0; $attempt -lt ${args.activationRetries}; $attempt++) {
@@ -714,15 +724,21 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     return;
   }
 
-  const opened = await openLocalScore(entry.absolutePath);
+  const opened = await openLocalScore(entry.absolutePath, entry.relativePath);
+  if (opened.opened && opened.windowTitle) {
+    lastMuseScoreStatus = {
+      ready: true,
+      title: scoreTitleFromWindowTitle(opened.windowTitle),
+      windowTitle: opened.windowTitle,
+      detail: opened.detail
+    };
+  }
   reportCommandStatus({
-    ready: opened,
+    ready: opened.opened,
     action: "open-song",
     sequenceId,
-    status: opened ? "succeeded" : "failed",
-    detail: opened
-      ? `Opened MuseScore score ${entry.relativePath}`
-      : `Windows could not open MuseScore score ${entry.relativePath}`,
+    status: opened.opened ? "succeeded" : "failed",
+    detail: opened.detail,
     controlPath: "local-score-catalog",
     at: Date.now()
   });
@@ -1106,14 +1122,133 @@ function handleBridgeResult(
   writeJson(res, 200, { ok: true, command });
 }
 
-async function openLocalScore(absolutePath: string): Promise<boolean> {
+interface OpenScoreResult {
+  opened: boolean;
+  detail: string;
+  windowTitle?: string;
+}
+
+// Opens a score with the default app, waits for its window, then closes the
+// previously running MuseScore instances. MuseScore 4 opens every score in a
+// fresh instance, and keystroke commands become unreliable once several
+// instances compete for the foreground — so the old one has to go, but only
+// after the new window is confirmed (never before, and never force-killed).
+async function openLocalScore(absolutePath: string, relativePath: string): Promise<OpenScoreResult> {
   const script = `
 $path = '${escapePowerShellSingleQuoted(resolve(absolutePath))}'
+$processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
+$closeOld = ${args.closeOldInstances ? "$true" : "$false"}
 if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { exit 2 }
+$before = @(Get-Process | Where-Object { $_.ProcessName -match $processMatch })
+$beforeIds = @($before | ForEach-Object { $_.Id })
+$oldWindowIds = @($before | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.Id })
 Invoke-Item -LiteralPath $path
+$scoreName = [System.IO.Path]::GetFileNameWithoutExtension($path)
+$scorePattern = '*' + [System.Management.Automation.WildcardPattern]::Escape($scoreName) + '*'
+$deadline = (Get-Date).AddMilliseconds(${OPEN_SCORE_WINDOW_TIMEOUT_MS})
+$new = $null
+$reused = $null
+while ((Get-Date) -lt $deadline) {
+  $candidates = @(Get-Process | Where-Object {
+    $_.MainWindowHandle -ne 0 -and ($_.ProcessName -match $processMatch)
+  })
+  $new = $candidates |
+    Where-Object { $beforeIds -notcontains $_.Id } |
+    Sort-Object -Property StartTime -Descending |
+    Select-Object -First 1
+  if ($new) { break }
+  $reused = $candidates | Where-Object { $_.MainWindowTitle -like $scorePattern } | Select-Object -First 1
+  if ($reused) { break }
+  Start-Sleep -Milliseconds 250
+}
+if ($new) {
+  $titleDeadline = (Get-Date).AddMilliseconds(${OPEN_SCORE_TITLE_TIMEOUT_MS})
+  while ((Get-Date) -lt $titleDeadline) {
+    try { $new.Refresh() } catch { break }
+    if ($new.MainWindowTitle -like $scorePattern) { break }
+    Start-Sleep -Milliseconds 250
+  }
+}
+$closed = @()
+$lingering = @()
+if ($closeOld -and $new) {
+  foreach ($id in $oldWindowIds) {
+    if ($id -eq $new.Id) { continue }
+    $old = Get-Process -Id $id -ErrorAction SilentlyContinue
+    if (-not $old -or $old.HasExited) { $closed += $id; continue }
+    $old.CloseMainWindow() | Out-Null
+    if ($old.WaitForExit(${OPEN_SCORE_CLOSE_WAIT_MS})) { $closed += $id } else { $lingering += $id }
+  }
+}
+$active = if ($new) { $new } elseif ($reused) { $reused } else { $null }
+$outcome = if ($new) { 'new-instance' } elseif ($reused) { 'reused-instance' } else { 'no-window' }
+$activeId = $null
+$activeTitle = $null
+if ($active) {
+  try { $active.Refresh() } catch {}
+  $activeId = $active.Id
+  if (-not $active.HasExited) { $activeTitle = ($active.MainWindowTitle -replace '\\r|\\n', ' ') }
+}
+[PSCustomObject]@{
+  outcome = $outcome
+  processId = $activeId
+  windowTitle = $activeTitle
+  closedOld = $closed
+  lingering = $lingering
+} | ConvertTo-Json -Compress
 `;
   const result = await runPowerShell(script);
-  return result.code === 0;
+  if (result.code === 2) {
+    return { opened: false, detail: `MuseScore score ${relativePath} no longer exists on disk` };
+  }
+
+  if (result.code !== 0) {
+    const output = trimSingleLine(result.stderr || result.stdout);
+    return {
+      opened: false,
+      detail: output
+        ? `Windows could not open MuseScore score ${relativePath}: ${output}`
+        : `Windows could not open MuseScore score ${relativePath}`
+    };
+  }
+
+  const outcome = parsePowerShellJson<{
+    outcome?: string;
+    processId?: number;
+    windowTitle?: string;
+    closedOld?: number[];
+    lingering?: number[];
+  }>(result.stdout);
+  const windowTitle = outcome?.windowTitle?.trim() || undefined;
+  const closedCount = outcome?.closedOld?.length ?? 0;
+  const lingeringCount = outcome?.lingering?.length ?? 0;
+  const closeSummary = [
+    closedCount ? `closed ${closedCount} previous MuseScore instance${closedCount === 1 ? "" : "s"}` : "",
+    lingeringCount
+      ? `${lingeringCount} previous instance${lingeringCount === 1 ? "" : "s"} did not close (unsaved changes?)`
+      : ""
+  ].filter(Boolean).join("; ");
+
+  if (outcome?.outcome === "new-instance") {
+    return {
+      opened: true,
+      detail: `Opened MuseScore score ${relativePath} in a new window${closeSummary ? `; ${closeSummary}` : ""}`,
+      windowTitle
+    };
+  }
+
+  if (outcome?.outcome === "reused-instance") {
+    return {
+      opened: true,
+      detail: `MuseScore loaded score ${relativePath} in an existing window`,
+      windowTitle
+    };
+  }
+
+  return {
+    opened: true,
+    detail: `Launched MuseScore score ${relativePath}, but no window appeared within ${Math.round(OPEN_SCORE_WINDOW_TIMEOUT_MS / 1000)} s; previous instances were left open`
+  };
 }
 
 function refreshScoreCatalog(): void {
@@ -1294,7 +1429,8 @@ function parseArgs(raw: string[]): Args {
     commandGapMs: 120,
     bridgeFallbackMs: 900,
     scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
-    scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0"
+    scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0",
+    closeOldInstances: process.env.BANDCUE_MUSESCORE_CLOSE_OLD !== "0"
   };
 
   for (let index = 0; index < raw.length; index += 1) {
@@ -1332,6 +1468,9 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--score-recursive") {
       parsed.scoreCatalogRecursive = parseBooleanFlag(raw[index + 1], parsed.scoreCatalogRecursive);
+    }
+    if (value === "--close-old-instances") {
+      parsed.closeOldInstances = parseBooleanFlag(raw[index + 1], parsed.closeOldInstances);
     }
   }
 
