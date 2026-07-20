@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Helix Stadium starts now use the configured number of complete count-in measures, support
+  room-wide and per-song timing shifts up to ±60 seconds, and roll too-early starts forward by
+  complete measures instead of rejecting Play.
+- The host now has a persistent global Helix master switch and room-wide offset control, while
+  keeping per-song timing trims for exceptional songs.
+
 ## 1.2.2 - 2026-07-16
 
 Reliability and project-quality release; no new user-facing features. The

@@ -63,6 +63,20 @@
           </label>
           <span class="safety-state" id="safetyState">Not armed</span>
         </div>
+        <div class="helix-global" aria-labelledby="helixGlobalTitle">
+          <div class="helix-global-heading">
+            <span class="helix-global-kicker">Helix Stadium</span>
+            <strong id="helixGlobalTitle">Global start timing</strong>
+          </div>
+          <button class="secondary compact helix-global-toggle" id="globalHelixToggleButton" type="button" aria-pressed="true">
+            Start from Helix: On
+          </button>
+          <label class="helix-global-offset">
+            <span>Global offset ms</span>
+            <input id="globalHelixOffsetInput" autocomplete="off" inputmode="numeric" type="number" min="-60000" max="60000" step="1" value="0" />
+          </label>
+          <span class="helix-global-status" id="globalHelixStatus">+0 ms global shift + each song's trim</span>
+        </div>
         <div class="hotkey-hints" aria-label="Host keyboard shortcuts">
           <span>Hotkeys</span>
           <kbd>Ctrl+Alt+A</kbd> Arm
@@ -159,12 +173,12 @@
                 <input id="songHelixBeatsInput" name="helixBeatsPerMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="16" step="1" value="4" />
               </label>
               <label>
-                <span>Start measure</span>
+                <span>Count-in measures</span>
                 <input id="songHelixTargetMeasureInput" name="helixTargetMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="128" step="1" value="2" />
               </label>
               <label>
-                <span>Offset ms</span>
-                <input id="songHelixOffsetInput" name="helixOffsetMs" autocomplete="off" inputmode="numeric" type="number" min="-5000" max="5000" step="1" value="0" />
+                <span>Song trim ms</span>
+                <input id="songHelixOffsetInput" name="helixOffsetMs" autocomplete="off" inputmode="numeric" type="number" min="-60000" max="60000" step="1" value="0" />
               </label>
             </fieldset>
             <label class="wide">

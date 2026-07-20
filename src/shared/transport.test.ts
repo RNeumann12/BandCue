@@ -157,34 +157,34 @@ describe("scheduleDelayForClients", () => {
 });
 
 describe("Helix sync timing", () => {
-  it("converts one 4/4 measure at 120 BPM to 2000 ms", () => {
+  it("uses the configured number of complete 4/4 count-in measures", () => {
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 120,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2,
       helixOffsetMs: 0
-    })).toBe(2000);
+    })).toBe(4000);
   });
 
-  it("converts one 3/4 measure at 100 BPM to 1800 ms", () => {
+  it("uses the configured number of complete 3/4 count-in measures", () => {
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 100,
       helixBeatsPerMeasure: 3,
       helixTargetMeasure: 2,
       helixOffsetMs: 0
-    })).toBe(1800);
+    })).toBe(3600);
   });
 
-  it("uses target measure three as two full measures after the trigger", () => {
+  it("uses three full measures when the count-in is three", () => {
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 120,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 3,
       helixOffsetMs: 0
-    })).toBe(4000);
+    })).toBe(6000);
   });
 
   it("applies signed offsets in both directions and clamps outliers", () => {
@@ -194,14 +194,24 @@ describe("Helix sync timing", () => {
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2,
       helixOffsetMs: -80
-    })).toBe(1920);
+    })).toBe(3920);
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 120,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2,
-      helixOffsetMs: 6000
-    })).toBe(7000);
+      helixOffsetMs: 90_000
+    })).toBe(64_000);
+  });
+
+  it("rolls a too-early offset forward by whole measures to preserve phase", () => {
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBpm: 200,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 1,
+      helixOffsetMs: -1000
+    }, 1500)).toBe(2600);
   });
 
   it("returns undefined for disabled or invalid Helix sync metadata", () => {

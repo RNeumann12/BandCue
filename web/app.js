@@ -27,6 +27,7 @@ import {
   shouldAdvanceSetlistOnStop,
   collectWarnings,
   clampHelixOffsetMs,
+  applyGlobalHelixSettings,
   formatElapsed,
   formatMs,
   formatSignedMs,
@@ -86,6 +87,9 @@ const elements = {
   armButton: $button("#armButton"),
   controlModeSelect: $select("#controlModeSelect"),
   safetyState: $("#safetyState"),
+  globalHelixToggleButton: $button("#globalHelixToggleButton"),
+  globalHelixOffsetInput: $input("#globalHelixOffsetInput"),
+  globalHelixStatus: $("#globalHelixStatus"),
   playButton: $button("#playButton"),
   stopButton: $button("#stopButton"),
   setlistPanel: $("#setlistPanel"),
@@ -124,6 +128,7 @@ const elements = {
 const SETLIST_STORAGE_KEY = "bandcue:setlist";
 const CALIBRATION_STORAGE_KEY = "bandcue:calibration";
 const DEVICE_NAME_STORAGE_KEY = "bandcue:name";
+const HELIX_SETTINGS_STORAGE_KEY = "bandcue:helix-settings";
 const LEGACY_SETLIST_STORAGE_KEY = "playsync:setlist";
 const LEGACY_CALIBRATION_STORAGE_KEY = "playsync:calibration";
 const LEGACY_DEVICE_NAME_STORAGE_KEY = "playsync:name";
@@ -142,6 +147,7 @@ let samples = [];
 let lastState;
 let clientId;
 let setlist = loadSetlist();
+let globalHelixSettings = loadGlobalHelixSettings();
 let currentSongIndex = -1;
 let editingSongIndex = -1;
 let calibrations = loadCalibrations();
@@ -176,6 +182,7 @@ if (isHost) {
   elements.setlistPanel.hidden = false;
   elements.timingPanel.hidden = false;
   applyHostHotkeyHints();
+  renderGlobalHelixSettings();
   document.addEventListener("keydown", handleHostHotkey);
   renderSetlist();
 }
@@ -186,6 +193,16 @@ elements.setlistModeToggle?.addEventListener("change", handleSetlistModeToggle);
 elements.armButton?.addEventListener("click", toggleArm);
 elements.controlModeSelect?.addEventListener("change", () => {
   publishSafety({ controlMode: elements.controlModeSelect.value });
+});
+
+elements.globalHelixToggleButton?.addEventListener("click", () => {
+  globalHelixSettings.enabled = !globalHelixSettings.enabled;
+  commitGlobalHelixSettings();
+});
+
+elements.globalHelixOffsetInput?.addEventListener("change", () => {
+  globalHelixSettings.offsetMs = clampHelixOffsetMs(Number(elements.globalHelixOffsetInput.value || 0));
+  commitGlobalHelixSettings();
 });
 
 elements.setlistForm?.addEventListener("submit", (event) => {
@@ -1075,6 +1092,31 @@ function resetHelixFormDefaults() {
   elements.songHelixOffsetInput.value = "0";
 }
 
+function commitGlobalHelixSettings() {
+  persistGlobalHelixSettings();
+  renderGlobalHelixSettings();
+  publishCurrentSong();
+  renderSetlist();
+}
+
+function renderGlobalHelixSettings() {
+  if (!isHost) {
+    return;
+  }
+
+  const enabled = globalHelixSettings.enabled;
+  elements.globalHelixToggleButton.setAttribute("aria-pressed", String(enabled));
+  setText(elements.globalHelixToggleButton, enabled ? "Start from Helix: On" : "Start from Helix: Off");
+  elements.globalHelixOffsetInput.value = String(globalHelixSettings.offsetMs);
+  elements.globalHelixOffsetInput.disabled = !enabled;
+  setText(
+    elements.globalHelixStatus,
+    enabled
+      ? `${formatSignedMs(globalHelixSettings.offsetMs)} global shift + each song's trim`
+      : "Normal BandCue count-in active"
+  );
+}
+
 function selectCurrentSong(index) {
   if (index < 0 || index >= setlist.length) {
     return;
@@ -1277,7 +1319,7 @@ function publishCurrentSong() {
     return;
   }
 
-  const song = currentSongIndex >= 0 ? normalizeSong(setlist[currentSongIndex]) : undefined;
+  const song = currentSongIndex >= 0 ? effectiveHelixSong(setlist[currentSongIndex]) : undefined;
   send({
     type: "currentSongUpdate",
     song,
@@ -1285,6 +1327,10 @@ function publishCurrentSong() {
     total: setlist.length,
     updatedAt: Date.now()
   });
+}
+
+function effectiveHelixSong(song) {
+  return applyGlobalHelixSettings(song, globalHelixSettings);
 }
 
 function renderSetlist() {
@@ -1589,6 +1635,24 @@ function loadSetlist() {
   } catch {
     return [];
   }
+}
+
+function loadGlobalHelixSettings() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HELIX_SETTINGS_STORAGE_KEY) || "{}");
+    return {
+      // Enabled by default so existing per-song Helix configuration keeps its
+      // behavior until the host explicitly switches the global master off.
+      enabled: parsed.enabled !== false,
+      offsetMs: clampHelixOffsetMs(Number(parsed.offsetMs || 0))
+    };
+  } catch {
+    return { enabled: true, offsetMs: 0 };
+  }
+}
+
+function persistGlobalHelixSettings() {
+  localStorage.setItem(HELIX_SETTINGS_STORAGE_KEY, JSON.stringify(globalHelixSettings));
 }
 
 function migrateLegacyStorage() {

@@ -7,9 +7,11 @@ import {
   calculateClockSample,
   calculateJitterMs,
   canHostPlay,
+  clampHelixOffsetMs,
   clampManualOffset,
   collectWarnings,
   DEFAULT_HOST_HOTKEYS,
+  applyGlobalHelixSettings,
   formatElapsed,
   formatMs,
   formatSignedMs,
@@ -345,28 +347,62 @@ describe("Helix sync timing", () => {
     expect(sanitizeHelixBpm("abc")).toBeUndefined();
   });
 
-  it("converts measures to milliseconds and applies signed offset", () => {
+  it("converts complete count-in measures to milliseconds and applies signed offset", () => {
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 120,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2,
       helixOffsetMs: 0
-    })).toBe(2000);
+    })).toBe(4000);
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 100,
       helixBeatsPerMeasure: 3,
       helixTargetMeasure: 2,
       helixOffsetMs: 0
-    })).toBe(1800);
+    })).toBe(3600);
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 120,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 3,
       helixOffsetMs: -80
-    })).toBe(3920);
+    })).toBe(5920);
+  });
+
+  it("rolls an offset forward by complete measures when more lead time is required", () => {
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBpm: 200,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 1,
+      helixOffsetMs: -1000
+    }, 1500)).toBe(2600);
+  });
+
+  it("supports large Helix shifts independently of device calibration", () => {
+    expect(clampHelixOffsetMs(45_000)).toBe(45_000);
+    expect(clampHelixOffsetMs(90_000)).toBe(60_000);
+    expect(clampHelixOffsetMs(-90_000)).toBe(-60_000);
+  });
+
+  it("combines the global Helix master and offset with song timing", () => {
+    const song = {
+      id: "song-1",
+      title: "Global timing",
+      sourceType: "other",
+      helixSyncEnabled: true,
+      helixOffsetMs: -250
+    };
+    expect(applyGlobalHelixSettings(song, { enabled: true, offsetMs: 1000 })).toMatchObject({
+      helixSyncEnabled: true,
+      helixOffsetMs: 750
+    });
+    expect(applyGlobalHelixSettings(song, { enabled: false, offsetMs: 1000 })).toMatchObject({
+      helixSyncEnabled: false,
+      helixOffsetMs: 750
+    });
   });
 
   it("returns undefined when Helix sync is disabled or incomplete", () => {
@@ -532,6 +568,6 @@ describe("formatting", () => {
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2,
       helixOffsetMs: -80
-    }, 1, 1)).toBe("1 / 1 - Other - Helix: 120 BPM, 4/4, start M2, -80 ms");
+    }, 1, 1)).toBe("1 / 1 - Other - Helix: 120 BPM, 4/4, 2-measure count-in, -80 ms");
   });
 });

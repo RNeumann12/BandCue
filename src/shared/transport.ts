@@ -11,6 +11,9 @@ export const HELIX_MIN_BPM = 20;
 export const HELIX_MAX_BPM = 400;
 export const HELIX_MAX_BEATS_PER_MEASURE = 16;
 export const HELIX_MAX_TARGET_MEASURE = 128;
+// Helix timing shifts can legitimately span several bars. Keep this separate
+// from the much smaller per-device calibration limit.
+export const HELIX_OFFSET_LIMIT_MS = 60_000;
 
 // Upper bound for the dynamic count-in so one terrible outlier cannot stretch
 // the wait absurdly; beyond this the device is better served by calibration.
@@ -87,7 +90,7 @@ export function clampHelixOffsetMs(value: number | undefined): number {
     return 0;
   }
 
-  return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(value)));
+  return Math.max(-HELIX_OFFSET_LIMIT_MS, Math.min(HELIX_OFFSET_LIMIT_MS, Math.round(value)));
 }
 
 export function helixMeasureDurationMs(bpm: number, beatsPerMeasure: number): number {
@@ -97,7 +100,7 @@ export function helixMeasureDurationMs(bpm: number, beatsPerMeasure: number): nu
 export function helixDelayMsForSong(song: Pick<
   SetlistSong,
   "helixSyncEnabled" | "helixBpm" | "helixBeatsPerMeasure" | "helixTargetMeasure" | "helixOffsetMs"
->): number | undefined {
+>, minimumDelayMs = 0): number | undefined {
   if (!song.helixSyncEnabled) {
     return undefined;
   }
@@ -109,8 +112,21 @@ export function helixDelayMsForSong(song: Pick<
     return undefined;
   }
 
+  const measureDurationMs = helixMeasureDurationMs(bpm, beatsPerMeasure);
   const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
-  return Math.round((targetMeasure - 1) * helixMeasureDurationMs(bpm, beatsPerMeasure) + offsetMs);
+  // `targetMeasure` is the number of complete Helix measures in the count-in.
+  // The previous implementation subtracted one, which consistently placed the
+  // BandCue start one whole measure earlier than the configured count-in.
+  let delayMs = targetMeasure * measureDurationMs + offsetMs;
+
+  // A large negative offset must not make Play impossible. Move the start to
+  // the next equivalent musical downbeat(s) until every device has enough time
+  // to receive and prepare the command.
+  if (delayMs < minimumDelayMs) {
+    delayMs += Math.ceil((minimumDelayMs - delayMs) / measureDurationMs) * measureDurationMs;
+  }
+
+  return Math.round(delayMs);
 }
 
 export function hasReadyTransportCapability(client: RoomClientSummary): boolean {

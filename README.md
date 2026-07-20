@@ -240,16 +240,19 @@ host browser and re-applied when that device reconnects.
 
 ### Helix Measure Sync
 
-For songs driven from a Line 6 Helix/Stadium timeline, enable **Helix sync** on the setlist song.
+For songs driven from a Line 6 Helix/Stadium timeline, enable **Helix sync** on the setlist song
+and leave the host's global **Start from Helix** switch on.
 The Helix should send BandCue's normal Play hotkey (`Ctrl+Alt+P`) at **measure 1 beat 1**. BandCue
-then converts the song's BPM, beats per measure, and target measure into the shared scheduled start
-time. With the default target measure `2`, devices start one complete measure after the Helix cue.
+then converts the song's BPM, beats per measure, and count-in measures into the shared scheduled
+start time. With the default count-in `2`, devices start two complete measures after the Helix cue.
 
-Use **Helix offset ms** to move the whole BandCue room against the Helix timeline: negative starts
-the room earlier, positive starts it later. This is separate from the **Timing** panel's per-device
-manual offset, which still fixes one specific adapter that consistently fires early or late. If the
-configured Helix target is too soon for the room's measured Wi-Fi/device lead time, BandCue rejects
-Play and asks for a later target measure or a larger positive Helix offset instead of starting late.
+Use the global **Helix offset ms** to move the whole BandCue room against the Helix timeline, then
+use a song's **Song trim ms** only for a song-specific correction. Negative starts earlier and
+positive starts later; the combined Helix range is ±60 seconds. This is separate from the
+**Timing** panel's per-device manual offset, which still fixes one specific adapter that
+consistently fires early or late. If a negative offset leaves too little Wi-Fi/device preparation
+time, BandCue automatically moves the start forward by complete measures, preserving the downbeat
+instead of rejecting Play.
 
 ## Adapters
 

@@ -26,6 +26,7 @@ export const HELIX_MIN_BPM = 20;
 export const HELIX_MAX_BPM = 400;
 export const HELIX_MAX_BEATS_PER_MEASURE = 16;
 export const HELIX_MAX_TARGET_MEASURE = 128;
+export const HELIX_OFFSET_LIMIT_MS = 60_000;
 
 // Trim a setlist song for publishing/persisting: drop empty optional fields and
 // only keep a duration source when there is a usable duration.
@@ -121,14 +122,14 @@ export function clampHelixOffsetMs(value) {
     return 0;
   }
 
-  return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(number)));
+  return Math.max(-HELIX_OFFSET_LIMIT_MS, Math.min(HELIX_OFFSET_LIMIT_MS, Math.round(number)));
 }
 
 export function helixMeasureDurationMs(bpm, beatsPerMeasure) {
   return beatsPerMeasure * 60000 / bpm;
 }
 
-export function helixDelayMsForSong(song) {
+export function helixDelayMsForSong(song, minimumDelayMs = 0) {
   if (!song?.helixSyncEnabled) {
     return undefined;
   }
@@ -140,7 +141,27 @@ export function helixDelayMsForSong(song) {
     return undefined;
   }
 
-  return Math.round((targetMeasure - 1) * helixMeasureDurationMs(bpm, beatsPerMeasure) + clampHelixOffsetMs(song.helixOffsetMs));
+  const measureDurationMs = helixMeasureDurationMs(bpm, beatsPerMeasure);
+  let delayMs = targetMeasure * measureDurationMs + clampHelixOffsetMs(song.helixOffsetMs);
+  if (delayMs < minimumDelayMs) {
+    delayMs += Math.ceil((minimumDelayMs - delayMs) / measureDurationMs) * measureDurationMs;
+  }
+  return Math.round(delayMs);
+}
+
+export function applyGlobalHelixSettings(song, settings) {
+  const normalized = normalizeSong(song);
+  if (!normalized) {
+    return undefined;
+  }
+
+  return {
+    ...normalized,
+    helixSyncEnabled: Boolean(settings?.enabled) && normalized.helixSyncEnabled,
+    helixOffsetMs: clampHelixOffsetMs(
+      (normalized.helixOffsetMs || 0) + clampHelixOffsetMs(Number(settings?.offsetMs || 0))
+    )
+  };
 }
 
 // Setlist navigation. -1 means "no selection". length 0 yields -1.
@@ -594,5 +615,5 @@ export function formatHelixMeta(song) {
 
   const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
   const offset = offsetMs ? `, ${formatSignedMs(offsetMs)}` : "";
-  return ` - Helix: ${bpm} BPM, ${beatsPerMeasure}/4, start M${targetMeasure}${offset}`;
+  return ` - Helix: ${bpm} BPM, ${beatsPerMeasure}/4, ${targetMeasure}-measure count-in${offset}`;
 }

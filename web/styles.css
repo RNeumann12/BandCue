@@ -263,6 +263,58 @@ button:disabled {
   color: white;
 }
 
+.helix-global {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) max-content minmax(150px, 220px) minmax(220px, 1fr);
+  gap: 10px 14px;
+  align-items: end;
+  border: 2px solid var(--ink);
+  border-left: 9px solid var(--accent);
+  border-radius: 7px;
+  padding: 11px 12px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent 32%),
+    var(--surface);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+.helix-global-heading {
+  display: grid;
+  gap: 1px;
+  align-self: center;
+}
+
+.helix-global-heading strong {
+  font-family: var(--font-display);
+  font-size: 1rem;
+  text-transform: uppercase;
+}
+
+.helix-global-kicker {
+  color: var(--accent);
+  font-size: 0.67rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.helix-global-toggle[aria-pressed="true"] {
+  background: var(--good);
+  color: white;
+}
+
+.helix-global-offset input {
+  padding-block: 8px;
+}
+
+.helix-global-status {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
 .hotkey-hints {
   grid-column: 1 / -1;
   display: flex;
@@ -786,6 +838,10 @@ body[data-transport="running"] .countdown {
   }
 
   .safety-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .helix-global {
     grid-template-columns: 1fr;
   }
 

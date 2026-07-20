@@ -116,12 +116,12 @@ describe("RoomController", () => {
       status: "scheduled",
       leaderId: host.id,
       sequenceId: 1,
-      scheduledServerTime: 3120
+      scheduledServerTime: 5120
     });
     expect(room.getState(1200).safety.armed).toBe(false);
   });
 
-  it("rejects Helix sync when the musical target leaves too little lead time", () => {
+  it("rolls a too-soon Helix target forward by whole measures", () => {
     const hostMessages: string[] = [];
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const host = room.addClient(fakeSocket(hostMessages), {
@@ -143,7 +143,7 @@ describe("RoomController", () => {
         helixSyncEnabled: true,
         helixBpm: 200,
         helixBeatsPerMeasure: 4,
-        helixTargetMeasure: 2,
+        helixTargetMeasure: 1,
         helixOffsetMs: 0
       }
     }, 1100);
@@ -152,12 +152,13 @@ describe("RoomController", () => {
 
     room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
 
-    expect(room.getState(1200).transport.status).toBe("stopped");
-    expect(room.getState(1200).safety.armed).toBe(true);
+    expect(room.getState(1200).transport).toMatchObject({
+      status: "scheduled",
+      scheduledServerTime: 3600
+    });
+    expect(room.getState(1200).safety.armed).toBe(false);
     expect(hostMessages.map((message) => JSON.parse(message)).find((message) => message.type === "error"))
-      .toMatchObject({
-        message: expect.stringContaining("Helix sync target is 1200 ms away")
-      });
+      .toBeUndefined();
   });
 
   it("still attaches per-device manual offsets to Helix-scheduled play commands", () => {
@@ -206,7 +207,7 @@ describe("RoomController", () => {
       .map((message) => JSON.parse(message))
       .find((message) => message.type === "transportCommand" && message.action === "play");
     expect(playCommand).toMatchObject({
-      scheduledServerTime: 3200,
+      scheduledServerTime: 5200,
       manualOffsetMs: 35
     });
   });

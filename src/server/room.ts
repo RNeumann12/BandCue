@@ -520,19 +520,11 @@ export class RoomController {
       return requiredLeadMs;
     }
 
-    const helixDelayMs = helixDelayMsForSong(song);
+    const helixDelayMs = helixDelayMsForSong(song, requiredLeadMs);
     if (helixDelayMs === undefined) {
       this.send(client, {
         type: "error",
         message: "Helix sync is enabled for this song, but it needs a valid BPM, beats per measure, and target measure."
-      });
-      return undefined;
-    }
-
-    if (helixDelayMs < requiredLeadMs) {
-      this.send(client, {
-        type: "error",
-        message: `Helix sync target is ${helixDelayMs} ms away, but this room needs ${requiredLeadMs} ms of lead time. Use a later target measure or a larger positive Helix offset.`
       });
       return undefined;
     }

@@ -243,7 +243,7 @@ A targeted failure reply (e.g. a rejected transport request or a non-host mutati
   "helixSyncEnabled": true,         // optional; Helix sends Play at measure 1 beat 1
   "helixBpm": 120,                  // optional; constant-BPM v1
   "helixBeatsPerMeasure": 4,        // optional; defaults to 4 in host UI
-  "helixTargetMeasure": 2,          // optional; start after measure 1 by default
+  "helixTargetMeasure": 2,          // optional; complete count-in measures (defaults to 2)
   "helixOffsetMs": -80,             // optional; whole-room offset against Helix timeline
   "notes": "capo 2"                 // optional
 }
@@ -254,8 +254,9 @@ dedicated field (`songsterrUrl` / `museScoreSource`) wins, else `source` is used
 primary `sourceType` matches that app. For Songsterr adapters, `songsterrBassUrl` and
 `songsterrDrumUrl` override the main Songsterr URL for members who selected those instruments.
 When `helixSyncEnabled` is true, the server schedules Play from the Helix fields instead of the
-normal adaptive count-in. The target must still leave enough lead time for the room; otherwise Play
-is rejected rather than started late.
+normal adaptive count-in. If the offset leaves too little lead time for the room, the server rolls
+the start forward by complete measures until it has enough preparation time, preserving musical
+phase instead of rejecting Play.
 
 ### `SongCatalogStatus` / `SongCatalogEntry` / `SongCatalogMatch`
 Privacy-safe local MuseScore library data published by a bridge/helper. Entries carry only a
