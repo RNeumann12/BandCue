@@ -70,6 +70,7 @@ interface Args {
   activationRetries: number;
   activationDelayMs: number;
   commandGapMs: number;
+  dispatchLeadMs: number;
   bridgePort?: number;
   bridgeFallbackMs: number;
   scoreFolders: string[];
@@ -85,6 +86,13 @@ const OPEN_SCORE_TITLE_TIMEOUT_MS = 5_000;
 // Grace period per old instance to exit after WM_CLOSE before it is reported
 // as lingering (a "save changes?" prompt keeps it alive on purpose).
 const OPEN_SCORE_CLOSE_WAIT_MS = 4_000;
+// Starting powershell.exe, locating/activating MuseScore, and sending the
+// reset prefix can take several hundred milliseconds. Do that work during the
+// count-in and leave only the final Play key for the scheduled instant.
+const DEFAULT_DISPATCH_LEAD_MS = 1000;
+// A bridge that only contacted the HTTP API long ago must not add the fallback
+// wait forever. Real bridge helpers poll much more frequently than this.
+const BRIDGE_ACTIVE_WINDOW_MS = 5000;
 
 interface MuseScoreStatus {
   ready: boolean;
@@ -128,6 +136,7 @@ let serverOffsetMs = 0;
 let inferredPlayback: AdapterPlaybackState = "unknown";
 let lastMuseScoreStatus: MuseScoreStatus | undefined;
 let currentSong: SetlistSong | undefined;
+let currentSongUpdatedAt: number | undefined;
 let bridgeStatus: Partial<MuseScoreStatus> & { playback?: AdapterPlaybackState } = {};
 let bridgeLastSeenAt: number | undefined;
 let scoreCatalog: LocalScoreCatalog = scanMuseScoreCatalog([]);
@@ -136,6 +145,8 @@ const bridgeCommands = new Map<number, BridgeCommand>();
 let clockTimer: NodeJS.Timeout | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
 let catalogTimer: NodeJS.Timeout | undefined;
+let statusReportInFlight = false;
+let statusReportQueued = false;
 let bridgeServer: HttpServer | undefined;
 const samples: ClockSample[] = [];
 
@@ -205,7 +216,9 @@ async function connect(): Promise<void> {
 
     if (message.type === "transportCommand") {
       currentSong = message.currentSong?.song;
+      currentSongUpdatedAt = message.currentSong?.updatedAt;
       const manualOffsetMs = message.manualOffsetMs ?? 0;
+      const dueLocalAt = message.scheduledServerTime + manualOffsetMs - serverOffsetMs;
       const delayMs = delayUntilServerTime(
         message.scheduledServerTime + manualOffsetMs,
         Date.now(),
@@ -222,20 +235,24 @@ async function connect(): Promise<void> {
       queueBridgeCommand({
         action: message.action,
         sequenceId: message.sequenceId,
-        dueLocalAt: Date.now() + delayMs,
+        dueLocalAt,
         scheduledServerTime: message.scheduledServerTime + manualOffsetMs,
         resetBeforePlay: Boolean(message.resetBeforePlay),
         currentSong,
         status: "queued",
         createdAt: Date.now()
       });
+      const dispatchLeadMs = message.action === "play" && !hasActiveBridge()
+        ? Math.min(args.dispatchLeadMs, delayMs)
+        : 0;
       setTimeout(() => {
-        void triggerMuseScoreTransport(message.action, message.sequenceId);
-      }, delayMs);
+        void triggerMuseScoreTransport(message.action, message.sequenceId, dueLocalAt);
+      }, Math.max(0, delayMs - dispatchLeadMs));
     }
 
     if (message.type === "openSongCommand") {
       currentSong = message.currentSong?.song;
+      currentSongUpdatedAt = message.currentSong?.updatedAt;
       void handleOpenSongCommand(message.sequenceId);
       return;
     }
@@ -245,8 +262,12 @@ async function connect(): Promise<void> {
     }
 
     if (message.type === "roomState") {
+      const songChanged = message.currentSong?.updatedAt !== currentSongUpdatedAt;
       currentSong = message.currentSong?.song;
-      void reportMuseScoreStatus();
+      currentSongUpdatedAt = message.currentSong?.updatedAt;
+      if (songChanged) {
+        void reportMuseScoreStatus();
+      }
       return;
     }
   });
@@ -446,6 +467,13 @@ function pollMuseScore(): void {
 }
 
 async function reportMuseScoreStatus(): Promise<void> {
+  if (statusReportInFlight) {
+    statusReportQueued = true;
+    return;
+  }
+
+  statusReportInFlight = true;
+  try {
     const status = await getMuseScoreStatus();
     lastMuseScoreStatus = status;
     const match = matchMuseScoreSong(currentSong, scoreCatalog.entries);
@@ -480,6 +508,13 @@ async function reportMuseScoreStatus(): Promise<void> {
         ? match.detail
         : mismatch ?? status.detail
     });
+  } finally {
+    statusReportInFlight = false;
+    if (statusReportQueued) {
+      statusReportQueued = false;
+      void reportMuseScoreStatus();
+    }
+  }
 }
 
 function stopIntervals(): void {
@@ -554,10 +589,20 @@ exit 1
   };
 }
 
-async function triggerMuseScoreTransport(action: TransportAction, sequenceId: number): Promise<void> {
-  const bridgeResult = bridgeServer && bridgeLastSeenAt
+async function triggerMuseScoreTransport(
+  action: TransportAction,
+  sequenceId: number,
+  dueLocalAt = Date.now()
+): Promise<void> {
+  const queuedBridgeCommand = bridgeCommands.get(sequenceId);
+  // A helper that claimed the command gets the configured grace period to
+  // report its result. An unclaimed command has already had the whole count-in
+  // to be noticed, so waiting another 900 ms here only makes fallback late.
+  const bridgeResult = queuedBridgeCommand?.status === "claimed"
     ? await waitForBridgeResult(sequenceId, args.bridgeFallbackMs)
-    : undefined;
+    : queuedBridgeCommand?.status === "succeeded" || queuedBridgeCommand?.status === "failed"
+      ? queuedBridgeCommand
+      : undefined;
 
   if (bridgeResult?.status === "succeeded") {
     applyBridgeCommandResult(action, sequenceId, bridgeResult);
@@ -566,6 +611,10 @@ async function triggerMuseScoreTransport(action: TransportAction, sequenceId: nu
 
   if (bridgeResult?.status === "failed") {
     console.warn(`MuseScore bridge ${action} failed: ${bridgeResult.detail ?? "No detail reported"}`);
+  }
+
+  if (queuedBridgeCommand && queuedBridgeCommand.status !== "failed") {
+    queuedBridgeCommand.status = "expired";
   }
 
   const resetBeforePlay = Boolean(bridgeCommands.get(sequenceId)?.resetBeforePlay);
@@ -604,16 +653,29 @@ for ($attempt = 0; $attempt -lt ${args.activationRetries}; $attempt++) {
   }
 }
 if (-not $activated) { exit 3 }
-$keys = @(${keys.map((key) => `'${escapePowerShellSingleQuoted(key)}'`).join(", ")})
-foreach ($key in $keys) {
+$prefixKeys = @(${keys.slice(0, -1).map((key) => `'${escapePowerShellSingleQuoted(key)}'`).join(", ")})
+foreach ($key in $prefixKeys) {
   [System.Windows.Forms.SendKeys]::SendWait($key)
   Start-Sleep -Milliseconds ${args.commandGapMs}
 }
+$dueLocalAt = [int64]${Math.round(dueLocalAt)}
+while ($true) {
+  $remainingMs = $dueLocalAt - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  if ($remainingMs -le 0) { break }
+  if ($remainingMs -gt 25) {
+    Start-Sleep -Milliseconds ($remainingMs - 15)
+  } else {
+    [System.Threading.Thread]::SpinWait(500)
+  }
+}
+$firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+[System.Windows.Forms.SendKeys]::SendWait('${escapePowerShellSingleQuoted(keys.at(-1) ?? "")}')
 [PSCustomObject]@{
   processId = $process.Id
   processName = $process.ProcessName
   windowTitle = ($process.MainWindowTitle -replace '\\r|\\n', ' ')
-  keyCount = $keys.Count
+  keyCount = $prefixKeys.Count + 1
+  firedAtLocal = $firedAtLocal
 } | ConvertTo-Json -Compress
 `;
 
@@ -635,6 +697,7 @@ foreach ($key in $keys) {
       processName?: string;
       windowTitle?: string;
       keyCount?: number;
+      firedAtLocal?: number;
     }>(result.stdout);
     inferredPlayback = action === "play" ? "playing" : "stopped";
     bridgeStatus.playback = inferredPlayback;
@@ -657,6 +720,9 @@ foreach ($key in $keys) {
       status: "succeeded",
       detail: mismatch ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, bridgeResult),
       controlPath: `windows-sendkeys:${action === "play" ? playControlPath(resetBeforePlay) : "stop-key"}`,
+      firedAtServerTime: Number.isFinite(commandResult?.firedAtLocal)
+        ? Math.round((commandResult?.firedAtLocal ?? Date.now()) + serverOffsetMs)
+        : undefined,
       at: Date.now()
     });
   }
@@ -795,6 +861,7 @@ function reportCommandStatus(command: {
   detail: string;
   at: number;
   controlPath?: string;
+  firedAtServerTime?: number;
 }): void {
   const state: AdapterStatus["state"] =
     command.status === "pending"
@@ -818,7 +885,8 @@ function reportCommandStatus(command: {
       status: command.status,
       at: command.at,
       detail: command.detail,
-      controlPath: command.controlPath
+      controlPath: command.controlPath,
+      firedAtServerTime: command.firedAtServerTime
     }
   });
 }
@@ -1028,6 +1096,10 @@ function startBridge(port: number): void {
     const actualPort = typeof address === "object" && address ? address.port : port;
     console.log(`MuseScore bridge listening on http://127.0.0.1:${actualPort}`);
   });
+}
+
+function hasActiveBridge(now = Date.now()): boolean {
+  return Boolean(bridgeServer && bridgeLastSeenAt && now - bridgeLastSeenAt <= BRIDGE_ACTIVE_WINDOW_MS);
 }
 
 function queueBridgeCommand(command: BridgeCommand): boolean {
@@ -1427,6 +1499,7 @@ function parseArgs(raw: string[]): Args {
     activationRetries: 5,
     activationDelayMs: 90,
     commandGapMs: 120,
+    dispatchLeadMs: DEFAULT_DISPATCH_LEAD_MS,
     bridgeFallbackMs: 900,
     scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
     scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0",
@@ -1455,6 +1528,9 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--command-gap-ms") {
       parsed.commandGapMs = parsePositiveInt(raw[index + 1], parsed.commandGapMs);
+    }
+    if (value === "--dispatch-lead-ms") {
+      parsed.dispatchLeadMs = parseNonNegativeInt(raw[index + 1], parsed.dispatchLeadMs);
     }
     if (value === "--bridge-port") {
       parsed.bridgePort = parseNonNegativeInt(raw[index + 1], 0);

@@ -95,13 +95,14 @@ Parsed by `parseArgs` in [`musescore-windows.ts`](../src/adapters/musescore-wind
 | `--activation-retries <n>` | **5** | Retries to bring the MuseScore window to the foreground. |
 | `--activation-delay-ms <n>` | **90** | Delay between activation retries. |
 | `--command-gap-ms <n>` | **120** | Gap between chained keystrokes. |
+| `--dispatch-lead-ms <n>` | **1000** | Start Windows activation/reset this far before scheduled Play; the final Play key still waits for the downbeat. Use `0` to disable. |
 
 ### Bridge mode
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--bridge-port <n>` | unset (off) | Expose the localhost bridge API on this port (e.g. `4731`). |
-| `--bridge-fallback-ms <n>` | **900** | Wait after the scheduled time for a bridge result before the keyboard fallback runs. |
+| `--bridge-fallback-ms <n>` | **900** | Grace after the scheduled time for an already-claimed bridge command. Unclaimed commands fall back immediately. |
 
 ### Local score catalog
 

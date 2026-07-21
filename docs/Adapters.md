@@ -205,10 +205,12 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4731/commands/12/result `
   -ContentType application/json
 ```
 
-**Fallback timing.** If a bridge helper has contacted the adapter but no result arrives within
+**Fallback timing.** If a bridge helper claimed a command but no result arrives within
 `--bridge-fallback-ms` (default **900 ms**) after the scheduled time, the Windows keyboard path
-runs. If no helper is polling at all, the keyboard fallback runs immediately at the scheduled
-time. The bridge queue carries `open-song` commands too, completed through the same claim/result
+runs. A command still unclaimed at the downbeat falls back immediately. Without an active bridge
+helper, Windows activation/reset begins during the count-in and only the final Play key waits for
+`dueLocalAt` (`--dispatch-lead-ms`, default **1000 ms**). The bridge queue carries `open-song`
+commands too, completed through the same claim/result
 endpoints; if no helper handles `open-song`, the Windows helper opens the single matched local
 score itself.
 

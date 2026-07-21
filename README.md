@@ -340,9 +340,12 @@ popup (or disconnect the extension) so this machine doesn't pop open Songsterr t
 External helpers (a MuseScore plugin or local script) can drive playback through the bridge HTTP
 API on `127.0.0.1:4731`: report status to `POST /status`, poll `GET /commands`, claim/complete
 with `POST /commands/{sequenceId}/claim` and `/result`, and read the privacy-safe local catalog
-from `GET /catalog`. If no bridge helper handles a command within the fallback window
-(`--bridge-fallback-ms`, default 900 ms after the scheduled time), the Windows keyboard path
-runs as the fallback. The full bridge protocol is in [docs/Adapters.md](docs/Adapters.md#musescore-bridge-api).
+from `GET /catalog`. A claimed bridge command gets the fallback window
+(`--bridge-fallback-ms`, default 900 ms after the scheduled time) to report its result; a command
+still unclaimed at the downbeat falls back immediately. Without an active bridge helper, Windows
+activation/reset begins during the count-in (`--dispatch-lead-ms`, default 1000 ms) and only the
+final Play key waits for the scheduled instant. The full bridge protocol is in
+[docs/Adapters.md](docs/Adapters.md#musescore-bridge-api).
 
 ## V1 Limits
 
