@@ -254,9 +254,22 @@ dedicated field (`songsterrUrl` / `museScoreSource`) wins, else `source` is used
 primary `sourceType` matches that app. For Songsterr adapters, `songsterrBassUrl` and
 `songsterrDrumUrl` override the main Songsterr URL for members who selected those instruments.
 When `helixSyncEnabled` is true, the server schedules Play from the Helix fields instead of the
-normal adaptive count-in. If the offset leaves too little lead time for the room, the server rolls
-the start forward by complete measures until it has enough preparation time, preserving musical
-phase instead of rejecting Play.
+normal adaptive count-in. The Helix cue fires once and keeps its own timeline regardless of
+BandCue, so if the offset leaves too little lead time for the room, the server does *not* roll the
+start forward to the next complete measure -- that would start BandCue a full measure behind a
+Helix count-in that can't be extended. Instead it holds the delay to exactly the room's
+network/device-prep floor. Right after such a Play request, the server broadcasts a
+`helixScheduleUpdate` message so host UIs can show whether that happened and by how much:
+
+```jsonc
+{
+  "type": "helixScheduleUpdate",
+  "requestedDelayMs": 1200,   // count-in + offset, before any floor
+  "minimumDelayMs": 1500,     // network/device-prep floor for this room right now
+  "appliedDelayMs": 1500,     // delay actually scheduled: max(requestedDelayMs, minimumDelayMs)
+  "extendedMs": 300           // appliedDelayMs - requestedDelayMs; 0 when honored as-is
+}
+```
 
 ### `SongCatalogStatus` / `SongCatalogEntry` / `SongCatalogMatch`
 Privacy-safe local MuseScore library data published by a bridge/helper. Entries carry only a

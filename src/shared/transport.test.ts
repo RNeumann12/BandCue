@@ -5,6 +5,7 @@ import {
   MAX_SCHEDULE_DELAY_MS,
   decideTransportRequest,
   helixDelayMsForSong,
+  helixScheduleInfo,
   scheduleDelayForClients
 } from "./transport.js";
 
@@ -204,14 +205,14 @@ describe("Helix sync timing", () => {
     })).toBe(64_000);
   });
 
-  it("rolls a too-early offset forward by whole measures to preserve phase", () => {
+  it("holds a too-early offset to exactly the room's floor, never a whole extra measure", () => {
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 200,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 1,
       helixOffsetMs: -1000
-    }, 1500)).toBe(2600);
+    }, 1500)).toBe(1500);
   });
 
   it("returns undefined for disabled or invalid Helix sync metadata", () => {
@@ -228,5 +229,41 @@ describe("Helix sync timing", () => {
       helixBeatsPerMeasure: 0,
       helixTargetMeasure: 2
     })).toBeUndefined();
+  });
+});
+
+describe("helixScheduleInfo", () => {
+  it("reports zero extension when the requested delay already clears the floor", () => {
+    expect(helixScheduleInfo({
+      helixSyncEnabled: true,
+      helixBpm: 120,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 2,
+      helixOffsetMs: -80
+    }, 1500)).toMatchObject({
+      requestedDelayMs: 3920,
+      minimumDelayMs: 1500,
+      appliedDelayMs: 3920,
+      extendedMs: 0
+    });
+  });
+
+  it("reports how far a too-early request got held to the floor, without adding a whole measure", () => {
+    expect(helixScheduleInfo({
+      helixSyncEnabled: true,
+      helixBpm: 200,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 1,
+      helixOffsetMs: -1000
+    }, 1500)).toMatchObject({
+      requestedDelayMs: 200,
+      minimumDelayMs: 1500,
+      appliedDelayMs: 1500,
+      extendedMs: 1300
+    });
+  });
+
+  it("returns undefined for disabled or invalid Helix sync metadata", () => {
+    expect(helixScheduleInfo({ helixSyncEnabled: false })).toBeUndefined();
   });
 });

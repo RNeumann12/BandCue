@@ -90,6 +90,7 @@ const elements = {
   globalHelixToggleButton: $button("#globalHelixToggleButton"),
   globalHelixOffsetInput: $input("#globalHelixOffsetInput"),
   globalHelixStatus: $("#globalHelixStatus"),
+  globalHelixScheduleDebug: $("#globalHelixScheduleDebug"),
   playButton: $button("#playButton"),
   stopButton: $button("#stopButton"),
   setlistPanel: $("#setlistPanel"),
@@ -163,6 +164,8 @@ let prevTransportStatus = "stopped";
 let lastStableRoomSignature = "";
 let pendingTimingState;
 let timingRenderTimer;
+let countdownTimer;
+let countdownIntervalMs;
 
 const TIMING_RENDER_INTERVAL_MS = 1200;
 // Setlist mode: how long to let the next song's tab/score load before starting,
@@ -280,7 +283,6 @@ elements.timingRows?.addEventListener("change", (event) => {
   setDeviceCalibration(clientId, deviceName, manualOffsetMs);
 });
 
-setInterval(updateCountdown, 60);
 // Re-evaluate the loading->play settle on a timer: once an adapter is stably
 // ready it stops sending status, so room-state events alone may not fire again.
 setInterval(tickSetlistLoading, 250);
@@ -487,6 +489,10 @@ function connect() {
       setText(elements.subline, message.message);
       setText(elements.hostWarning, message.message);
     }
+
+    if (message.type === "helixScheduleUpdate") {
+      renderHelixScheduleDebug(message);
+    }
   });
 
   socket.addEventListener("close", () => {
@@ -512,6 +518,7 @@ function connect() {
 }
 
 function renderState(state) {
+  syncCountdownTimer();
   const stableSignature = getStableRoomSignature(state);
   if (stableSignature === lastStableRoomSignature) {
     renderVolatileState(state);
@@ -1117,6 +1124,26 @@ function renderGlobalHelixSettings() {
   );
 }
 
+function renderHelixScheduleDebug(info) {
+  if (!elements.globalHelixScheduleDebug) {
+    return;
+  }
+
+  if (!info) {
+    setText(elements.globalHelixScheduleDebug, "");
+    return;
+  }
+
+  const extended = info.extendedMs > 0;
+  setText(
+    elements.globalHelixScheduleDebug,
+    extended
+      ? `Last start: requested ${info.requestedDelayMs} ms, held to ${info.appliedDelayMs} ms (+${info.extendedMs} ms) — this room's network/device-prep floor needed more lead time than the configured count-in gives. Consider a smaller negative Helix offset or improving Wi-Fi.`
+      : `Last start: requested ${info.requestedDelayMs} ms, applied as-is.`
+  );
+  elements.globalHelixScheduleDebug.classList.toggle("helix-global-debug--extended", extended);
+}
+
 function selectCurrentSong(index) {
   if (index < 0 || index >= setlist.length) {
     return;
@@ -1520,6 +1547,27 @@ function updateCountdown() {
   setText(elements.countdown, "--");
   setText(elements.elapsedTime, "00:00");
   setText(elements.subline, "Waiting for a transport command");
+}
+
+function syncCountdownTimer() {
+  const status = lastState?.transport?.status;
+  const desiredIntervalMs = status === "scheduled" ? 60 : status === "running" ? 250 : undefined;
+  if (countdownTimer && countdownIntervalMs !== desiredIntervalMs) {
+    clearInterval(countdownTimer);
+    countdownTimer = undefined;
+    countdownIntervalMs = undefined;
+  }
+
+  if (desiredIntervalMs !== undefined && !countdownTimer) {
+    updateCountdown();
+    countdownIntervalMs = desiredIntervalMs;
+    countdownTimer = setInterval(updateCountdown, desiredIntervalMs);
+    return;
+  }
+
+  if (desiredIntervalMs === undefined) {
+    updateCountdown();
+  }
 }
 
 function getDeviceBadge(device, state) {

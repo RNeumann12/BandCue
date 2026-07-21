@@ -24,12 +24,14 @@ import type {
   TransportRequest,
   TransportState
 } from "../shared/protocol.js";
+import type { HelixScheduleInfo } from "../shared/transport.js";
 import {
   DEFAULT_SCHEDULE_DELAY_MS,
   MANUAL_OFFSET_LIMIT_MS,
   clampHelixOffsetMs,
   decideTransportRequest,
-  helixDelayMsForSong,
+  hasReadyTransportCapability,
+  helixScheduleInfo,
   sanitizeHelixBeatsPerMeasure,
   sanitizeHelixBpm,
   sanitizeHelixTargetMeasure,
@@ -73,6 +75,7 @@ export class RoomController {
   };
   private openSongSequence = 0;
   private currentSong?: CurrentSongState;
+  private lastHelixScheduleInfo?: HelixScheduleInfo;
   private setlist: SetlistState = {
     songs: [],
     updatedAt: 0
@@ -87,6 +90,7 @@ export class RoomController {
   private playbackEndTimer?: NodeJS.Timeout;
   private playbackEndTracking?: {
     sequenceId: number;
+    requiredClientIds: Set<string>;
     playingClientIds: Set<string>;
   };
   private pendingClockBroadcast?: NodeJS.Timeout;
@@ -511,17 +515,24 @@ export class RoomController {
 
     if (request.action === "play") {
       this.markRunningAt(command.scheduledServerTime);
+      if (this.lastHelixScheduleInfo) {
+        this.broadcast({
+          type: "helixScheduleUpdate",
+          ...this.lastHelixScheduleInfo
+        });
+      }
     }
   }
 
   private delayForPlayRequest(requiredLeadMs: number, client: RoomClientSummary): number | undefined {
+    this.lastHelixScheduleInfo = undefined;
     const song = this.currentSong?.song;
     if (!song?.helixSyncEnabled) {
       return requiredLeadMs;
     }
 
-    const helixDelayMs = helixDelayMsForSong(song, requiredLeadMs);
-    if (helixDelayMs === undefined) {
+    const info = helixScheduleInfo(song, requiredLeadMs);
+    if (info === undefined) {
       this.send(client, {
         type: "error",
         message: "Helix sync is enabled for this song, but it needs a valid BPM, beats per measure, and target measure."
@@ -529,7 +540,8 @@ export class RoomController {
       return undefined;
     }
 
-    return helixDelayMs;
+    this.lastHelixScheduleInfo = info;
+    return info.appliedDelayMs;
   }
 
   private handleOpenSongRequest(
@@ -634,6 +646,18 @@ export class RoomController {
     this.clearPlaybackEndTimer();
     this.playbackEndTracking = {
       sequenceId,
+      // Snapshot the adapters that were ready for this run. A device joining
+      // later must not block auto-stop for a song it never participated in.
+      requiredClientIds: new Set(
+        [...this.clients.values()]
+          // Status can lag the downbeat: include every adapter that was
+          // connected and transport-capable when the run began, then let
+          // shouldStopFromPlaybackEnd ignore any that remain not-ready.
+          .filter((client) => client.capabilities.some(
+            (capability) => capability.canPlay && capability.canStop
+          ))
+          .map((client) => client.id)
+      ),
       playingClientIds: new Set()
     };
   }
@@ -666,6 +690,9 @@ export class RoomController {
 
     const playback = this.clients.get(clientId)?.status?.playback;
     if (playback === "playing") {
+      // Also include an adapter that became ready just after the downbeat but
+      // demonstrably joined playback during this run.
+      this.playbackEndTracking?.requiredClientIds.add(clientId);
       this.playbackEndTracking?.playingClientIds.add(clientId);
       this.clearPlaybackEndTimer();
       return false;
@@ -685,15 +712,17 @@ export class RoomController {
       return false;
     }
 
-    for (const client of this.clients.values()) {
-      if (client.status?.playback === "playing") {
-        return false;
-      }
-    }
-
-    for (const clientId of tracking.playingClientIds) {
+    // Every ready adapter participating in this run must have both actually
+    // started and currently report stopped. A disconnected/not-ready adapter
+    // no longer participates, and a newly connected idle adapter is not in the
+    // snapshot, so neither can hold the room open forever.
+    for (const clientId of tracking.requiredClientIds) {
       const client = this.clients.get(clientId);
-      if (client && client.status?.playback !== "stopped") {
+      if (!client || !hasReadyTransportCapability(client)) {
+        continue;
+      }
+
+      if (!tracking.playingClientIds.has(clientId) || client.status?.playback !== "stopped") {
         return false;
       }
     }

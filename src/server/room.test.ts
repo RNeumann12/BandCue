@@ -121,7 +121,7 @@ describe("RoomController", () => {
     expect(room.getState(1200).safety.armed).toBe(false);
   });
 
-  it("rolls a too-soon Helix target forward by whole measures", () => {
+  it("holds a too-soon Helix target to the room's floor, never a whole extra measure", () => {
     const hostMessages: string[] = [];
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const host = room.addClient(fakeSocket(hostMessages), {
@@ -154,11 +154,17 @@ describe("RoomController", () => {
 
     expect(room.getState(1200).transport).toMatchObject({
       status: "scheduled",
-      scheduledServerTime: 3600
+      scheduledServerTime: 2700
     });
     expect(room.getState(1200).safety.armed).toBe(false);
-    expect(hostMessages.map((message) => JSON.parse(message)).find((message) => message.type === "error"))
-      .toBeUndefined();
+    const parsedHostMessages = hostMessages.map((message) => JSON.parse(message));
+    expect(parsedHostMessages.find((message) => message.type === "error")).toBeUndefined();
+    expect(parsedHostMessages.find((message) => message.type === "helixScheduleUpdate")).toMatchObject({
+      requestedDelayMs: 1200,
+      minimumDelayMs: 1500,
+      appliedDelayMs: 1500,
+      extendedMs: 300
+    });
   });
 
   it("still attaches per-device manual offsets to Helix-scheduled play commands", () => {
@@ -980,6 +986,122 @@ describe("RoomController", () => {
         .map((message) => JSON.parse(message))
         .filter((message) => message.type === "transportCommand" && message.action === "stop");
       expect(stopCommands).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not auto-stop while a second adapter has not started playing yet", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const adapterMessages: string[] = [];
+      const room = new RoomController("ABC123", "http://room", "http://host", 100);
+      const host = room.addClient(undefined, {
+        type: "clientHello",
+        deviceName: "Host",
+        role: "host",
+        capabilities: []
+      }, 1000);
+      const fastAdapter = room.addClient(fakeSocket([]), {
+        type: "clientHello",
+        deviceName: "Songsterr",
+        role: "desktop-adapter",
+        capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+      }, 1000);
+      const slowAdapter = room.addClient(fakeSocket(adapterMessages), {
+        type: "clientHello",
+        deviceName: "MuseScore",
+        role: "desktop-adapter",
+        capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+      }, 1000);
+
+      room.handleMessage(host.id, {
+        type: "currentSongUpdate",
+        index: 1,
+        total: 1,
+        updatedAt: 1000,
+        song: {
+          id: "song-1",
+          title: "Song Without Duration",
+          sourceType: "musescore"
+        }
+      }, 1000);
+      room.handleMessage(host.id, {
+        type: "safetyUpdate",
+        armed: true,
+        updatedAt: 1000
+      }, 1000);
+      adapterMessages.length = 0;
+
+      room.handleMessage(host.id, {
+        type: "transportRequest",
+        action: "play",
+        requestedAt: 1000
+      }, 1000);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(room.getState(1100).transport.status).toBe("running");
+
+      // MuseScore hasn't reported anything since Play (still mid Windows
+      // automation), but it's still ready=true with a lingering "stopped" status
+      // from before Play. Songsterr blips through playing then stopped quickly.
+      room.handleMessage(slowAdapter.id, {
+        type: "adapterStatus",
+        app: "musescore",
+        ready: true,
+        playback: "stopped"
+      }, 1100);
+      room.handleMessage(fastAdapter.id, {
+        type: "adapterStatus",
+        app: "songsterr",
+        ready: true,
+        playback: "playing"
+      }, 1100);
+      room.handleMessage(fastAdapter.id, {
+        type: "adapterStatus",
+        app: "songsterr",
+        ready: true,
+        playback: "stopped"
+      }, 1100);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(room.getState(2100).transport.status).toBe("running");
+
+      // Once MuseScore actually starts and later stops, the room can auto-stop.
+      room.handleMessage(slowAdapter.id, {
+        type: "adapterStatus",
+        app: "musescore",
+        ready: true,
+        playback: "playing"
+      }, 2100);
+      room.handleMessage(slowAdapter.id, {
+        type: "adapterStatus",
+        app: "musescore",
+        ready: true,
+        playback: "stopped"
+      }, 2100);
+
+      // A ready adapter that connects after the downbeat did not participate
+      // in this run and must not hold the room open forever.
+      const lateAdapter = room.addClient(fakeSocket([]), {
+        type: "clientHello",
+        deviceName: "Late Songsterr",
+        role: "desktop-adapter",
+        capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+      }, 2100);
+      room.handleMessage(lateAdapter.id, {
+        type: "adapterStatus",
+        app: "songsterr",
+        ready: true,
+        playback: "stopped"
+      }, 2100);
+
+      await vi.advanceTimersByTimeAsync(750);
+      expect(room.getState(2850).transport).toMatchObject({
+        status: "stopped",
+        stopReason: "auto-playback-ended"
+      });
     } finally {
       vi.useRealTimers();
     }

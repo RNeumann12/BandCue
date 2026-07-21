@@ -371,14 +371,14 @@ describe("Helix sync timing", () => {
     })).toBe(5920);
   });
 
-  it("rolls an offset forward by complete measures when more lead time is required", () => {
+  it("holds a too-early offset to exactly the room's floor, never a whole extra measure", () => {
     expect(helixDelayMsForSong({
       helixSyncEnabled: true,
       helixBpm: 200,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 1,
       helixOffsetMs: -1000
-    }, 1500)).toBe(2600);
+    }, 1500)).toBe(1500);
   });
 
   it("supports large Helix shifts independently of device calibration", () => {

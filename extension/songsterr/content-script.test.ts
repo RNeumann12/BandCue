@@ -99,9 +99,22 @@ function loadContentScript({
       }
     }
   };
+  let mutationObserver: FakeMutationObserver | undefined;
   class FakeMutationObserver {
-    observe() {}
-    disconnect() {}
+    observed = false;
+    disconnected = false;
+
+    constructor() {
+      mutationObserver = this;
+    }
+
+    observe() {
+      this.observed = true;
+    }
+
+    disconnect() {
+      this.disconnected = true;
+    }
   }
 
   const context: any = {
@@ -123,7 +136,7 @@ function loadContentScript({
   };
   vm.createContext(context);
   vm.runInContext(contentScriptSource, context);
-  return { context, messages };
+  return { context, messages, mutationObserver };
 }
 
 describe("Songsterr content duration discovery", () => {
@@ -173,6 +186,15 @@ describe("Songsterr content duration discovery", () => {
     vi.runOnlyPendingTimers();
 
     expect(messages).toContainEqual(expect.objectContaining({ durationMs: 211_000 }));
+  });
+
+  it("does not keep a document-wide observer active after finding a duration", () => {
+    const media = new FakeMediaElement();
+    media.duration = 184;
+
+    const { mutationObserver } = loadContentScript({ media: [media] });
+
+    expect(mutationObserver).toBeUndefined();
   });
 });
 

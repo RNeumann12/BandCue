@@ -3,6 +3,7 @@ let statusTimer;
 let statusReportTimer;
 let durationObserver;
 let lastObservedDurationMs;
+let lastObservedSource = location.href;
 const observedMediaElements = new WeakSet();
 
 // The "audio, video" selector guarantees media elements, but querySelectorAll
@@ -12,9 +13,19 @@ function queryMediaElements() {
 }
 
 function reportStatus() {
+  if (location.href !== lastObservedSource) {
+    lastObservedSource = location.href;
+    lastObservedDurationMs = undefined;
+    startDurationObservation();
+  }
   observeDurationSources();
   const durationMs = readSongDurationMs();
   lastObservedDurationMs = durationMs;
+  if (durationMs !== undefined) {
+    stopDurationObservation();
+  } else {
+    startDurationObservation();
+  }
   sendRuntimeMessage({
     type: "songsterrStatus",
     ready: true,
@@ -27,6 +38,9 @@ function reportStatus() {
 
 function scheduleStatusReport(delayMs = 100, onlyWhenDurationChanges = false) {
   if (statusReportTimer) {
+    if (onlyWhenDurationChanges) {
+      return;
+    }
     clearTimeout(statusReportTimer);
   }
 
@@ -88,10 +102,7 @@ function handleRuntimeMessageError(error) {
       clearTimeout(statusReportTimer);
       statusReportTimer = undefined;
     }
-    if (durationObserver) {
-      durationObserver.disconnect();
-      durationObserver = undefined;
-    }
+    stopDurationObservation();
   }
 }
 
@@ -323,12 +334,16 @@ function parseTimeValue(value) {
 
 function startDurationObservation() {
   observeDurationSources();
-  if (typeof MutationObserver !== "function" || !document.documentElement) {
+  if (
+    lastObservedDurationMs !== undefined ||
+    durationObserver ||
+    typeof MutationObserver !== "function" ||
+    !document.documentElement
+  ) {
     return;
   }
 
   durationObserver = new MutationObserver(() => {
-    observeDurationSources();
     scheduleStatusReport(250, true);
   });
   durationObserver.observe(document.documentElement, {
@@ -338,6 +353,15 @@ function startDurationObservation() {
     attributes: true,
     attributeFilter: ["aria-label", "aria-valuetext", "aria-valuemax", "title"]
   });
+}
+
+function stopDurationObservation() {
+  if (!durationObserver) {
+    return;
+  }
+
+  durationObserver.disconnect();
+  durationObserver = undefined;
 }
 
 function observeDurationSources() {

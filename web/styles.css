@@ -304,6 +304,13 @@ button:disabled {
   color: white;
 }
 
+.helix-global-offsets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: end;
+}
+
 .helix-global-offset input {
   padding-block: 8px;
 }
@@ -313,6 +320,22 @@ button:disabled {
   color: var(--muted);
   font-size: 0.76rem;
   font-weight: 800;
+}
+
+.helix-global-debug {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.helix-global-debug:empty {
+  display: none;
+}
+
+.helix-global-debug--extended {
+  color: var(--warn);
 }
 
 .hotkey-hints {

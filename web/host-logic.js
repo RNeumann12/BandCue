@@ -142,11 +142,12 @@ export function helixDelayMsForSong(song, minimumDelayMs = 0) {
   }
 
   const measureDurationMs = helixMeasureDurationMs(bpm, beatsPerMeasure);
-  let delayMs = targetMeasure * measureDurationMs + clampHelixOffsetMs(song.helixOffsetMs);
-  if (delayMs < minimumDelayMs) {
-    delayMs += Math.ceil((minimumDelayMs - delayMs) / measureDurationMs) * measureDurationMs;
-  }
-  return Math.round(delayMs);
+  const delayMs = targetMeasure * measureDurationMs + clampHelixOffsetMs(song.helixOffsetMs);
+  // The Helix fires its cue at measure 1 beat 1 and keeps running its own timeline
+  // regardless of BandCue, so a count-in that's too short to clear the network/
+  // device-prep floor can only be nudged up to that floor -- never rolled forward
+  // a whole extra measure, which would start BandCue a full measure behind Helix.
+  return Math.round(Math.max(delayMs, minimumDelayMs));
 }
 
 export function applyGlobalHelixSettings(song, settings) {

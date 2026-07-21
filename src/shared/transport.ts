@@ -97,10 +97,22 @@ export function helixMeasureDurationMs(bpm: number, beatsPerMeasure: number): nu
   return beatsPerMeasure * 60_000 / bpm;
 }
 
-export function helixDelayMsForSong(song: Pick<
+export interface HelixScheduleInfo {
+  /** What the configured count-in and offset asked for, before any safety floor. */
+  requestedDelayMs: number;
+  /** The network/device-prep floor the delay was not allowed to go below. */
+  minimumDelayMs: number;
+  /** The delay actually scheduled: requestedDelayMs, nudged up to minimumDelayMs if needed. */
+  appliedDelayMs: number;
+  /** How much later than requested the start landed (0 when the offset was fully honored). */
+  extendedMs: number;
+  measureDurationMs: number;
+}
+
+export function helixScheduleInfo(song: Pick<
   SetlistSong,
   "helixSyncEnabled" | "helixBpm" | "helixBeatsPerMeasure" | "helixTargetMeasure" | "helixOffsetMs"
->, minimumDelayMs = 0): number | undefined {
+>, minimumDelayMs = 0): HelixScheduleInfo | undefined {
   if (!song.helixSyncEnabled) {
     return undefined;
   }
@@ -115,18 +127,31 @@ export function helixDelayMsForSong(song: Pick<
   const measureDurationMs = helixMeasureDurationMs(bpm, beatsPerMeasure);
   const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
   // `targetMeasure` is the number of complete Helix measures in the count-in.
-  // The previous implementation subtracted one, which consistently placed the
-  // BandCue start one whole measure earlier than the configured count-in.
-  let delayMs = targetMeasure * measureDurationMs + offsetMs;
+  const requestedDelayMs = targetMeasure * measureDurationMs + offsetMs;
 
-  // A large negative offset must not make Play impossible. Move the start to
-  // the next equivalent musical downbeat(s) until every device has enough time
-  // to receive and prepare the command.
-  if (delayMs < minimumDelayMs) {
-    delayMs += Math.ceil((minimumDelayMs - delayMs) / measureDurationMs) * measureDurationMs;
-  }
+  // The Helix itself is not waiting on us: it fires the cue at measure 1 beat 1
+  // and keeps running its own timeline regardless of what BandCue does next, so
+  // rolling the start forward to the *next* measure (as an earlier version of
+  // this did) would desync BandCue from a Helix count-in that cannot be made any
+  // longer. If the room needs more lead time than the configured count-in gives,
+  // the best we can do is take exactly the lead time needed -- never a whole
+  // extra measure -- and accept landing slightly off the ideal downbeat.
+  const appliedDelayMs = Math.max(requestedDelayMs, minimumDelayMs);
 
-  return Math.round(delayMs);
+  return {
+    requestedDelayMs: Math.round(requestedDelayMs),
+    minimumDelayMs: Math.round(minimumDelayMs),
+    appliedDelayMs: Math.round(appliedDelayMs),
+    extendedMs: Math.round(appliedDelayMs - requestedDelayMs),
+    measureDurationMs: Math.round(measureDurationMs)
+  };
+}
+
+export function helixDelayMsForSong(song: Pick<
+  SetlistSong,
+  "helixSyncEnabled" | "helixBpm" | "helixBeatsPerMeasure" | "helixTargetMeasure" | "helixOffsetMs"
+>, minimumDelayMs = 0): number | undefined {
+  return helixScheduleInfo(song, minimumDelayMs)?.appliedDelayMs;
 }
 
 export function hasReadyTransportCapability(client: RoomClientSummary): boolean {

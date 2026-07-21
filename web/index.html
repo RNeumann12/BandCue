@@ -71,11 +71,14 @@
           <button class="secondary compact helix-global-toggle" id="globalHelixToggleButton" type="button" aria-pressed="true">
             Start from Helix: On
           </button>
-          <label class="helix-global-offset">
-            <span>Global offset ms</span>
-            <input id="globalHelixOffsetInput" autocomplete="off" inputmode="numeric" type="number" min="-60000" max="60000" step="1" value="0" />
-          </label>
+          <div class="helix-global-offsets">
+            <label class="helix-global-offset">
+              <span>Global offset ms</span>
+              <input id="globalHelixOffsetInput" autocomplete="off" inputmode="numeric" type="number" min="-60000" max="60000" step="1" value="0" />
+            </label>
+          </div>
           <span class="helix-global-status" id="globalHelixStatus">+0 ms global shift + each song's trim</span>
+          <p class="helix-global-debug" id="globalHelixScheduleDebug"></p>
         </div>
         <div class="hotkey-hints" aria-label="Host keyboard shortcuts">
           <span>Hotkeys</span>

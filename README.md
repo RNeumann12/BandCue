@@ -250,9 +250,17 @@ Use the global **Helix offset ms** to move the whole BandCue room against the He
 use a song's **Song trim ms** only for a song-specific correction. Negative starts earlier and
 positive starts later; the combined Helix range is ±60 seconds. This is separate from the
 **Timing** panel's per-device manual offset, which still fixes one specific adapter that
-consistently fires early or late. If a negative offset leaves too little Wi-Fi/device preparation
-time, BandCue automatically moves the start forward by complete measures, preserving the downbeat
-instead of rejecting Play.
+consistently fires early or late.
+
+The Helix sends its cue once, at measure 1 beat 1, and keeps running its own timeline regardless
+of what BandCue does next — it is not waiting for BandCue to catch up. So if a negative offset
+leaves too little Wi-Fi/device preparation time, BandCue holds the start to exactly the lead time
+the room needs, never a whole extra measure: rolling forward to the next measure would start
+BandCue a full measure behind a Helix count-in that can't be made any longer (e.g. when the
+count-in has to stay a single measure). After a Helix-triggered Play, the host panel's status line
+reports whether the request was honored as-is or held back to meet device prep time, and by how
+much — if it's regularly held back, use a smaller negative offset or improve the room's Wi-Fi
+rather than expecting BandCue to add count-in time on its own.
 
 ## Adapters
 

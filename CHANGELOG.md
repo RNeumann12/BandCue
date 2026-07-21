@@ -4,11 +4,25 @@
 
 ### Changed
 
-- Helix Stadium starts now use the configured number of complete count-in measures, support
-  room-wide and per-song timing shifts up to ±60 seconds, and roll too-early starts forward by
-  complete measures instead of rejecting Play.
+- Helix Stadium starts now use the configured number of complete count-in measures and support
+  room-wide and per-song timing shifts up to ±60 seconds. If a negative offset leaves too little
+  device-prep lead time, BandCue holds the start to exactly the lead time needed instead of
+  rolling it forward a whole extra measure -- the Helix cue fires once and keeps its own timeline
+  regardless of BandCue, so an extra measure of BandCue-side delay would desync it from a Helix
+  count-in that cannot be made any longer. A host status line reports whether the last
+  Helix-triggered Play was honored as requested or held back (and by how much) to meet that floor.
 - The host now has a persistent global Helix master switch and room-wide offset control, while
   keeping per-song timing trims for exceptional songs.
+- Fixed a race where the room could auto-stop playback seconds after Play if one adapter (e.g.
+  Songsterr) started and briefly re-reported "stopped" before a slower adapter (e.g. MuseScore,
+  mid multi-step Windows automation) had reported "playing" for the first time -- the slower
+  adapter's still-stale "stopped" status from before Play was mistaken for "already finished".
+  Auto-stop now requires every ready, transport-capable adapter to have actually started this run
+  before treating it as finished.
+- MuseScore keyboard playback now activates the window and performs stop/reset during the
+  count-in, then sends the final Play key at the scheduled instant. Unclaimed bridge commands no
+  longer incur the 900 ms post-downbeat fallback wait, stale bridge activity expires, and the
+  adapter reports its measured key-fire deviation in the host timing view.
 
 ## 1.2.2 - 2026-07-16
 

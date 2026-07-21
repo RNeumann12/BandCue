@@ -286,6 +286,19 @@ export interface ErrorMessage {
   message: string;
 }
 
+/**
+ * Sent right after a Helix-synced Play, so host UIs can show whether the
+ * configured count-in/offset was honored as-is or held to the room's
+ * network/device-prep floor.
+ */
+export interface HelixScheduleUpdate {
+  type: "helixScheduleUpdate";
+  requestedDelayMs: number;
+  minimumDelayMs: number;
+  appliedDelayMs: number;
+  extendedMs: number;
+}
+
 export type ClientMessage =
   | ClientHello
   | ClockSyncRequest
@@ -304,4 +317,5 @@ export type ServerMessage =
   | TransportCommand
   | OpenSongCommand
   | RoomState
-  | ErrorMessage;
+  | ErrorMessage
+  | HelixScheduleUpdate;
