@@ -28,6 +28,7 @@ import type { HelixScheduleInfo } from "../shared/transport.js";
 import {
   DEFAULT_SCHEDULE_DELAY_MS,
   MANUAL_OFFSET_LIMIT_MS,
+  MAX_SCHEDULE_DELAY_MS,
   clampHelixOffsetMs,
   decideTransportRequest,
   hasReadyTransportCapability,
@@ -319,6 +320,7 @@ export class RoomController {
       catalog: sanitizeCatalog(status.catalog) ?? client.status?.catalog,
       songMatch: sanitizeSongMatch(status.songMatch) ?? client.status?.songMatch,
       detail: sanitizeStatusText(status.detail, client.status?.detail, 500),
+      requiredLeadMs: sanitizeRequiredLeadMs(status.requiredLeadMs) ?? client.status?.requiredLeadMs,
       lastCommand: status.lastCommand
         ? sanitizeLastCommand(status.lastCommand)
         : client.status?.lastCommand
@@ -967,6 +969,14 @@ function sanitizeDurationMs(value: number | undefined): number | undefined {
 
   const rounded = Math.round(value);
   return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
+}
+
+function sanitizeRequiredLeadMs(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+
+  return Math.round(Math.min(value, MAX_SCHEDULE_DELAY_MS));
 }
 
 function sanitizeOptionalInteger(

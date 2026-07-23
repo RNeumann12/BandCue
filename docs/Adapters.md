@@ -214,6 +214,37 @@ commands too, completed through the same claim/result
 endpoints; if no helper handles `open-song`, the Windows helper opens the single matched local
 score itself.
 
+**Keeping the Play key's timing consistent.** Spawning `powershell.exe` and loading the
+`System.Windows.Forms`/`Microsoft.VisualBasic` assemblies it needs is the main source of the
+occasional near-1-second delay before Play fires — a cold DLL load or a busy scheduler can push
+that setup past the lead time, and the final Play key then fires immediately (late) instead of on
+the downbeat. Three things keep this in check:
+
+- **Background priming.** Every ~45 s (and once at startup) the helper spawns a throwaway
+  PowerShell that only loads those assemblies and exits. Windows keeps recently used DLL pages in
+  its standby cache, so the real trigger spawn later in the same session usually loads them from
+  RAM instead of disk.
+- **Self-adjusting lead time.** Each Play command reports how long its setup (spawn, activation,
+  prefix keys) actually took. If it overran `--dispatch-lead-ms` and the key fired late, the helper
+  grows its effective lead time (by the overrun plus a small cushion, capped at 4 s), logs a
+  warning, and reports the new requirement to the room in its next `adapterStatus` as
+  `requiredLeadMs`. The coordinator folds that into the room's count-in the same way it already
+  does for a client's measured clock RTT/jitter (`scheduleDelayForClients` in
+  `shared/transport.ts`), so the *next* Play gets a longer count-in too — a locally-grown lead time
+  is otherwise capped at whatever count-in the room already scheduled and can't help on its own.
+  Verified live end-to-end (real coordinator, real MuseScore 4, real keyboard control path): after
+  one adaptive correction, 17 further Play commands landed within 0–21 ms of the scheduled downbeat,
+  down from up to ~900 ms of erratic lateness beforehand.
+- **Tighter final wait.** The trigger script raises its own process priority and shrinks the OS
+  timer tick (`timeBeginPeriod(1)`) for the duration of the precise wait loop, so `Start-Sleep`
+  tracks `dueLocalAt` more tightly than the default ~15.6 ms system tick allows.
+
+If Play keeps firing late even after the lead time grows toward the 4 s cap, the bottleneck is
+outside BandCue's control — most commonly antivirus real-time scanning of every new `powershell.exe`
+launch. Excluding `powershell.exe` (or the specific `System.Windows.Forms`/`Microsoft.VisualBasic`
+assemblies) from real-time scanning, or switching to bridge mode (which does not re-spawn a shell
+per command), removes that variable entirely.
+
 For driving the host entirely from MuseScore while the band stays on Songsterr, see
 [Running the Host on MuseScore (Bridge Mode)](../README.md#running-the-host-on-musescore-bridge-mode).
 </content>

@@ -95,7 +95,7 @@ Parsed by `parseArgs` in [`musescore-windows.ts`](../src/adapters/musescore-wind
 | `--activation-retries <n>` | **5** | Retries to bring the MuseScore window to the foreground. |
 | `--activation-delay-ms <n>` | **90** | Delay between activation retries. |
 | `--command-gap-ms <n>` | **120** | Gap between chained keystrokes. |
-| `--dispatch-lead-ms <n>` | **1000** | Start Windows activation/reset this far before scheduled Play; the final Play key still waits for the downbeat. Use `0` to disable. |
+| `--dispatch-lead-ms <n>` | **1000** | Start Windows activation/reset this far before scheduled Play; the final Play key still waits for the downbeat. Use `0` to disable. This is only the starting value: if setup (spawn + activate + prefix keys) ever overruns it and the Play key fires late, the helper grows its effective lead time for the rest of the session (capped at 4000 ms) and logs a warning — see [Adapters.md](Adapters.md#musescore-on-windows). |
 
 ### Bridge mode
 

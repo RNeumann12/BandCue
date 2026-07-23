@@ -165,6 +165,7 @@ function sanitizeAdapterStatus(value: Record<string, unknown>): ClientMessage | 
     catalog: isRecord(value.catalog) ? value.catalog as never : undefined,
     songMatch: isRecord(value.songMatch) ? value.songMatch as never : undefined,
     detail: typeof value.detail === "string" ? value.detail : undefined,
+    requiredLeadMs: isFiniteNumber(value.requiredLeadMs) ? value.requiredLeadMs : undefined,
     lastCommand: sanitizeLastCommand(value.lastCommand)
   };
 }

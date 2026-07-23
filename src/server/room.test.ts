@@ -382,6 +382,43 @@ describe("RoomController", () => {
     });
   });
 
+  it("extends the count-in once a desktop adapter reports a required lead time", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "MuseScore",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    // Round-trips through the same message sanitizer real WebSocket traffic
+    // goes through, so a future field-whitelist regression fails here too.
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus",
+      app: "musescore",
+      ready: true,
+      requiredLeadMs: 1900
+    }, 1100);
+
+    expect(room.getState(1100).clients.find((c) => c.id === adapter.id)?.status)
+      .toMatchObject({ requiredLeadMs: 1900 });
+
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    // requiredLeadMs (1900) + the 1000 ms prep budget beats the 1500 ms default.
+    expect(room.getState(1200).transport).toMatchObject({
+      status: "scheduled",
+      scheduledServerTime: 1200 + 2900
+    });
+  });
+
   it("caps adapter status text before rebroadcasting it", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const client = room.addClient(undefined, {

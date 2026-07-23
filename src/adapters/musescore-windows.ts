@@ -93,6 +93,54 @@ const DEFAULT_DISPATCH_LEAD_MS = 1000;
 // A bridge that only contacted the HTTP API long ago must not add the fallback
 // wait forever. Real bridge helpers poll much more frequently than this.
 const BRIDGE_ACTIVE_WINDOW_MS = 5000;
+// If activation/reset ever overruns the lead time, the final Play key fires
+// immediately (late) instead of at the downbeat. Grow the lead time for later
+// commands by the overrun plus this cushion so the session self-corrects
+// instead of repeating the same late fire every song.
+const DISPATCH_LEAD_OVERRUN_CUSHION_MS = 150;
+// Upper bound for the self-adjusting lead time so a pathological machine
+// doesn't grow it without limit (that would just move the setup work earlier
+// without ever fixing the underlying slowness, and eats into the count-in).
+const MAX_DISPATCH_LEAD_MS = 4000;
+// How often to spawn a throwaway PowerShell that only loads the SendKeys /
+// AppActivate assemblies. Windows keeps recently-used DLL pages in its
+// standby cache, so a real trigger spawn later in the same session tends to
+// load them from RAM instead of disk — the single biggest source of
+// inconsistent (sometimes ~1s) startup latency observed for the Play command.
+const ASSEMBLY_PRIME_INTERVAL_MS = 45_000;
+
+// Shared by every script that activates MuseScore and sends it keystrokes.
+// Declared once so the priming spawn (below) loads exactly what a real
+// trigger spawn will need. timeBeginPeriod/timeEndPeriod tighten the OS
+// timer tick (normally ~15.6 ms) for the duration of the precise wait loop.
+const SENDKEYS_ASSEMBLY_PREAMBLE = `
+Add-Type -AssemblyName Microsoft.VisualBasic
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BandCueWin32 {
+  [DllImport("user32.dll")]
+  public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("winmm.dll")]
+  public static extern uint timeBeginPeriod(uint uMilliseconds);
+  [DllImport("winmm.dll")]
+  public static extern uint timeEndPeriod(uint uMilliseconds);
+}
+"@
+`.trim();
+
+// Fire-and-forget: loads the same assemblies a real trigger spawn needs, then
+// exits. Never awaited and never affects command timing — it only exists to
+// warm the OS DLL cache before a Play/Stop command needs it for real.
+function primeSendKeysAssemblies(): void {
+  void runPowerShell(`${SENDKEYS_ASSEMBLY_PREAMBLE}\nexit 0\n`).catch(() => {
+    // Best-effort warm-up; a failure here just means the next real command
+    // pays the full cold-start cost, same as before this optimization.
+  });
+}
 
 interface MuseScoreStatus {
   ready: boolean;
@@ -149,11 +197,18 @@ let statusReportInFlight = false;
 let statusReportQueued = false;
 let bridgeServer: HttpServer | undefined;
 const samples: ClockSample[] = [];
+// Self-adjusting copy of --dispatch-lead-ms: grows when a command's setup
+// (spawn + activate + prefix keys) overruns the lead time and fires the Play
+// key late, so a slow first attempt doesn't keep repeating every song.
+let adaptiveDispatchLeadMs = args.dispatchLeadMs;
+let assemblyPrimeTimer: NodeJS.Timeout | undefined;
 
 if (args.bridgePort !== undefined) {
   startBridge(args.bridgePort);
 }
 refreshScoreCatalog();
+primeSendKeysAssemblies();
+assemblyPrimeTimer = setInterval(primeSendKeysAssemblies, ASSEMBLY_PRIME_INTERVAL_MS);
 void connect();
 
 async function connect(): Promise<void> {
@@ -243,7 +298,7 @@ async function connect(): Promise<void> {
         createdAt: Date.now()
       });
       const dispatchLeadMs = message.action === "play" && !hasActiveBridge()
-        ? Math.min(args.dispatchLeadMs, delayMs)
+        ? Math.min(adaptiveDispatchLeadMs, delayMs)
         : 0;
       setTimeout(() => {
         void triggerMuseScoreTransport(message.action, message.sequenceId, dueLocalAt);
@@ -506,7 +561,10 @@ async function reportMuseScoreStatus(): Promise<void> {
       songMatch: match,
       detail: match.status === "missing" || match.status === "ambiguous"
         ? match.detail
-        : mismatch ?? status.detail
+        : mismatch ?? status.detail,
+      // A bridge helper drives real playback state and isn't subject to the
+      // keyboard fallback's setup latency, so it needs no extra count-in.
+      requiredLeadMs: hasActiveBridge() ? 0 : adaptiveDispatchLeadMs
     });
   } finally {
     statusReportInFlight = false;
@@ -620,19 +678,8 @@ async function triggerMuseScoreTransport(
   const resetBeforePlay = Boolean(bridgeCommands.get(sequenceId)?.resetBeforePlay);
   const keys = keysForAction(action, resetBeforePlay);
   const script = `
-Add-Type -AssemblyName Microsoft.VisualBasic
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class BandCueWin32 {
-  [DllImport("user32.dll")]
-  public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")]
-  public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-}
-
-"@
+${SENDKEYS_ASSEMBLY_PREAMBLE}
+try { (Get-Process -Id $PID).PriorityClass = 'High' } catch {}
 $processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
 $titleMatch = '${escapePowerShellSingleQuoted(args.titleMatch ?? "")}'
 $process = Get-Process | Where-Object {
@@ -658,7 +705,12 @@ foreach ($key in $prefixKeys) {
   [System.Windows.Forms.SendKeys]::SendWait($key)
   Start-Sleep -Milliseconds ${args.commandGapMs}
 }
+$setupCompletedLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $dueLocalAt = [int64]${Math.round(dueLocalAt)}
+# Shrink the system timer granularity (normally ~15.6 ms) for the remainder of
+# this process so Start-Sleep/SpinWait track dueLocalAt tightly instead of
+# rounding up to the next tick.
+[void][BandCueWin32]::timeBeginPeriod(1)
 while ($true) {
   $remainingMs = $dueLocalAt - [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   if ($remainingMs -le 0) { break }
@@ -670,12 +722,14 @@ while ($true) {
 }
 $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 [System.Windows.Forms.SendKeys]::SendWait('${escapePowerShellSingleQuoted(keys.at(-1) ?? "")}')
+[void][BandCueWin32]::timeEndPeriod(1)
 [PSCustomObject]@{
   processId = $process.Id
   processName = $process.ProcessName
   windowTitle = ($process.MainWindowTitle -replace '\\r|\\n', ' ')
   keyCount = $prefixKeys.Count + 1
   firedAtLocal = $firedAtLocal
+  setupCompletedLocal = $setupCompletedLocal
 } | ConvertTo-Json -Compress
 `;
 
@@ -698,6 +752,7 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       windowTitle?: string;
       keyCount?: number;
       firedAtLocal?: number;
+      setupCompletedLocal?: number;
     }>(result.stdout);
     inferredPlayback = action === "play" ? "playing" : "stopped";
     bridgeStatus.playback = inferredPlayback;
@@ -711,6 +766,9 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         windowTitle: commandResult.windowTitle
       };
     }
+    const lateDetail = action === "play"
+      ? adjustDispatchLeadForSetupMargin(dueLocalAt, commandResult?.setupCompletedLocal)
+      : undefined;
     console.log(`MuseScore ${action} triggered.`);
     const mismatch = scoreMismatchDetail(lastMuseScoreStatus);
     reportCommandStatus({
@@ -718,7 +776,7 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       action,
       sequenceId,
       status: "succeeded",
-      detail: mismatch ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, bridgeResult),
+      detail: mismatch ?? lateDetail ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, bridgeResult),
       controlPath: `windows-sendkeys:${action === "play" ? playControlPath(resetBeforePlay) : "stop-key"}`,
       firedAtServerTime: Number.isFinite(commandResult?.firedAtLocal)
         ? Math.round((commandResult?.firedAtLocal ?? Date.now()) + serverOffsetMs)
@@ -726,6 +784,41 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       at: Date.now()
     });
   }
+}
+
+// Setup (spawn + activate + prefix keys) is meant to finish well before
+// dueLocalAt, leaving only the precise wait loop before the final Play key.
+// When it finishes late, that key fired immediately instead of on the
+// downbeat — grow the lead time so later songs in the same session get more
+// runway, since a slow machine tends to stay slow all night.
+function adjustDispatchLeadForSetupMargin(
+  dueLocalAt: number,
+  setupCompletedLocal: number | undefined
+): string | undefined {
+  if (!Number.isFinite(setupCompletedLocal)) {
+    return undefined;
+  }
+
+  const marginMs = dueLocalAt - (setupCompletedLocal as number);
+  if (marginMs >= 0) {
+    return undefined;
+  }
+
+  const overrunMs = -marginMs;
+  const grownLeadMs = Math.min(
+    MAX_DISPATCH_LEAD_MS,
+    adaptiveDispatchLeadMs + overrunMs + DISPATCH_LEAD_OVERRUN_CUSHION_MS
+  );
+  const detail = `MuseScore Play fired late (setup overran the ${adaptiveDispatchLeadMs} ms lead time by ${overrunMs} ms); `
+    + (grownLeadMs > adaptiveDispatchLeadMs
+      ? `increasing lead time to ${grownLeadMs} ms for the rest of this session`
+      : `lead time is already at its ${MAX_DISPATCH_LEAD_MS} ms cap`);
+  console.warn(detail);
+  adaptiveDispatchLeadMs = grownLeadMs;
+  // Push the new requiredLeadMs immediately rather than waiting for the next
+  // 2s poll, so the room's count-in grows before the next Play is requested.
+  void reportMuseScoreStatus();
+  return detail;
 }
 
 async function handleOpenSongCommand(sequenceId: number): Promise<void> {

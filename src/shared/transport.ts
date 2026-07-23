@@ -29,7 +29,7 @@ const SCHEDULE_PREP_BUDGET_MS = 1000;
  * preps in time. Companion displays never extend it — they mirror, not play.
  */
 export function scheduleDelayForClients(
-  clients: Iterable<Pick<RoomClientSummary, "capabilities" | "clock">>,
+  clients: Iterable<Pick<RoomClientSummary, "capabilities" | "clock" | "status">>,
   defaultDelayMs = DEFAULT_SCHEDULE_DELAY_MS
 ): number {
   let required = defaultDelayMs;
@@ -38,11 +38,18 @@ export function scheduleDelayForClients(
       continue;
     }
     const clock = client.clock;
-    if (!clock) {
-      continue;
+    if (clock) {
+      const needed = (clock.rttMs ?? 0) / 2 + (clock.jitterMs ?? 0) * 4 + SCHEDULE_PREP_BUDGET_MS;
+      required = Math.max(required, needed);
     }
-    const needed = (clock.rttMs ?? 0) / 2 + (clock.jitterMs ?? 0) * 4 + SCHEDULE_PREP_BUDGET_MS;
-    required = Math.max(required, needed);
+    // A desktop adapter whose control path needs real setup time before the
+    // downbeat (e.g. spawning a shell and activating the target app) reports
+    // that need directly, so its Play command gets a count-in long enough to
+    // land on time instead of always firing after the deadline.
+    const requiredLeadMs = client.status?.requiredLeadMs;
+    if (typeof requiredLeadMs === "number" && Number.isFinite(requiredLeadMs)) {
+      required = Math.max(required, requiredLeadMs + SCHEDULE_PREP_BUDGET_MS);
+    }
   }
   return Math.round(Math.min(required, MAX_SCHEDULE_DELAY_MS));
 }

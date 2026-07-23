@@ -77,8 +77,25 @@ describe("server message guards", () => {
       catalog: undefined,
       songMatch: undefined,
       detail: undefined,
+      requiredLeadMs: undefined,
       lastCommand: undefined
     });
+  });
+
+  it("passes through a numeric requiredLeadMs and drops a non-numeric one", () => {
+    expect(sanitizeClientMessage({
+      type: "adapterStatus",
+      ready: true,
+      app: "musescore",
+      requiredLeadMs: 1927
+    })).toMatchObject({ requiredLeadMs: 1927 });
+
+    expect(sanitizeClientMessage({
+      type: "adapterStatus",
+      ready: true,
+      app: "musescore",
+      requiredLeadMs: "soon"
+    })).toMatchObject({ requiredLeadMs: undefined });
   });
 
   it("parses only known JSON client messages", () => {

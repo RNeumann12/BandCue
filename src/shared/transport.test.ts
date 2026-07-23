@@ -155,6 +155,23 @@ describe("scheduleDelayForClients", () => {
   it("respects a larger configured default", () => {
     expect(scheduleDelayForClients([], 2500)).toBe(2500);
   });
+
+  it("extends the count-in when an adapter reports a required lead time", () => {
+    const clients = [
+      // requiredLeadMs + the 1000 ms prep budget (2900) beats the default.
+      client({ status: { app: "mock", ready: true, requiredLeadMs: 1900 } })
+    ];
+
+    expect(scheduleDelayForClients(clients)).toBe(2900);
+  });
+
+  it("caps a reported required lead time at the pathological-outlier ceiling", () => {
+    const clients = [
+      client({ status: { app: "mock", ready: true, requiredLeadMs: 20_000 } })
+    ];
+
+    expect(scheduleDelayForClients(clients)).toBe(MAX_SCHEDULE_DELAY_MS);
+  });
 });
 
 describe("Helix sync timing", () => {

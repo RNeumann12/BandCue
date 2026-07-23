@@ -113,6 +113,13 @@ export interface AdapterStatus {
   catalog?: SongCatalogStatus;
   songMatch?: SongCatalogMatch;
   detail?: string;
+  /**
+   * How much dispatch lead (ms) this adapter's control path needs before a
+   * scheduled Play to reliably land on time (e.g. process spawn + window
+   * activation on a slow machine). The room's count-in grows to cover it —
+   * see scheduleDelayForClients in shared/transport.ts.
+   */
+  requiredLeadMs?: number;
   lastCommand?: {
     action: AdapterCommandAction;
     sequenceId?: number;
