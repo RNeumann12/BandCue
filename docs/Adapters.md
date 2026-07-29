@@ -28,7 +28,7 @@ A Manifest V3 extension that drives Songsterr browser tabs.
 | --- | --- |
 | `manifest.json` | MV3 manifest. Permissions: `storage`, `tabs`, `activeTab`; default host access to Songsterr; optional `http://*/*` access requested when joining a local BandCue room. |
 | `background.js` | Service worker: holds the WebSocket connection, clock sync, discovery, reconnect, and connection intent. |
-| `content-script.js` | Injected into Songsterr pages: finds the transport control / media element and performs play/stop/reset. |
+| `content-script.js` | Injected into Songsterr pages: resolves the transport control / media element during the count-in, then fires play/stop/reset on the downbeat. |
 | `popup.html` / `popup.css` / `popup.js` | The connect/disconnect UI and readiness panel. |
 
 **Install (unpacked)**
@@ -63,6 +63,31 @@ Build a distributable zip with `npm run package:extension`.
 - **Stop** is no-op when playback already appears stopped, and **never** uses a Space-key
   fallback (which on Songsterr is a toggle and could restart play). It only pauses active media
   elements or clicks a confidently-labelled pause/stop control.
+- **Start timing** — everything a Play needs is worked out during the count-in, so the downbeat
+  itself is a single click or key dispatch:
+  - The background forwards the command `adaptiveDispatchLeadMs` (400 ms by default) ahead of the
+    downbeat. The content script then forces the Synth source, resets to the song start, **and
+    resolves which control it will touch**, before waiting out the remainder.
+  - Resolving the control used to happen *after* the wait: two document-wide button scans, each
+    forcing a layout. Measured on a real Songsterr page that was ~5 ms of work that varied with
+    DOM size and CPU — a per-device head start that clock sync cannot compensate for.
+  - The final wait sleeps in self-correcting chunks (so one overlong wake-up can still be caught
+    up) and spins the last 25 ms. It aims early by a measured, capped estimate of how long the
+    control action takes, so the action *completes* on the beat rather than starting there.
+  - If prep ever runs out of lead time, the extension grows its own lead and reports it as
+    `requiredLeadMs`, so the coordinator's count-in grows to cover it (same self-correction as the
+    MuseScore adapter).
+  - `lastCommand.firedAtServerTime` is stamped after the control actually ran, so the host's
+    deviation view reflects the real start.
+- **Localized players** — Songsterr translates every control label, so matching only English words
+  ("Play" / "Resume") found nothing on e.g. a German UI ("Abspielen") and silently pushed those
+  devices onto the slower, blind Space-key toggle. The transport button is now also matched by its
+  CSS-module class (local name `play`, e.g. `_8e144G_play`), which is language-independent. The
+  class identifies the toggle but not its direction, so it is used only when toggling actually
+  moves playback the way the command wants.
+- **Background tabs** — Chrome clamps timers in a hidden tab to ≥ 1 s, which no in-page scheduling
+  can undo. When a command fires from a hidden tab the extension says so in its status detail;
+  keep the Songsterr tab visible while playing.
 - **Duration** — the extension reports finite media duration and the current tab URL when
   available, which lets the coordinator auto-stop the host UI at end-of-song.
 - **Explicit connection control** — the background stores an `autoConnectEnabled` intent. It only

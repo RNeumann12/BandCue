@@ -65,8 +65,21 @@ let memberInstrument = "auto";
 
 // How far ahead of the scheduled downbeat a transport command is forwarded to
 // the content script. Covers the tab query, the IPC hop, and Songsterr prep
-// (synth source, reset-to-start); the content script waits out the remainder.
+// (synth source, reset-to-start, resolving which control to touch); the content
+// script waits out the remainder.
 const DISPATCH_LEAD_MS = 400;
+// If the tab query + IPC hop + prep ever overrun the lead time, the content
+// script has no count-in left: it preps and fires in one go on (or after) the
+// downbeat, which is exactly the erratic-late start we're trying to avoid. Grow
+// the lead for later commands by the overrun plus this cushion so a slow machine
+// self-corrects instead of repeating the same late start every song.
+const DISPATCH_LEAD_OVERRUN_CUSHION_MS = 150;
+// Upper bound for the self-adjusting lead so a pathological machine can't eat
+// the whole count-in (it would only move the prep earlier, never fix slowness).
+const MAX_DISPATCH_LEAD_MS = 2500;
+// Self-adjusting copy of DISPATCH_LEAD_MS, reported to the room as
+// requiredLeadMs so the coordinator's count-in itself grows to cover it.
+let adaptiveDispatchLeadMs = DISPATCH_LEAD_MS;
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
@@ -545,7 +558,52 @@ function handleTransportCommand(message) {
       Boolean(message.resetBeforePlay),
       dueLocalAt
     );
-  }, Math.max(0, delayMs - DISPATCH_LEAD_MS));
+  }, Math.max(0, delayMs - adaptiveDispatchLeadMs));
+}
+
+// Grow the dispatch lead when the content script reported that it reached the
+// downbeat with no count-in left to prep in. Mirrors the MuseScore adapter's
+// self-correction (see src/adapters/musescore-windows.ts).
+function adjustDispatchLeadForTiming(timing) {
+  if (!timing || !Number.isFinite(timing.preparedAheadMs)) {
+    return "";
+  }
+
+  if (timing.preparedAheadMs > 0) {
+    return "";
+  }
+
+  const overrunMs = Math.max(0, -timing.preparedAheadMs);
+  const grown = Math.min(
+    MAX_DISPATCH_LEAD_MS,
+    adaptiveDispatchLeadMs + overrunMs + DISPATCH_LEAD_OVERRUN_CUSHION_MS
+  );
+  if (grown <= adaptiveDispatchLeadMs) {
+    return "";
+  }
+
+  adaptiveDispatchLeadMs = grown;
+  return `prep had no lead time left, so the count-in was extended to ${grown} ms`;
+}
+
+// Human-readable note about how this device's start actually landed, so a member
+// who starts late can see why instead of guessing.
+function describeTiming(timing) {
+  if (!timing) {
+    return "";
+  }
+
+  const notes = [];
+  if (Number.isFinite(timing.deviationMs) && Math.abs(timing.deviationMs) >= 15) {
+    const deviation = Math.round(timing.deviationMs);
+    notes.push(`started ${Math.abs(deviation)} ms ${deviation > 0 ? "late" : "early"}`);
+  }
+  if (timing.hidden) {
+    // Chrome clamps timers in a hidden tab to >= 1 s; nothing in the extension
+    // can work around that, but the member can (keep the tab visible).
+    notes.push("the Songsterr tab was in the background, which throttles its timers -- keep it visible while playing");
+  }
+  return notes.join("; ");
 }
 
 // Minimum lead time left on a reconciled play for it to still start together;
@@ -687,12 +745,15 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     controlPath: "content-script"
   };
 
+  const leadDetail = adjustDispatchLeadForTiming(final.timing);
+  const timingDetail = describeTiming(final.timing);
+
   reportCommandStatus({
     action,
     sequenceId,
     status: final.ok ? "succeeded" : "failed",
     ready: lastStatus.ready || tabs.length > 0,
-    detail: final.detail,
+    detail: [final.detail, timingDetail, leadDetail].filter(Boolean).join("; "),
     controlPath: final.controlPath,
     firedAtServerTime: final.ok && Number.isFinite(final.firedAtLocal)
       ? Math.round(final.firedAtLocal + (serverOffsetMs ?? 0))
@@ -856,6 +917,10 @@ function normalizeAdapterStatus(status) {
     durationSource: sanitizeDurationMs(status.durationMs) ? "adapter" : undefined,
     state: status.state ?? (status.ready ? "ready" : "not-ready"),
     detail: status.detail,
+    // Tells the coordinator how long a count-in this device needs to prep in
+    // (see scheduleDelayForClients in src/shared/transport.ts). Grows only when
+    // a real command ran out of lead time.
+    requiredLeadMs: adaptiveDispatchLeadMs,
     lastCommand: status.lastCommand
   };
 }
@@ -869,6 +934,7 @@ function getAdapterStatusSignature(status) {
     durationSource: status.durationSource || "",
     state: status.state || "",
     detail: status.detail || "",
+    requiredLeadMs: status.requiredLeadMs || 0,
     lastCommand: status.lastCommand || null
   });
 }

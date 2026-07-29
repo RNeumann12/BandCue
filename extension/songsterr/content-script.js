@@ -108,121 +108,216 @@ function handleRuntimeMessageError(error) {
 
 // The background worker dispatches transport commands ahead of the scheduled
 // downbeat and passes the target instant as dueLocalAt (already converted to
-// this machine's clock, manual offset included). Songsterr prep (forcing the
-// Synth source, resetting to the start) runs immediately during the count-in;
-// the final wait happens here so the control action itself lands on the beat
-// instead of after tab-query + messaging + prep latency.
+// this machine's clock, manual offset included). *All* of the work -- forcing
+// the Synth source, resetting to the start, and deciding which control to
+// touch -- happens here during the count-in, so the downbeat itself is a single
+// click or key dispatch. Resolving the control on the beat (as this used to)
+// cost two document-wide button scans with a forced layout each, measured at
+// ~5 ms apiece on a real Songsterr page and scaling with DOM size and CPU --
+// i.e. a per-device head start that no clock sync can compensate for.
 async function runScheduledTransport(message) {
   const action = message.action;
   const resetBeforePlay = Boolean(message.resetBeforePlay);
   const dueLocalAt = Number(message.dueLocalAt) || 0;
   let prepared;
-  if (action === "play" && dueLocalAt > Date.now()) {
-    prepared = {
-      synthDetail: ensureSynthPlaybackMode(),
-      resetDetail: resetBeforePlay ? resetSongsterrPosition() : ""
-    };
+  // How much count-in was left once prep finished. Negative means the command
+  // arrived too late to prep ahead at all, which the background uses to grow its
+  // dispatch lead for later songs.
+  let preparedAheadMs = dueLocalAt ? dueLocalAt - Date.now() : 0;
+  if (dueLocalAt > Date.now()) {
+    const prepStartedAt = Date.now();
+    prepared = prepareTransport(action, resetBeforePlay);
+    preparedAheadMs = dueLocalAt - Date.now();
+    prepared.prepCostMs = Date.now() - prepStartedAt;
   }
-  await waitUntilLocalTime(dueLocalAt);
+
+  // Aim the wait early by however long the control action itself has been
+  // taking, so the action *completes* on the downbeat rather than starting
+  // there. The estimate is measured, not guessed (see recordActionCost).
+  const aimMs = prepared ? actionCostEstimateMs : 0;
+  const wakeLatenessMs = await waitUntilLocalTime(dueLocalAt - aimMs);
   const result = await controlSongsterr(action, resetBeforePlay, prepared);
-  // For play via the media element, media.play() has resolved here, i.e.
-  // playback has actually begun -- the best local proxy for the audible start.
-  // The background converts this to server time for the host's deviation view.
+  // Stamped after the control action has run, so it marks the moment playback
+  // was actually triggered. The background converts this to server time for the
+  // host's deviation view.
   result.firedAtLocal = Date.now();
+  if (prepared) {
+    recordActionCost(result.firedAtLocal - (dueLocalAt - aimMs + wakeLatenessMs));
+  }
+  result.timing = {
+    deviationMs: dueLocalAt ? result.firedAtLocal - dueLocalAt : 0,
+    wakeLatenessMs,
+    prepCostMs: prepared?.prepCostMs ?? 0,
+    preparedAheadMs,
+    // Chrome clamps page timers in a hidden tab to >= 1 s, which no amount of
+    // in-page scheduling can undo. Report it so the host can say why one member
+    // starts late instead of leaving it a mystery.
+    hidden: typeof document.visibilityState === "string" && document.visibilityState === "hidden"
+  };
   return result;
 }
 
-// setTimeout alone can fire several ms late (more under load), so sleep to just
-// short of the target and burn the last stretch in a tight loop.
+// setTimeout alone can fire several ms late (far more when Chrome throttles a
+// background tab), so sleep in self-correcting chunks -- each one re-reads the
+// clock, so a single overlong wake-up can still be caught up -- and burn the
+// last stretch in a tight loop.
 const FINAL_SPIN_MS = 25;
+const MAX_SLEEP_CHUNK_MS = 250;
 
-async function waitUntilLocalTime(dueLocalAt) {
-  if (!dueLocalAt) {
+// Rolling estimate of how long the control action takes once fired, used to aim
+// the wait early. Seeded from a measurement on a real Songsterr page (a cold
+// synthetic Space dispatch, including Songsterr's own synchronous play handler,
+// took ~8 ms) and then adapted per device.
+const DEFAULT_ACTION_COST_MS = 6;
+// Never aim more than this far ahead: a single pathological sample (a GC pause,
+// a background tab waking up) must not pull every later start noticeably early.
+const MAX_ACTION_COST_MS = 60;
+const ACTION_COST_SMOOTHING = 0.3;
+let actionCostEstimateMs = DEFAULT_ACTION_COST_MS;
+
+function recordActionCost(sampleMs) {
+  if (!Number.isFinite(sampleMs) || sampleMs < 0) {
     return;
   }
-  const coarseMs = dueLocalAt - Date.now() - FINAL_SPIN_MS;
-  if (coarseMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, coarseMs));
+  const bounded = Math.min(sampleMs, MAX_ACTION_COST_MS);
+  actionCostEstimateMs += ACTION_COST_SMOOTHING * (bounded - actionCostEstimateMs);
+}
+
+/** Waits for the target instant; returns how late the wait actually woke up. */
+async function waitUntilLocalTime(dueLocalAt) {
+  if (!dueLocalAt) {
+    return 0;
+  }
+  for (;;) {
+    const remainingMs = dueLocalAt - Date.now() - FINAL_SPIN_MS;
+    if (remainingMs <= 0) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(remainingMs, MAX_SLEEP_CHUNK_MS)));
   }
   while (Date.now() < dueLocalAt) {
     // Busy-wait for at most FINAL_SPIN_MS.
   }
+  return Date.now() - dueLocalAt;
 }
 
-async function controlSongsterr(action, resetBeforePlay = false, prepared = undefined) {
+/**
+ * Everything the downbeat needs, worked out ahead of time. Runs during the
+ * count-in on the scheduled path, and inline (late, as before) when a command
+ * arrives with no lead time left.
+ */
+function prepareTransport(action, resetBeforePlay) {
   // Songsterr's "Original" source streams a YouTube video, which can drift or
   // stall on a weak connection and break sync. The "Synth" source is rendered
   // locally, so force it before a synced play to keep playback deterministic.
-  // When the scheduled path already did this during the count-in, reuse its
-  // result instead of repeating the DOM work on the downbeat.
-  const synthDetail = prepared
-    ? prepared.synthDetail
-    : action === "play" ? ensureSynthPlaybackMode() : "";
-  const resetDetail = prepared
-    ? prepared.resetDetail
-    : action === "play" && resetBeforePlay
-      ? resetSongsterrPosition()
-      : "";
-  const playbackState = inferPlaybackState();
+  const synthDetail = action === "play" ? ensureSynthPlaybackMode() : "";
+  const resetDetail = action === "play" && resetBeforePlay ? resetSongsterrPosition() : "";
+  const mediaElements = queryMediaElements();
+  const playbackState = inferPlaybackState(mediaElements);
+  const control = resolveTransportControl(action, mediaElements, playbackState);
+  if (control.kind === "space") {
+    // Move focus now so the downbeat only has to dispatch the key events.
+    primeKeyboardTarget();
+  }
+  // Settle style/layout while there is still time, so the click on the beat
+  // doesn't trigger a synchronous recalc of everything the reset just dirtied.
+  document.body?.getBoundingClientRect();
+  return { synthDetail, resetDetail, playbackState, control };
+}
+
+/**
+ * Picks the single control the downbeat will touch. Ordered exactly like the
+ * old inline fallback chain, but resolved once, ahead of time.
+ */
+function resolveTransportControl(action, mediaElements, playbackState) {
   if (action === "stop" && playbackState === "stopped") {
-    lastControlDetail = "Songsterr playback is already stopped; Stop was a no-op";
-    return {
-      ok: true,
-      detail: lastControlDetail,
-      controlPath: "no-op"
-    };
+    return { kind: "no-op" };
   }
 
-  const mediaResult = await controlMediaElement(action);
-  if (mediaResult.ok) {
-    lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used native media ${action}`);
-    return {
-      ok: true,
-      detail: lastControlDetail,
-      controlPath: "media-element"
-    };
+  if (mediaElements.length) {
+    return { kind: "media", mediaElements };
   }
 
+  // Both remaining paths are toggles, so Stop must never use them unless we
+  // could confirm playback is actually running -- toggling blind would start it.
   if (action === "stop" && playbackState === "unknown") {
-    lastControlDetail = "Could not confirm Songsterr is playing; Stop did not use a toggle fallback";
+    return { kind: "unconfirmed" };
+  }
+
+  const button = findTransportButton(action, playbackState);
+  if (button) {
+    return { kind: "button", element: button.element, label: button.label };
+  }
+
+  return action === "play" ? { kind: "space" } : { kind: "none" };
+}
+
+async function controlSongsterr(action, resetBeforePlay = false, prepared = undefined) {
+  const plan = prepared ?? prepareTransport(action, resetBeforePlay);
+  const { synthDetail, resetDetail, control } = plan;
+
+  if (control.kind === "no-op") {
+    lastControlDetail = "Songsterr playback is already stopped; Stop was a no-op";
+    return { ok: true, detail: lastControlDetail, controlPath: "no-op" };
+  }
+
+  if (control.kind === "media") {
+    const mediaResult = await controlMediaElement(action, control.mediaElements);
+    if (mediaResult.ok) {
+      lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used native media ${action}`);
+      return { ok: true, detail: lastControlDetail, controlPath: "media-element" };
+    }
+    // Rare: the media element refused. Re-resolve (late) rather than give up.
+    const fallback = resolveTransportControl(action, [], plan.playbackState);
+    if (fallback.kind === "button" || fallback.kind === "space") {
+      return controlSongsterr(action, resetBeforePlay, { ...plan, control: fallback });
+    }
+    lastControlDetail = mediaResult.autoplayBlocked
+      ? "Browser blocked autoplay for this tab. Click once inside the Songsterr tab, then try again."
+      : `Could not find a Songsterr ${action} control`;
     return {
       ok: false,
       detail: lastControlDetail,
-      controlPath: "none"
+      controlPath: mediaResult.autoplayBlocked ? "autoplay-blocked" : "none"
     };
   }
 
-  const clicked = clickTransportButton(action);
-  if (clicked) {
-    lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Clicked Songsterr player control: ${clicked}`);
-    return {
-      ok: true,
-      detail: lastControlDetail,
-      controlPath: "player-button"
-    };
+  if (control.kind === "button") {
+    // Songsterr re-renders its player, so the element resolved during the
+    // count-in can be detached by the time the downbeat arrives. Re-resolving
+    // costs a scan, but a stale click would silently do nothing at all.
+    if (control.element.isConnected === false) {
+      const fresh = resolveTransportControl(action, queryMediaElements(), inferPlaybackState());
+      const usable = fresh.kind === "button" && fresh.element.isConnected === false
+        ? { kind: "none" }
+        : fresh;
+      return controlSongsterr(action, resetBeforePlay, { ...plan, control: usable });
+    }
+    /** @type {HTMLElement} */ (control.element).click();
+    lastControlDetail = joinControlDetails(
+      synthDetail,
+      resetDetail,
+      `Clicked Songsterr player control: ${control.label}`
+    );
+    return { ok: true, detail: lastControlDetail, controlPath: "player-button" };
   }
 
-  if (action === "play" && dispatchSpaceFallback()) {
-    lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used safe Space shortcut fallback for ${action}`);
-    return {
-      ok: true,
-      detail: lastControlDetail,
-      controlPath: "space-shortcut"
-    };
+  if (control.kind === "space" && dispatchSpaceFallback()) {
+    lastControlDetail = joinControlDetails(
+      synthDetail,
+      resetDetail,
+      `Used safe Space shortcut fallback for ${action}`
+    );
+    return { ok: true, detail: lastControlDetail, controlPath: "space-shortcut" };
   }
 
-  lastControlDetail = mediaResult.autoplayBlocked
-    ? "Browser blocked autoplay for this tab. Click once inside the Songsterr tab, then try again."
+  lastControlDetail = control.kind === "unconfirmed"
+    ? "Could not confirm Songsterr is playing; Stop did not use a toggle fallback"
     : `Could not find a Songsterr ${action} control`;
-  return {
-    ok: false,
-    detail: lastControlDetail,
-    controlPath: mediaResult.autoplayBlocked ? "autoplay-blocked" : "none"
-  };
+  return { ok: false, detail: lastControlDetail, controlPath: "none" };
 }
 
-function inferPlaybackState() {
-  const mediaElements = queryMediaElements();
+function inferPlaybackState(mediaElements = queryMediaElements()) {
   if (mediaElements.some((media) => !media.paused && !media.ended)) {
     return "playing";
   }
@@ -377,8 +472,7 @@ function observeDurationSources() {
   }
 }
 
-async function controlMediaElement(action) {
-  const mediaElements = queryMediaElements();
+async function controlMediaElement(action, mediaElements = queryMediaElements()) {
   if (!mediaElements.length) {
     return { ok: false };
   }
@@ -552,7 +646,7 @@ function resetSongsterrPosition() {
   return "Tried to reset Songsterr to the song start";
 }
 
-function clickTransportButton(action) {
+function findTransportButton(action, playbackState) {
   const words = action === "play"
     ? ["play", "resume", "start"]
     : ["pause", "stop"];
@@ -567,12 +661,65 @@ function clickTransportButton(action) {
     .sort((a, b) => b.score - a.score);
 
   const best = candidates[0];
-  if (!best) {
-    return "";
+  if (best) {
+    return { element: best.element, label: best.label || best.element.tagName.toLowerCase() };
   }
 
-  /** @type {HTMLElement} */ (best.element).click();
-  return best.label || best.element.tagName.toLowerCase();
+  return findTransportToggleByClass(action, playbackState);
+}
+
+// Songsterr localizes every control label, so the English word list above finds
+// nothing on, say, a German UI where Play reads "Abspielen" -- which silently
+// pushed those devices onto the slower, blind Space-shortcut toggle. The player's
+// transport button is a CSS-module class whose *local* name stays "play" in both
+// states (e.g. "_8e144G_play"), so match that instead: it is language-independent
+// and identifies the same element the user would click.
+const TRANSPORT_TOGGLE_CLASS = /^(?:[A-Za-z0-9_-]+_)?play$/;
+
+function findTransportToggleByClass(action, playbackState) {
+  // The class identifies the toggle but not its direction, so only use it when
+  // toggling actually moves playback the way we want.
+  const wouldHelp = action === "play" ? playbackState !== "playing" : playbackState === "playing";
+  if (!wouldHelp) {
+    return undefined;
+  }
+
+  const toggle = [...document.querySelectorAll("button, [role='button']")]
+    .filter(isVisible)
+    .find((element) => classTokens(element).some((token) => TRANSPORT_TOGGLE_CLASS.test(token)));
+  if (!toggle) {
+    return undefined;
+  }
+
+  return {
+    element: toggle,
+    label: getControlLabel(toggle) || "player transport toggle"
+  };
+}
+
+function classTokens(element) {
+  const className = element.getAttribute("class") || "";
+  return className.split(/\s+/).filter(Boolean);
+}
+
+// Focus work the Space fallback needs, hoisted out of the downbeat. Leaves the
+// body focused and tabindex restored, exactly as dispatchKeyShortcut would.
+function primeKeyboardTarget() {
+  const active = document.activeElement;
+  if (active instanceof HTMLElement) {
+    active.blur();
+  }
+  if (!document.body) {
+    return;
+  }
+  const previousTabIndex = document.body.getAttribute("tabindex");
+  document.body.setAttribute("tabindex", "-1");
+  document.body.focus({ preventScroll: true });
+  if (previousTabIndex === null) {
+    document.body.removeAttribute("tabindex");
+  } else {
+    document.body.setAttribute("tabindex", previousTabIndex);
+  }
 }
 
 function scoreTransportCandidate(element, words) {

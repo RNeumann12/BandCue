@@ -141,7 +141,11 @@ function loadBackground(initialTabs: FakeTab[]) {
     });
   }
 
-  return { context, created, updated, deliverServerMessage, sendRuntimeMessage };
+  // `let` bindings live in the script's lexical scope, not on the context
+  // object, so module-level state has to be read by evaluating in the context.
+  const evaluate = (expression: string) => vm.runInContext(expression, context);
+
+  return { context, created, updated, deliverServerMessage, sendRuntimeMessage, evaluate };
 }
 
 describe("ensureSongsterrTabs tab reuse", () => {
@@ -183,6 +187,56 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(1);
     expect(created[0].url).toBe(SONG_A);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+});
+
+describe("dispatch lead self-correction", () => {
+  it("leaves the lead alone when prep had time to run before the downbeat", () => {
+    const { context, evaluate } = loadBackground([]);
+    const before = evaluate("adaptiveDispatchLeadMs");
+
+    expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: 320 })).toBe("");
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(before);
+  });
+
+  it("grows the lead by the overrun plus a cushion when prep ran out of time", () => {
+    const { context, evaluate } = loadBackground([]);
+    const before = evaluate("adaptiveDispatchLeadMs");
+
+    const detail = context.adjustDispatchLeadForTiming({ preparedAheadMs: -180 });
+
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(before + 180 + 150);
+    expect(detail).toContain("count-in was extended");
+  });
+
+  it("never grows the lead past the cap", () => {
+    const { context, evaluate } = loadBackground([]);
+
+    for (let i = 0; i < 20; i += 1) {
+      context.adjustDispatchLeadForTiming({ preparedAheadMs: -900 });
+    }
+
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(evaluate("MAX_DISPATCH_LEAD_MS"));
+  });
+
+  it("reports the lead it needs so the room's count-in can cover it", () => {
+    const { context, evaluate } = loadBackground([]);
+    context.adjustDispatchLeadForTiming({ preparedAheadMs: -200 });
+
+    const status = context.normalizeAdapterStatus({ ready: true });
+
+    expect(status.requiredLeadMs).toBe(evaluate("adaptiveDispatchLeadMs"));
+  });
+
+  it("explains a background Songsterr tab instead of leaving the lateness a mystery", () => {
+    const { context } = loadBackground([]);
+
+    expect(context.describeTiming({ deviationMs: 240, hidden: true }))
+      .toContain("started 240 ms late");
+    expect(context.describeTiming({ deviationMs: 240, hidden: true }))
+      .toContain("background");
+    // A start that landed on the beat needs no commentary.
+    expect(context.describeTiming({ deviationMs: 4, hidden: false })).toBe("");
   });
 });
 

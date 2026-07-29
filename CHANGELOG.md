@@ -2,8 +2,35 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-07-29
+
+Start-timing release. Every adapter now does its setup during the count-in and only
+triggers playback on the downbeat, and the host gains room-wide Helix controls.
+
 ### Changed
 
+- Songsterr starts are now noticeably tighter between devices. The extension used to
+  resolve *which* control to press only after the scheduled instant had already passed:
+  two document-wide button scans, each forcing a layout, measured at ~5 ms apiece on a
+  real Songsterr page and scaling with DOM size and CPU — a per-device head start that
+  clock sync cannot compensate for. Forcing the Synth source, resetting to the song
+  start, and picking the control now all happen during the count-in, so the downbeat is
+  a single click. The final wait also aims early by a measured, capped estimate of how
+  long that click takes, so playback *starts* on the beat instead of just being asked to.
+- The Songsterr extension now finds the player's transport button on non-English
+  Songsterr UIs. It previously matched English labels only ("Play" / "Resume"), so on a
+  German player ("Abspielen") it matched nothing and silently fell back to a blind
+  Space-key toggle after paying for both scans. The button is now also matched by its
+  language-independent CSS-module class, and only used when toggling actually moves
+  playback the way the command intends.
+- The Songsterr extension reports how far its start landed from the scheduled downbeat,
+  grows its own dispatch lead when a command runs out of count-in (reporting it as
+  `requiredLeadMs` so the room's count-in grows to match), and warns when a command fired
+  from a background tab — Chrome clamps timers in hidden tabs to ≥ 1 s, which no in-page
+  scheduling can undo. Keep the Songsterr tab visible while playing.
+- A MuseScore adapter no longer stretches the count-in for songs that don't use MuseScore. Its
+  setup lead is only added when the current song actually has a MuseScore source, so a
+  Songsterr-only or Helix-only song keeps its short count-in.
 - Helix Stadium starts now use the configured number of complete count-in measures and support
   room-wide and per-song timing shifts up to ±60 seconds. If a negative offset leaves too little
   device-prep lead time, BandCue holds the start to exactly the lead time needed instead of
