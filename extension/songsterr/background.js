@@ -43,6 +43,10 @@ let tabStatusInFlight = false;
 let tabStatusPending = false;
 let lastDeliveredStatusSignature = "";
 let lastSongsterrTabIdentity = "";
+// How the last open/advance actually reached the song, reported to the host so
+// a member who sees their tab reload can tell whether the in-page switch was
+// tried and refused, or never attempted at all.
+let lastSongOpenMethod = "";
 let lastContentScriptStatusAt = 0;
 // When true, this machine never auto-opens a Songsterr tab. Use it on a host
 // that plays from MuseScore so transport/open commands don't pop Songsterr.
@@ -62,11 +66,95 @@ let knownHosts = [];
 // single example URL from the host is enough to build the right URL for everyone.
 // Persisted per-machine.
 let memberInstrument = "auto";
+// What this device calls itself in the room. Chrome gives an extension no way to
+// read the computer's name -- chrome.enterprise.deviceAttributes.getDeviceHostname()
+// is ChromeOS-and-policy-only, and nothing else (userAgent, userAgentData, the
+// system.* APIs) exposes it, so there is no permission we could ask for either.
+// Instead the member can type a name in the popup, and until they do we derive one
+// from their instrument and platform. Every extension used to report the identical
+// "Songsterr tab", which collides in two places that matter:
+//   * the host keys saved per-device calibration by device name, so one member's
+//     manual offset was pushed to every Songsterr device in the room;
+//   * the coordinator caches a recently-seen clock per role+name+app, so a joining
+//     device could adopt another member's clock estimate and manual offset.
+let deviceNameOverride = "";
+const DEVICE_NAME_MAX_LENGTH = 80;
+const INSTRUMENT_LABELS = { guitar: "Guitar", bass: "Bass", drum: "Drums" };
+
+/** The name reported to the room: the member's own, else an instrument/platform default. */
+function resolveDeviceName() {
+  return deviceNameOverride || defaultDeviceName();
+}
+
+function defaultDeviceName() {
+  const instrumentLabel = INSTRUMENT_LABELS[memberInstrument] || "";
+  const platform = detectPlatformName();
+  const stem = instrumentLabel ? `${instrumentLabel} Songsterr` : "Songsterr";
+  return platform ? `${stem} (${platform})` : stem;
+}
+
+function detectPlatformName() {
+  const reported = globalThis.navigator?.userAgentData?.platform;
+  if (typeof reported === "string" && reported.trim()) {
+    return reported.trim();
+  }
+
+  // userAgentData is Chromium-only and can be absent in older builds; fall back to
+  // the classic user agent, which is enough to tell the common desktops apart.
+  const userAgent = globalThis.navigator?.userAgent || "";
+  for (const candidate of PLATFORM_PATTERNS) {
+    if (candidate.pattern.test(userAgent)) {
+      return candidate.name;
+    }
+  }
+  return "";
+}
+
+// Checked in order: "CrOS" and "Android" user agents also contain "Linux".
+const PLATFORM_PATTERNS = [
+  { pattern: /windows/i, name: "Windows" },
+  { pattern: /macintosh|mac os x/i, name: "macOS" },
+  { pattern: /cros/i, name: "ChromeOS" },
+  { pattern: /android/i, name: "Android" },
+  { pattern: /linux/i, name: "Linux" }
+];
+
+function normalizeDeviceName(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, DEVICE_NAME_MAX_LENGTH);
+}
+
+// clientHello is only read when a connection is established, so a rename has to
+// reconnect for the room to see it. Reusing the resolved endpoint keeps this to a
+// single quick socket swap rather than a rediscovery.
+function reannounceIdentity() {
+  if (socket?.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  reconnectAttempts = 0;
+  connect();
+}
 
 // How far ahead of the scheduled downbeat a transport command is forwarded to
 // the content script. Covers the tab query, the IPC hop, and Songsterr prep
-// (synth source, reset-to-start); the content script waits out the remainder.
+// (synth source, reset-to-start, resolving which control to touch); the content
+// script waits out the remainder.
 const DISPATCH_LEAD_MS = 400;
+// If the tab query + IPC hop + prep ever overrun the lead time, the content
+// script has no count-in left: it preps and fires in one go on (or after) the
+// downbeat, which is exactly the erratic-late start we're trying to avoid. Grow
+// the lead for later commands by the overrun plus this cushion so a slow machine
+// self-corrects instead of repeating the same late start every song.
+const DISPATCH_LEAD_OVERRUN_CUSHION_MS = 150;
+// Upper bound for the self-adjusting lead so a pathological machine can't eat
+// the whole count-in (it would only move the prep earlier, never fix slowness).
+const MAX_DISPATCH_LEAD_MS = 2500;
+// Self-adjusting copy of DISPATCH_LEAD_MS, reported to the room as
+// requiredLeadMs so the coordinator's count-in itself grows to cover it.
+let adaptiveDispatchLeadMs = DISPATCH_LEAD_MS;
+// How long to wait for the content script to confirm an in-page song switch.
+// Comfortably over the content script's own 2.5 s router timeout, so a slow
+// device still gets its real answer rather than being forced onto a reload.
+const IN_PAGE_NAV_REPLY_TIMEOUT_MS = 3500;
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
@@ -154,6 +242,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "bandcueNavigateResult") {
+    settleInPageNav(message.requestId, Boolean(message.ok));
+    return false;
+  }
+
   if (message.type === "songsterrStatus") {
     lastContentScriptStatusAt = Date.now();
     const tabIdentity = getSongsterrTabIdentity(sender.tab);
@@ -179,8 +272,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "popupSetInstrument") {
+    const previousName = resolveDeviceName();
     memberInstrument = normalizeInstrument(message.instrument);
     chrome.storage.local.set({ instrument: memberInstrument });
+    // The default name is derived from the instrument, so picking Bass renames an
+    // unnamed device in the room too.
+    if (resolveDeviceName() !== previousName) {
+      reannounceIdentity();
+    }
+    sendResponse(getPopupState());
+    return true;
+  }
+
+  if (message.type === "popupSetDeviceName") {
+    const previousName = resolveDeviceName();
+    deviceNameOverride = normalizeDeviceName(message.deviceName);
+    chrome.storage.local.set({ deviceName: deviceNameOverride });
+    if (resolveDeviceName() !== previousName) {
+      reannounceIdentity();
+    }
     sendResponse(getPopupState());
     return true;
   }
@@ -194,11 +304,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument", "deviceName"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
   autoConnectEnabled = Boolean(stored.autoConnectEnabled);
   knownHosts = Array.isArray(stored.knownHosts) ? stored.knownHosts : [];
   memberInstrument = normalizeInstrument(stored.instrument);
+  deviceNameOverride = normalizeDeviceName(stored.deviceName);
   // Seed from a previously successful room URL so a known host is probed first
   // even on the first connect after this feature shipped.
   if (!knownHosts.length && stored.roomUrl) {
@@ -334,7 +445,7 @@ async function connect() {
     }, HEARTBEAT_CHECK_INTERVAL_MS);
     send({
       type: "clientHello",
-      deviceName: "Songsterr tab",
+      deviceName: resolveDeviceName(),
       role: "desktop-adapter",
       capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
     });
@@ -530,6 +641,9 @@ function handleTransportCommand(message) {
   // band out of sync. This is the only place that navigates; the downbeat
   // (sendTransportToSongsterr) only locates the already-loaded tab.
   if (message.action === "play") {
+    // Cleared first so the play's status reports how *this* command reached the
+    // song rather than repeating whatever the last open did.
+    lastSongOpenMethod = "";
     ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
   }
   // Dispatch to the content script *ahead* of the downbeat: the tab query,
@@ -545,7 +659,52 @@ function handleTransportCommand(message) {
       Boolean(message.resetBeforePlay),
       dueLocalAt
     );
-  }, Math.max(0, delayMs - DISPATCH_LEAD_MS));
+  }, Math.max(0, delayMs - adaptiveDispatchLeadMs));
+}
+
+// Grow the dispatch lead when the content script reported that it reached the
+// downbeat with no count-in left to prep in. Mirrors the MuseScore adapter's
+// self-correction (see src/adapters/musescore-windows.ts).
+function adjustDispatchLeadForTiming(timing) {
+  if (!timing || !Number.isFinite(timing.preparedAheadMs)) {
+    return "";
+  }
+
+  if (timing.preparedAheadMs > 0) {
+    return "";
+  }
+
+  const overrunMs = Math.max(0, -timing.preparedAheadMs);
+  const grown = Math.min(
+    MAX_DISPATCH_LEAD_MS,
+    adaptiveDispatchLeadMs + overrunMs + DISPATCH_LEAD_OVERRUN_CUSHION_MS
+  );
+  if (grown <= adaptiveDispatchLeadMs) {
+    return "";
+  }
+
+  adaptiveDispatchLeadMs = grown;
+  return `prep had no lead time left, so the count-in was extended to ${grown} ms`;
+}
+
+// Human-readable note about how this device's start actually landed, so a member
+// who starts late can see why instead of guessing.
+function describeTiming(timing) {
+  if (!timing) {
+    return "";
+  }
+
+  const notes = [];
+  if (Number.isFinite(timing.deviationMs) && Math.abs(timing.deviationMs) >= 15) {
+    const deviation = Math.round(timing.deviationMs);
+    notes.push(`started ${Math.abs(deviation)} ms ${deviation > 0 ? "late" : "early"}`);
+  }
+  if (timing.hidden) {
+    // Chrome clamps timers in a hidden tab to >= 1 s; nothing in the extension
+    // can work around that, but the member can (keep the tab visible).
+    notes.push("the Songsterr tab was in the background, which throttles its timers -- keep it visible while playing");
+  }
+  return notes.join("; ");
 }
 
 // Minimum lead time left on a reconciled play for it to still start together;
@@ -687,12 +846,15 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     controlPath: "content-script"
   };
 
+  const leadDetail = adjustDispatchLeadForTiming(final.timing);
+  const timingDetail = describeTiming(final.timing);
+
   reportCommandStatus({
     action,
     sequenceId,
     status: final.ok ? "succeeded" : "failed",
     ready: lastStatus.ready || tabs.length > 0,
-    detail: final.detail,
+    detail: [final.detail, timingDetail, leadDetail, lastSongOpenMethod].filter(Boolean).join("; "),
     controlPath: final.controlPath,
     firedAtServerTime: final.ok && Number.isFinite(final.firedAtLocal)
       ? Math.round(final.firedAtLocal + (serverOffsetMs ?? 0))
@@ -758,9 +920,12 @@ async function openSongsterrFromRoom(currentSong, sequenceId) {
     sequenceId,
     status: "succeeded",
     ready: true,
-    detail: currentSong?.title
-      ? `Opened Songsterr tab for ${currentSong.title}`
-      : "Opened current Songsterr tab",
+    detail: [
+      currentSong?.title
+        ? `Opened Songsterr tab for ${currentSong.title}`
+        : "Opened current Songsterr tab",
+      lastSongOpenMethod
+    ].filter(Boolean).join("; "),
     controlPath: "browser-tab",
     at: Date.now()
   });
@@ -856,6 +1021,10 @@ function normalizeAdapterStatus(status) {
     durationSource: sanitizeDurationMs(status.durationMs) ? "adapter" : undefined,
     state: status.state ?? (status.ready ? "ready" : "not-ready"),
     detail: status.detail,
+    // Tells the coordinator how long a count-in this device needs to prep in
+    // (see scheduleDelayForClients in src/shared/transport.ts). Grows only when
+    // a real command ran out of lead time.
+    requiredLeadMs: adaptiveDispatchLeadMs,
     lastCommand: status.lastCommand
   };
 }
@@ -869,6 +1038,7 @@ function getAdapterStatusSignature(status) {
     durationSource: status.durationSource || "",
     state: status.state || "",
     detail: status.detail || "",
+    requiredLeadMs: status.requiredLeadMs || 0,
     lastCommand: status.lastCommand || null
   });
 }
@@ -938,7 +1108,35 @@ function getSongsterrTabIdentity(tab) {
   return `${tab.id}:${songKey(tab.url)}`;
 }
 
+// A song open is routinely requested twice at once: the host's openSongCommand
+// and the eager pre-open at the start of the count-in. Letting both run raced
+// two in-page switches down one tab, so concurrent callers for the same song
+// share a single operation. A later caller that wants the tab in front still
+// gets it -- activation is cheap and idempotent, unlike the switch itself.
+const inFlightSongOpens = new Map();
+
 async function ensureSongsterrTabs(currentSong, options = {}) {
+  const key = songsterrReferences(currentSong).map(songKey).filter(Boolean).join("|");
+  if (!key) {
+    return openSongsterrTabs(currentSong, options);
+  }
+
+  const inFlight = inFlightSongOpens.get(key);
+  if (inFlight) {
+    const tabs = await inFlight;
+    return options.active && tabs[0]
+      ? [await activateSongsterrTab(tabs[0]), ...tabs.slice(1)]
+      : tabs;
+  }
+
+  const opening = openSongsterrTabs(currentSong, options).finally(() => {
+    inFlightSongOpens.delete(key);
+  });
+  inFlightSongOpens.set(key, opening);
+  return opening;
+}
+
+async function openSongsterrTabs(currentSong, options = {}) {
   const references = songsterrReferences(currentSong);
   const urls = references.map(normalizeSongsterrUrl).filter(Boolean);
   if (references.length) {
@@ -948,6 +1146,7 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
 
     const existing = await findSongsterrTabsForUrls(urls);
     if (existing.length) {
+      lastSongOpenMethod = "tab was already on the song";
       return options.active ? [await activateSongsterrTab(existing[0]), ...existing.slice(1)] : existing;
     }
 
@@ -972,11 +1171,23 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
     }
 
     if (reusable?.id) {
+      // Prefer swapping the song inside the page the member already has open.
+      // A full navigation destroys the document, and on iPadOS that discards the
+      // unlocked audio session with it, so playback stays silent until the
+      // member taps the screen again (see the arming notes in content-script.js).
+      if (await navigateSongsterrTabInPage(reusable, targetUrl)) {
+        lastSongOpenMethod = "switched in place, no reload";
+        const activated = options.active ? await activateSongsterrTab(reusable) : reusable;
+        return [{ ...activated, url: targetUrl }];
+      }
+
+      lastSongOpenMethod = "reloaded the tab -- the in-page switch was not confirmed";
       const navigated = await navigateSongsterrTab(reusable, targetUrl, Boolean(options.active));
       const loaded = navigated.id ? await waitForTabReady(navigated.id, 7000) : undefined;
       return [loaded || navigated];
     }
 
+    lastSongOpenMethod = "opened a new tab -- no Songsterr tab was open to reuse";
     const tab = await chrome.tabs.create({ url: targetUrl, active: Boolean(options.active) });
     const loaded = tab.id ? await waitForTabReady(tab.id, 7000) : undefined;
     return loaded ? [loaded] : tab.id ? [tab] : [];
@@ -995,12 +1206,71 @@ async function activateSongsterrTab(tab) {
     return tab;
   }
 
-  const updated = await chrome.tabs.update(tab.id, { active: true }).catch(() => tab);
+  // Re-activating a tab that is already in front is not free everywhere: iPadOS
+  // purges background tabs under memory pressure and reloads them when they are
+  // activated, which would undo an in-page song switch. Focusing the window is
+  // still worth doing -- "active" is per window, so the window may be behind.
+  const updated = tab.active
+    ? tab
+    : await chrome.tabs.update(tab.id, { active: true }).catch(() => tab);
   if (tab.windowId) {
     await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
   }
 
   return updated || tab;
+}
+
+// Asks the content script to swap songs via Songsterr's own router instead of
+// reloading the tab. Returns false whenever that cannot be confirmed -- no
+// content script yet, an older extension build, or a router that ignored the
+// route change -- so the caller can fall back to a real navigation.
+//
+// The answer is accepted from *either* the sendMessage reply or an unsolicited
+// bandcueNavigateResult, whichever lands first. Safari-derived browsers (Orion
+// on iPadOS, the one platform this whole path exists for) do not reliably hold
+// an async sendResponse channel open for the ~1 s the router takes, which would
+// silently fail every switch back to a full reload. The runtime.sendMessage
+// channel used by the second route is the same one status reports already use
+// successfully from those devices.
+// Keyed by request, not by tab: two switches can be in flight for one tab (the
+// host's openSongCommand and the count-in's eager pre-open), and keying by tab
+// let the second overwrite the first's resolver -- stranding one call forever
+// and letting the *other* call's timeout answer it with a spurious "refused",
+// which reloaded a tab that was already on the right song.
+const pendingInPageNavs = new Map();
+let nextInPageNavId = 1;
+
+async function navigateSongsterrTabInPage(tab, url) {
+  if (!tab?.id) {
+    return false;
+  }
+
+  const requestId = nextInPageNavId++;
+  const settled = new Promise((resolve) => {
+    pendingInPageNavs.set(requestId, resolve);
+    setTimeout(() => settleInPageNav(requestId, false), IN_PAGE_NAV_REPLY_TIMEOUT_MS);
+  });
+
+  chrome.tabs
+    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url, requestId })
+    .then((result) => {
+      if (result) {
+        settleInPageNav(requestId, Boolean(result.ok));
+      }
+    })
+    .catch(() => undefined);
+
+  return settled;
+}
+
+function settleInPageNav(requestId, ok) {
+  const resolve = pendingInPageNavs.get(requestId);
+  if (!resolve) {
+    return;
+  }
+
+  pendingInPageNavs.delete(requestId);
+  resolve(ok);
 }
 
 // Point an existing Songsterr tab at a new song instead of opening a new tab,
@@ -1135,16 +1405,25 @@ function normalizePath(pathname) {
 function songKey(value) {
   try {
     const url = value instanceof URL ? value : new URL(value);
-    // Collapse the instrument slug ("-bass-tab"/"-drum-tab" -> "-tab") and strip
-    // the per-track "t<n>" suffix so every instrument of one song shares a key.
-    // The track query is ignored implicitly since we key on the path alone.
-    const path = normalizePath(url.pathname)
-      .replace(/-(?:bass|drum)-tab(-s\d+)/i, "-tab$1")
-      .replace(/(-s\d+)t\d+/i, "$1");
-    return path;
+    return songKeyFromPath(normalizePath(url.pathname));
   } catch {
     return "";
   }
+}
+
+// The "-s<id>" is the only stable part of a Songsterr address. Songsterr
+// canonicalizes the rest after loading: it rewrites the *whole* slug from the
+// song id -- a request for ".../metallica-nothing-else-matters-tab-s437" lands
+// on ".../limp-bizkit-rollin-air-raid-vehicle-tab-s437" -- and appends a
+// per-track "t<n>". Comparing slugs therefore reports "different song" for the
+// page a member is already on, which had BandCue re-route the player at the
+// downbeat. Keying on the id also gives instrument variants of one song a shared
+// key for free, which is the behaviour this has always wanted. Legacy URLs with
+// no song id fall back to the normalized path.
+// Keep in sync with songsterrSongKey() in content-script.js.
+function songKeyFromPath(path) {
+  const songId = path.match(/-s(\d+)(?:t\d+)?(?:\/|$)/)?.[1];
+  return songId ? `s${songId}` : path;
 }
 
 // The instrument category a Songsterr URL points at: "bass"/"drum" when the slug
@@ -1723,6 +2002,10 @@ function getPopupState() {
     autoConnectEnabled,
     suppressAutoOpen,
     instrument: memberInstrument,
+    // The member's own name (empty when they haven't set one) plus the name the
+    // room actually sees, so the popup can show the derived default as a hint.
+    deviceName: deviceNameOverride,
+    effectiveDeviceName: resolveDeviceName(),
     status: lastStatus
   };
 }

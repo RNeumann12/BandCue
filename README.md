@@ -14,7 +14,8 @@ that mirror the countdown, the current song, and who's leading.
 - 🎯 **Scheduled start** — the coordinator says "go at time T", not "go now", so devices
   sync to the same instant using a shared clock (NTP-style offset/RTT measurement).
 - 🎚️ **Per-device calibration** — nudge a consistently-early or late device earlier or later.
-- 📜 **Setlist mode** — auto-load, arm, play, and advance through the whole rehearsal hands-free.
+- 📜 **Setlist automation** — two switches next to Play/Stop: auto-load the next song when one
+  ends, and auto-start it too. Run the rehearsal hands-free, or keep the downbeat in your hands.
 - 🔒 **Local-first** — runs entirely on your rehearsal Wi-Fi. No cloud, no account, no
   internet needed once installed. Nothing about your rehearsal leaves the room.
 
@@ -214,13 +215,24 @@ MuseScore songs open automatically when the MuseScore helper has a configured sc
 exactly one local catalog entry matches the current item. The helper warns on a title mismatch,
 or when the local match is missing or ambiguous.
 
-**Setlist mode** plays the whole list hands-free. Enable the **Setlist mode** toggle and the host
-loads the current song on every adapter, arms, and starts playback; when a song reaches its end
-the room auto-advances to the next entry, loads it, and plays it, until the list is finished. End
-detection uses either the song's duration or adapter playback status: if every adapter observed
-playing reports stopped, the room treats that as the end of the song. Songsterr may also report a
-duration automatically once a song is loaded, and any song can carry a manually entered time. A
-manual **Stop** (or turning the toggle off) ends the run without advancing.
+### Setlist Automation
+
+Two independent switches sit next to **Arm / Play / Stop** in the host panel and stay in effect
+until you change them (they are remembered in the host browser):
+
+- **Auto-load next song** (`Ctrl+Alt+R`) — when a song ends by itself, the host makes the next
+  entry current and asks every adapter to load it.
+- **Auto-start it** (`Ctrl+Alt+T`) — once that song has loaded, the host also arms and plays it.
+  Switch it off to have each song loaded and waiting while you keep the downbeat: the status line
+  reads *"… loaded - press Play when you are ready."* This switch only applies to auto-loaded
+  songs, so it is greyed out while auto-load is off.
+
+With both on, the room walks the list hands-free until the final song finishes. End detection uses
+either the song's duration or adapter playback status: if every adapter observed playing reports
+stopped, the room treats that as the end of the song. Songsterr may also report a duration
+automatically once a song is loaded, and any song can carry a manually entered time. A manual
+**Stop** never advances, and pressing **Stop** while the next song is loading calls off its
+auto-start.
 
 ### Safety Controls
 
@@ -287,6 +299,14 @@ Chrome extensions **do not** run in Chrome or Safari on iPadOS/iOS. Use the
 extensions, so the BandCue Songsterr extension works there. On iPad/iPhone, auto-discovery
 (room code, port, mDNS, LAN scan) does **not** work — you must connect with the full
 `host:port` (e.g. `192.168.1.23:4173`) or the full room URL.
+
+**Tap once per song.** WebKit only lets audio start from a real touch, and it forgets that
+permission every time the page loads — including when BandCue moves the tab to the next song. The
+extension shows a **"Tap to enable BandCue audio"** banner whenever that touch is missing: tap
+anywhere on the Songsterr page and it disappears. Until you do, a play command still flips
+Songsterr's button to Pause but stays silent, and the host shows the device as not armed. Keep the
+Songsterr tab in the foreground and set **Auto-Lock** to **Never**, or iOS suspends the audio and
+the banner comes back.
 
 ### Songsterr on Android
 

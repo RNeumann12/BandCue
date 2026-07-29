@@ -4,6 +4,179 @@
 
 ### Changed
 
+- Setlist mode is gone as a mode. It was a third place to start and stop playback — turning the
+  toggle on loaded, armed and played the current song, turning it off stopped the room, and a
+  manual Stop silently switched it back off — so it never sat still next to the Arm/Play/Stop the
+  host actually uses. Its behaviour is now two switches inside the host's transport panel, both
+  simply on or off and remembered across reloads:
+  - **Auto-load next song** (`Ctrl+Alt+R`): when a song ends by itself, make the next entry
+    current and ask every adapter to load it.
+  - **Auto-start it** (`Ctrl+Alt+T`): once that song has loaded, arm and play it too. Off, the
+    next song sits loaded and waiting for the host's Play — which is the split the old single
+    toggle could not express. Only meaningful for auto-loaded songs, so it greys out with
+    auto-load off.
+
+  Play and Stop keep their plain meaning: nothing is auto-started unless a song ended on its own,
+  a manual Stop never advances the list, and Stop pressed while the next song is still loading
+  calls off its auto-start.
+
+### Fixed
+
+- MuseScore only sometimes jumped back to the start of the score before playing. The reset key
+  (Ctrl+Home) was read back out of the bridge command queue, but `queueBridgeCommand` drops the
+  command entirely when no bridge server is listening — which is every session started with
+  `Start-BandCueMuseScoreAdapter.ps1` / *BandCue MuseScore Bridge - Connect.cmd*, since that
+  launcher passes no `--bridge-port`. The reset therefore resolved to `false` and only Esc was
+  sent, so playback resumed from MuseScore's own start position: correct whenever that already was
+  bar 1, wrong as soon as playback had last been started anywhere else. The requested reset now
+  travels with the scheduled command instead of via the bridge queue.
+
+## 1.3.5 - 2026-07-29
+
+### Fixed
+
+- Songsterr is now identified by its song id rather than its URL slug. Songsterr canonicalizes the
+  address after loading — it rewrites the *whole* slug from the id (a request for
+  `.../metallica-nothing-else-matters-tab-s437` lands on
+  `.../limp-bizkit-rollin-air-raid-vehicle-tab-s437`) and appends a per-track `t<n>`. The setlist's
+  stored URL therefore almost never matches the player's own address literally, so BandCue decided
+  the member was on the wrong song and re-routed the player — re-rendering the whole score just as
+  playback should have started, which reads as a reload and leaves the song dead. The `-s<id>` is
+  the only stable part of a Songsterr address, and is what both sides now compare.
+- The content script now echoes the request id on its in-page navigation answer. 1.3.4 changed the
+  background to match answers by request id but did not update the sender, so every answer on that
+  channel was dropped and each switch fell back to a full reload after the timeout. The background
+  test fakes the content script and so could not see it; a content-script test now covers the seam.
+
+## 1.3.4 - 2026-07-29
+
+### Fixed
+
+- A Songsterr tab already showing the right song could still be reloaded on the downbeat, which
+  reset the song and left playback dead — on iPad it also discarded the armed audio. Two callers
+  open a song at once (the host's `openSongCommand`, and the eager pre-open at the start of the
+  count-in), and the in-page switch introduced in 1.3.2 tracked its pending answer per *tab*. The
+  second caller overwrote the first's resolver, so one call could never complete and the other was
+  answered by the first's timeout with a spurious "the router refused" — which triggered exactly
+  the full reload the switch exists to avoid.
+
+  Pending switches are now tracked per request, and concurrent opens of the same song share one
+  operation instead of racing two switches down the same tab.
+
+## 1.3.3 - 2026-07-29
+
+### Fixed
+
+- The in-page song switch added in 1.3.2 no longer silently falls back to reloading the tab on
+  iPad. The content script's answer was only carried on the `sendMessage` reply channel, and
+  Safari-derived browsers — Orion on iPadOS, the one platform the whole path exists for — do not
+  reliably hold that channel open for the second or so Songsterr's router takes. A lost answer
+  looks exactly like a refusal, so every switch fell back to the full reload it was meant to
+  avoid. The answer is now also sent over the `runtime.sendMessage` channel that status reports
+  already use successfully from those devices, and whichever arrives first wins.
+
+### Changed
+
+- The host now says *how* a song was reached: `switched in place, no reload`, `reloaded the tab —
+  the in-page switch was not confirmed`, `tab was already on the song`, or `opened a new tab`.
+  A member who sees their tab reload can tell whether the in-page switch was tried and refused or
+  never attempted, instead of the host reporting only that the song opened.
+
+**Note on 1.3.2:** its published extension zip was replaced in place about 35 minutes after
+release, and the two builds share a filename and version. If Songsterr still reloads on every song
+change, an install taken from the earlier zip is the likely cause — this release carries a distinct
+version number so the installed build can be identified.
+
+## 1.3.2 - 2026-07-29
+
+### Changed
+
+- Switching songs no longer reloads the Songsterr tab. Songsterr is a single-page app, so the
+  extension now asks its router for the next song inside the same document instead of navigating
+  the tab. This is the other half of the iPad fix below: arming the audio is worth little on its
+  own, because every song change would tear the document down and throw the unlocked session away
+  again, leaving the member to tap the screen before each song. The arm now survives a song change.
+
+  The result is verified before it is trusted — the switch counts as successful only once the
+  player has actually loaded the new song — and anything else falls back to the full tab
+  navigation used before, so a change to Songsterr's router can only cost the optimization, not
+  correctness. An in-page switch is also faster than a page load, so the tab is ready for the
+  downbeat sooner.
+
+### Fixed
+
+- A Songsterr tab that is already in front is no longer re-activated when a song is selected.
+  iPadOS purges background tabs under memory pressure and reloads them when they are activated,
+  which could undo the in-page switch above.
+
+- Songsterr on iPad/iPhone (Orion) no longer goes silent after switching songs. WebKit only lets
+  Web Audio start from inside a *trusted* user gesture and re-imposes that rule on every new
+  document, so once BandCue navigated the tab to the next song, the synthetic click still reached
+  Songsterr — the button flipped to Pause — while its audio context stayed suspended: no sound, and
+  the play cursor never moved. The extension now rides along on any real touch on the Songsterr
+  page to unlock the document's audio session, shows a "Tap to enable BandCue audio" banner while
+  that touch is still missing, and reports the unarmed state to the host so a dark iPad is visible
+  before the count-in instead of after. Chromium and desktop Safari are unaffected — they grant a
+  page sticky activation after one interaction, so none of this runs there.
+
+  Arming happens on the player's tap and never on the downbeat: the scheduled transport path is
+  unchanged, and the control action still reads only a boolean, so start timing is untouched.
+
+## 1.3.1 - 2026-07-29
+
+### Changed
+
+- Songsterr devices can now be told apart in the room. Each member can name their device in the
+  extension popup; left empty, the name is derived from their instrument and platform
+  (`Bass Songsterr (Windows)`, or `Songsterr (Windows)` on Auto) instead of every device reporting
+  the identical `"Songsterr tab"`. Chrome gives an extension no way to read the computer's own
+  name — the only API that does is ChromeOS-and-policy-only, and no permission unlocks it
+  elsewhere — so the name is the member's to set, as it already was in the Android app and the
+  MuseScore adapter.
+
+### Fixed
+
+- Per-device timing calibration now applies to the device it was set for. The host keys saved
+  manual offsets by device name, so while every extension reported `"Songsterr tab"` they shared a
+  single entry and one member's offset was pushed to every Songsterr device in the room.
+- A joining Songsterr device no longer adopts another member's clock estimate. The coordinator
+  caches a recently-seen clock per `role + name + apps` to survive reconnects; identical names made
+  every Songsterr device share one cache entry, including its manual offset.
+
+**Upgrading:** saved calibrations are keyed by device name, so offsets stored under the old shared
+`"Songsterr tab"` name stop matching once devices are renamed and need setting once more. They were
+being cross-applied to every Songsterr device before this release, so this is a reset rather than a
+loss.
+
+## 1.3.0 - 2026-07-29
+
+Start-timing release. Every adapter now does its setup during the count-in and only
+triggers playback on the downbeat, and the host gains room-wide Helix controls.
+
+### Changed
+
+- Songsterr starts are now noticeably tighter between devices. The extension used to
+  resolve *which* control to press only after the scheduled instant had already passed:
+  two document-wide button scans, each forcing a layout, measured at ~5 ms apiece on a
+  real Songsterr page and scaling with DOM size and CPU — a per-device head start that
+  clock sync cannot compensate for. Forcing the Synth source, resetting to the song
+  start, and picking the control now all happen during the count-in, so the downbeat is
+  a single click. The final wait also aims early by a measured, capped estimate of how
+  long that click takes, so playback *starts* on the beat instead of just being asked to.
+- The Songsterr extension now finds the player's transport button on non-English
+  Songsterr UIs. It previously matched English labels only ("Play" / "Resume"), so on a
+  German player ("Abspielen") it matched nothing and silently fell back to a blind
+  Space-key toggle after paying for both scans. The button is now also matched by its
+  language-independent CSS-module class, and only used when toggling actually moves
+  playback the way the command intends.
+- The Songsterr extension reports how far its start landed from the scheduled downbeat,
+  grows its own dispatch lead when a command runs out of count-in (reporting it as
+  `requiredLeadMs` so the room's count-in grows to match), and warns when a command fired
+  from a background tab — Chrome clamps timers in hidden tabs to ≥ 1 s, which no in-page
+  scheduling can undo. Keep the Songsterr tab visible while playing.
+- A MuseScore adapter no longer stretches the count-in for songs that don't use MuseScore. Its
+  setup lead is only added when the current song actually has a MuseScore source, so a
+  Songsterr-only or Helix-only song keeps its short count-in.
 - Helix Stadium starts now use the configured number of complete count-in measures and support
   room-wide and per-song timing shifts up to ±60 seconds. If a negative offset leaves too little
   device-prep lead time, BandCue holds the start to exactly the lead time needed instead of

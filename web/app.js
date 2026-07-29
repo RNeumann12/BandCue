@@ -25,6 +25,8 @@ import {
   playBlockedReason,
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
+  normalizeAutoRunSettings,
+  describeAutoRun,
   collectWarnings,
   clampHelixOffsetMs,
   applyGlobalHelixSettings,
@@ -91,6 +93,9 @@ const elements = {
   globalHelixOffsetInput: $input("#globalHelixOffsetInput"),
   globalHelixStatus: $("#globalHelixStatus"),
   globalHelixScheduleDebug: $("#globalHelixScheduleDebug"),
+  autoAdvanceToggle: $input("#autoAdvanceToggle"),
+  autoStartToggle: $input("#autoStartToggle"),
+  autoRunStatus: $("#autoRunStatus"),
   playButton: $button("#playButton"),
   stopButton: $button("#stopButton"),
   setlistPanel: $("#setlistPanel"),
@@ -120,8 +125,6 @@ const elements = {
   exportSetlistButton: $button("#exportSetlistButton"),
   importSetlistButton: $button("#importSetlistButton"),
   importSetlistInput: $input("#importSetlistInput"),
-  setlistModeToggle: $input("#setlistModeToggle"),
-  setlistModeStatus: $("#setlistModeStatus"),
   timingPanel: $("#timingPanel"),
   timingRows: $("#timingRows")
 };
@@ -130,6 +133,7 @@ const SETLIST_STORAGE_KEY = "bandcue:setlist";
 const CALIBRATION_STORAGE_KEY = "bandcue:calibration";
 const DEVICE_NAME_STORAGE_KEY = "bandcue:name";
 const HELIX_SETTINGS_STORAGE_KEY = "bandcue:helix-settings";
+const AUTO_RUN_STORAGE_KEY = "bandcue:auto-run";
 const LEGACY_SETLIST_STORAGE_KEY = "playsync:setlist";
 const LEGACY_CALIBRATION_STORAGE_KEY = "playsync:calibration";
 const LEGACY_DEVICE_NAME_STORAGE_KEY = "playsync:name";
@@ -154,12 +158,11 @@ let editingSongIndex = -1;
 let calibrations = loadCalibrations();
 let appliedCalibrationByClientId = {};
 let transportRequestPending = false;
-let setlistMode = false;
-// Auto-runner phase: "idle" | "loading" (waiting for the next song to load on
-// adapters) | "playing" (a song is on; we advance when it auto-stops).
+let autoRun = loadAutoRunSettings();
+// Auto-runner phase: "idle" | "loading" (a song has been sent to the adapters
+// and we are waiting for it to be loaded enough to play).
 let setlistRunPhase = "idle";
 let setlistLoadStartedAt = 0;
-let setlistAbort = false;
 let prevTransportStatus = "stopped";
 let lastStableRoomSignature = "";
 let pendingTimingState;
@@ -168,8 +171,8 @@ let countdownTimer;
 let countdownIntervalMs;
 
 const TIMING_RENDER_INTERVAL_MS = 1200;
-// Setlist mode: how long to let the next song's tab/score load before starting,
-// and how long to wait for a ready adapter before giving up on the run.
+// Auto-load: how long to let the next song's tab/score settle before starting,
+// and how long to wait for a ready adapter before giving up on the load.
 const SETLIST_LOAD_SETTLE_MS = 4500;
 const SETLIST_LOAD_TIMEOUT_MS = 20000;
 
@@ -186,13 +189,19 @@ if (isHost) {
   elements.timingPanel.hidden = false;
   applyHostHotkeyHints();
   renderGlobalHelixSettings();
+  renderAutoRunSettings();
   document.addEventListener("keydown", handleHostHotkey);
   renderSetlist();
 }
 
 elements.playButton?.addEventListener("click", requestPlay);
 elements.stopButton?.addEventListener("click", requestStop);
-elements.setlistModeToggle?.addEventListener("change", handleSetlistModeToggle);
+elements.autoAdvanceToggle?.addEventListener("change", () => {
+  setAutoRun({ advance: elements.autoAdvanceToggle.checked });
+});
+elements.autoStartToggle?.addEventListener("change", () => {
+  setAutoRun({ start: elements.autoStartToggle.checked });
+});
 elements.armButton?.addEventListener("click", toggleArm);
 elements.controlModeSelect?.addEventListener("change", () => {
   publishSafety({ controlMode: elements.controlModeSelect.value });
@@ -306,27 +315,19 @@ function requestStop() {
     return;
   }
 
+  // Stop also cancels a song that is loading for an auto-start: the host wants
+  // silence, not the next song kicking in a moment later. That is the only thing
+  // left to do when the transport is already stopped. Stopping a *running* song
+  // needs no extra handling -- it carries stopReason "manual", which never
+  // advances the setlist.
+  cancelPendingAutoLoad("Next song called off.");
+
   if (!lastState || lastState.transport.status === "stopped") {
     return;
   }
 
-  // A manual Stop ends any auto-run: don't treat the resulting stop as a song
-  // finishing and advance into the next song.
-  abortSetlistRunner("Setlist mode off (stopped).");
   transportRequestPending = true;
   send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
-}
-
-function handleSetlistModeToggle() {
-  if (elements.setlistModeToggle.checked) {
-    startSetlistRun();
-  } else {
-    const wasActive = lastState && lastState.transport.status !== "stopped";
-    abortSetlistRunner("Setlist mode off.");
-    if (wasActive) {
-      send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
-    }
-  }
 }
 
 function toggleArm() {
@@ -344,13 +345,12 @@ function selectNextSong() {
   selectCurrentSong(nextSongIndex(currentSongIndex, setlist.length));
 }
 
-function toggleSetlistMode() {
-  if (!elements.setlistModeToggle) {
-    return;
-  }
+function toggleAutoAdvance() {
+  setAutoRun({ advance: !autoRun.advance });
+}
 
-  elements.setlistModeToggle.checked = !elements.setlistModeToggle.checked;
-  handleSetlistModeToggle();
+function toggleAutoStart() {
+  setAutoRun({ start: !autoRun.start });
 }
 
 function handleHostHotkey(event) {
@@ -367,7 +367,8 @@ function handleHostHotkey(event) {
     "next-song": selectNextSong,
     "previous-song": selectPreviousSong,
     "open-current-song": openCurrentSong,
-    "toggle-setlist-mode": toggleSetlistMode
+    "toggle-auto-advance": toggleAutoAdvance,
+    "toggle-auto-start": toggleAutoStart
   }[action];
   handler?.();
 }
@@ -630,7 +631,7 @@ function renderHostControls(state, readyAdapters) {
 
   const playAvailable = canHostPlay(state);
   elements.playButton.disabled = !playAvailable || transportRequestPending;
-  elements.stopButton.disabled = state.transport.status === "stopped" || transportRequestPending;
+  updateStopAvailability(state);
   elements.armButton.disabled = state.transport.status !== "stopped";
   elements.armButton.setAttribute("aria-pressed", String(Boolean(state.safety?.armed)));
   setText(elements.armButton, state.safety?.armed ? "Disarm" : "Arm");
@@ -1154,35 +1155,63 @@ function selectCurrentSong(index) {
   renderSetlist();
 }
 
-// --- Setlist mode (auto-advance runner) -----------------------------------
+// --- Setlist automation (auto-load / auto-start) ---------------------------
+// Both switches sit next to Arm/Play/Stop and are always live; there is no
+// separate "run" to start. A song ending by itself is the only trigger.
 
-function startSetlistRun() {
-  if (!setlist.length) {
-    elements.setlistModeToggle.checked = false;
-    setSetlistModeStatus("Add songs to the setlist first.");
+function setAutoRun(update) {
+  autoRun = normalizeAutoRunSettings({ ...autoRun, ...update });
+  localStorage.setItem(AUTO_RUN_STORAGE_KEY, JSON.stringify(autoRun));
+
+  // A pending load only exists because auto-load put it there.
+  if (!autoRun.advance) {
+    cancelPendingAutoLoad("Auto-load off.");
+  }
+
+  renderAutoRunSettings();
+}
+
+function loadAutoRunSettings() {
+  try {
+    return normalizeAutoRunSettings(JSON.parse(localStorage.getItem(AUTO_RUN_STORAGE_KEY) || "{}"));
+  } catch {
+    return normalizeAutoRunSettings({});
+  }
+}
+
+function renderAutoRunSettings() {
+  if (!isHost || !elements.autoAdvanceToggle) {
     return;
   }
 
-  setlistMode = true;
-  setlistAbort = false;
+  elements.autoAdvanceToggle.checked = autoRun.advance;
+  elements.autoStartToggle.checked = autoRun.start;
+  // Auto-start only ever acts on a song auto-load queued up, so it has nothing
+  // to do on its own.
+  elements.autoStartToggle.disabled = !autoRun.advance;
+  updateStopAvailability();
 
-  if (currentSongIndex < 0) {
-    selectCurrentSong(0);
+  if (setlistRunPhase === "idle") {
+    setAutoRunStatus(describeAutoRun(autoRun));
+  }
+}
+
+// Stop is normally pointless while the transport is stopped, but during a
+// pending auto-start it is the way to call the next song off.
+function updateStopAvailability(state = lastState) {
+  if (!isHost || !elements.stopButton) {
+    return;
   }
 
-  // Adopt an already-playing song so its end still triggers an advance;
-  // otherwise load the current song and start it.
-  if (lastState?.transport?.status === "running") {
-    setlistRunPhase = "playing";
-    setSetlistModeStatus(`Playing ${currentSongLabel()} - will auto-advance.`);
-  } else {
-    beginLoadingCurrentSong();
-  }
+  const stopped = (state?.transport?.status ?? "stopped") === "stopped";
+  elements.stopButton.disabled = transportRequestPending
+    || (stopped && !(setlistRunPhase === "loading" && autoRun.start));
 }
 
 function beginLoadingCurrentSong() {
   setlistRunPhase = "loading";
   setlistLoadStartedAt = Date.now();
+  updateStopAvailability();
 
   // Ask every adapter to load the song now (navigates the Songsterr tab / opens
   // the MuseScore score) so it is ready by the time we start playback.
@@ -1190,38 +1219,30 @@ function beginLoadingCurrentSong() {
     send({ type: "openSongRequest", requestedAt: Date.now() });
   }
 
-  setSetlistModeStatus(`Loading ${currentSongLabel()}...`);
+  setAutoRunStatus(`Loading ${currentSongLabel()}...`);
 }
 
-// Stop the auto-runner without sending a transport command (the caller decides
-// whether a stop is also needed).
-function abortSetlistRunner(reason) {
-  if (!setlistMode && setlistRunPhase === "idle") {
+// Drop a song waiting to be started without sending a transport command (the
+// caller decides whether a stop is also needed).
+function cancelPendingAutoLoad(reason) {
+  if (setlistRunPhase === "idle") {
     return;
   }
 
-  setlistMode = false;
   setlistRunPhase = "idle";
-  setlistAbort = true;
-  if (elements.setlistModeToggle) {
-    elements.setlistModeToggle.checked = false;
-  }
-  if (reason) {
-    setSetlistModeStatus(reason);
-  }
+  updateStopAvailability();
+  setAutoRunStatus(reason || describeAutoRun(autoRun));
 }
 
 function driveSetlistRun(state) {
-  if (!isHost || !setlistMode || setlistRunPhase === "idle") {
+  if (!isHost) {
     return;
   }
-
-  const status = state.transport.status;
 
   if (setlistRunPhase === "loading") {
     const song = setlist[currentSongIndex];
     if (!song) {
-      abortSetlistRunner("Setlist mode stopped: no current song.");
+      cancelPendingAutoLoad("Auto-load stopped: no current song.");
       return;
     }
 
@@ -1233,33 +1254,38 @@ function driveSetlistRun(state) {
     });
 
     if (decision === "timeout") {
-      abortSetlistRunner("Setlist mode stopped: no ready adapter for the next song.");
+      cancelPendingAutoLoad("Auto-load stopped: no ready adapter for the next song.");
     } else if (decision === "play") {
-      playCurrentSongForRun();
+      finishLoadingCurrentSong();
     } else {
-      setSetlistModeStatus(`Loading ${currentSongLabel()}...`);
+      setAutoRunStatus(`Loading ${currentSongLabel()}...`);
     }
     return;
   }
 
-  // setlistRunPhase === "playing": advance when the song ends on its own.
-  if (status === "stopped") {
-    if (setlistAbort) {
-      setlistRunPhase = "idle";
-    } else if (shouldAdvanceSetlistOnStop(state, prevTransportStatus)) {
-      handleSongFinished();
-    } else if (prevTransportStatus === "scheduled") {
-      abortSetlistRunner("Setlist mode stopped: playback was cancelled.");
-    } else if (prevTransportStatus === "running") {
-      abortSetlistRunner("Setlist mode stopped: playback was cancelled.");
-    }
+  // Advance when a song ends on its own, however it was started -- a manual Play
+  // and an auto-started one both hand over to the next song.
+  if (autoRun.advance && shouldAdvanceSetlistOnStop(state, prevTransportStatus)) {
+    handleSongFinished();
   }
+}
+
+function finishLoadingCurrentSong() {
+  setlistRunPhase = "idle";
+  updateStopAvailability();
+
+  if (!autoRun.start) {
+    setAutoRunStatus(`${currentSongLabel()} loaded - press Play when you are ready.`);
+    return;
+  }
+
+  playCurrentSongForRun();
 }
 
 function playCurrentSongForRun() {
   const song = setlist[currentSongIndex];
   if (!song) {
-    abortSetlistRunner("Setlist mode stopped: no current song.");
+    setAutoRunStatus("Auto-start stopped: no current song.");
     return;
   }
 
@@ -1268,24 +1294,18 @@ function playCurrentSongForRun() {
   transportRequestPending = true;
   publishSafety({ armed: true });
   send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
-  setlistRunPhase = "playing";
 
   // Auto-advance can come from a known duration or from adapters naturally
   // reporting stopped after playback.
   const durationKnown = Boolean(song.durationMs) || appliesToSongsterr(song);
-  setSetlistModeStatus(durationKnown
+  setAutoRunStatus(durationKnown
     ? `Playing ${currentSongLabel()} - auto-advances at the end.`
     : `Playing ${currentSongLabel()} - auto-advances when adapters stop.`);
 }
 
 function handleSongFinished() {
   if (currentSongIndex >= setlist.length - 1) {
-    setlistMode = false;
-    setlistRunPhase = "idle";
-    if (elements.setlistModeToggle) {
-      elements.setlistModeToggle.checked = false;
-    }
-    setSetlistModeStatus("Setlist finished.");
+    setAutoRunStatus("Setlist finished.");
     return;
   }
 
@@ -1293,10 +1313,10 @@ function handleSongFinished() {
   beginLoadingCurrentSong();
 }
 
-// Drives only the loading branch (which is time-based); the playing branch is
-// event-driven from renderState so the run never advances twice for one stop.
+// Drives only the loading branch (which is time-based); the end-of-song branch
+// is event-driven from renderState so one stop never advances twice.
 function tickSetlistLoading() {
-  if (isHost && setlistMode && setlistRunPhase === "loading" && lastState) {
+  if (isHost && setlistRunPhase === "loading" && lastState) {
     driveSetlistRun(lastState);
   }
 }
@@ -1305,8 +1325,8 @@ function currentSongLabel() {
   return setlist[currentSongIndex]?.title || "song";
 }
 
-function setSetlistModeStatus(text) {
-  setText(elements.setlistModeStatus, text);
+function setAutoRunStatus(text) {
+  setText(elements.autoRunStatus, text);
 }
 
 function removeSetlistSong(index) {

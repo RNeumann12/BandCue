@@ -301,7 +301,12 @@ async function connect(): Promise<void> {
         ? Math.min(adaptiveDispatchLeadMs, delayMs)
         : 0;
       setTimeout(() => {
-        void triggerMuseScoreTransport(message.action, message.sequenceId, dueLocalAt);
+        void triggerMuseScoreTransport(
+          message.action,
+          message.sequenceId,
+          dueLocalAt,
+          Boolean(message.resetBeforePlay)
+        );
       }, Math.max(0, delayMs - dispatchLeadMs));
     }
 
@@ -650,7 +655,8 @@ exit 1
 async function triggerMuseScoreTransport(
   action: TransportAction,
   sequenceId: number,
-  dueLocalAt = Date.now()
+  dueLocalAt = Date.now(),
+  resetBeforePlay = false
 ): Promise<void> {
   const queuedBridgeCommand = bridgeCommands.get(sequenceId);
   // A helper that claimed the command gets the configured grace period to
@@ -675,7 +681,6 @@ async function triggerMuseScoreTransport(
     queuedBridgeCommand.status = "expired";
   }
 
-  const resetBeforePlay = Boolean(bridgeCommands.get(sequenceId)?.resetBeforePlay);
   const keys = keysForAction(action, resetBeforePlay);
   const script = `
 ${SENDKEYS_ASSEMBLY_PREAMBLE}

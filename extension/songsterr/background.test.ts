@@ -29,9 +29,21 @@ const SONG_B_BASS = "https://www.songsterr.com/a/wsa/song-b-bass-tab-s200";
 
 type FakeTab = { id: number; url: string; windowId: number; active?: boolean };
 
-function loadBackground(initialTabs: FakeTab[]) {
+function loadBackground(
+  initialTabs: FakeTab[],
+  // Whether the content script can swap songs through Songsterr's router. The
+  // default is "no", so every case that does not opt in exercises the full-tab
+  // navigation fallback.
+  // true/false: the content script replies. "hang": the reply channel is
+  // dropped, as Safari-derived browsers do for a slow async sendResponse.
+  { inPageNav = false }: { inPageNav?: boolean | "hang" } = {}
+) {
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
+  const inPageNavs: string[] = [];
+  // Request ids the background stamped on each in-page switch, so a test can
+  // answer a specific one the way the content script does.
+  const inPageNavRequestIds: number[] = [];
   let nextId = 1000;
   const onUpdatedListeners = new Set<(id: number, info: any, tab: FakeTab) => void>();
 
@@ -57,7 +69,23 @@ function loadBackground(initialTabs: FakeTab[]) {
       onRemoved: { addListener() {} },
       query: async () => initialTabs.map((tab) => ({ ...tab })),
       get: async (id: number) => initialTabs.find((tab) => tab.id === id),
-      sendMessage: async () => ({ ok: true }),
+      sendMessage: async (id: number, message: { type?: string; url?: string; requestId?: number }) => {
+        if (message?.type === "bandcueNavigateInPage") {
+          inPageNavs.push(message.url ?? "");
+          inPageNavRequestIds.push(message.requestId ?? -1);
+          if (inPageNav === "hang") {
+            return new Promise(() => {});
+          }
+          if (!inPageNav) {
+            return { ok: false, detail: "Songsterr did not pick up the route change" };
+          }
+          // A real in-page switch leaves the tab on the new URL without a load.
+          const tab = initialTabs.find((t) => t.id === id);
+          if (tab && message.url) tab.url = message.url;
+          return { ok: true };
+        }
+        return { ok: true };
+      },
       create: async ({ url, active }: { url: string; active?: boolean }) => {
         const tab: FakeTab = { id: nextId++, url, windowId: 1, active };
         created.push({ url, active });
@@ -81,6 +109,7 @@ function loadBackground(initialTabs: FakeTab[]) {
   class FakeSocket {
     static OPEN = 1;
     readyState = 0;
+    sent: string[] = [];
     listeners: Record<string, Array<(evt: any) => void>> = {};
     constructor(public url: string) {
       sockets.push(this);
@@ -88,8 +117,12 @@ function loadBackground(initialTabs: FakeTab[]) {
     addEventListener(type: string, fn: (evt: any) => void) {
       (this.listeners[type] ??= []).push(fn);
     }
-    send() {}
-    close() {}
+    send(data: string) {
+      this.sent.push(data);
+    }
+    close() {
+      this.readyState = 3;
+    }
     emit(type: string, evt: any) {
       for (const fn of this.listeners[type] ?? []) fn(evt);
     }
@@ -116,6 +149,12 @@ function loadBackground(initialTabs: FakeTab[]) {
     Math,
     console,
     importScripts() {},
+    // Fixed so the derived device name is deterministic; userAgentData is left
+    // undefined to exercise the classic user-agent fallback too.
+    navigator: {
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    },
     WebSocket: FakeSocket
   };
   vm.createContext(context);
@@ -135,13 +174,41 @@ function loadBackground(initialTabs: FakeTab[]) {
   }
 
   // Drive the real onMessage handler the popup uses (e.g. to set the instrument).
-  function sendRuntimeMessage(message: unknown) {
+  function sendRuntimeMessage(message: unknown, sender: unknown = {}) {
     return new Promise((resolve) => {
-      messageListener?.(message, {}, resolve);
+      messageListener?.(message, sender, resolve);
     });
   }
 
-  return { context, created, updated, deliverServerMessage, sendRuntimeMessage };
+  // Brings the socket fully up (the "open" handler is what sends clientHello),
+  // then hands back everything the script pushed to the coordinator. Callers
+  // should disconnect afterwards so the clock/heartbeat intervals don't outlive
+  // the test.
+  async function openConnection() {
+    await context.configureConnection("http://127.0.0.1:4173/");
+    await flush();
+    const socket = sockets[sockets.length - 1];
+    socket.readyState = 1;
+    socket.emit("open", {});
+    await flush();
+    return socket;
+  }
+
+  // `let` bindings live in the script's lexical scope, not on the context
+  // object, so module-level state has to be read by evaluating in the context.
+  const evaluate = (expression: string) => vm.runInContext(expression, context);
+
+  return {
+    context,
+    created,
+    updated,
+    inPageNavs,
+    inPageNavRequestIds,
+    deliverServerMessage,
+    sendRuntimeMessage,
+    openConnection,
+    evaluate
+  };
 }
 
 describe("ensureSongsterrTabs tab reuse", () => {
@@ -173,6 +240,138 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(tabs.map((t: FakeTab) => t.id)).toEqual([1]);
   });
 
+  // A full navigation tears the document down, which on iPadOS discards the
+  // unlocked audio session with it and leaves playback silent until the member
+  // taps the screen again. Songsterr is an SPA, so the song can be swapped in
+  // place instead -- verified against the live player.
+  it("switches songs through Songsterr's own router instead of reloading the tab", async () => {
+    const { context, created, updated, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    const tabs = await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(inPageNavs).toEqual([SONG_B]);
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+    expect(tabs.map((t: FakeTab) => t.url)).toEqual([SONG_B]);
+  });
+
+  it("falls back to a full navigation when the router ignores the route change", async () => {
+    const { context, created, updated, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: false }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(inPageNavs).toEqual([SONG_B]);
+    expect(created).toHaveLength(0);
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
+  });
+
+  // The reason the answer is accepted from two directions: Orion on iPadOS --
+  // the only platform this path exists for -- does not reliably hold an async
+  // sendResponse channel open, and losing the answer means falling back to the
+  // very reload we are trying to avoid.
+  it("takes the router's answer over the status channel when the reply is dropped", async () => {
+    const { context, created, updated, sendRuntimeMessage, inPageNavRequestIds } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: "hang" }
+    );
+
+    const pending = context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+    // Let ensureSongsterrTabs reach the in-page request before answering it.
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    // A notification, so the handler answers nothing -- do not wait for a reply.
+    void sendRuntimeMessage(
+      { type: "bandcueNavigateResult", requestId: inPageNavRequestIds[0], ok: true },
+      { tab: { id: 1 } }
+    );
+    await pending;
+
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+
+  it("ignores a route result that answers some other request", async () => {
+    const { context, sendRuntimeMessage, updated } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: false }
+    );
+
+    void sendRuntimeMessage(
+      { type: "bandcueNavigateResult", requestId: 9999, ok: true },
+      { tab: { id: 1 } }
+    );
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    // A stale result must not be mistaken for this switch's answer.
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
+  });
+
+  // The exact shape of the bug this replaced: the host's openSongCommand and the
+  // count-in's eager pre-open both open the same song, and while they were keyed
+  // by tab the second overwrote the first's resolver -- so one call's timeout
+  // answered the other with a spurious refusal and reloaded a tab that was
+  // already on the right song.
+  it("does not reload when two callers open the same song at once", async () => {
+    const { context, created, updated, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    const [first, second] = await Promise.all([
+      context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true }),
+      context.ensureSongsterrTabs({ songsterrUrl: SONG_B })
+    ]);
+
+    // One switch, shared by both callers -- and no reload for either.
+    expect(inPageNavs).toEqual([SONG_B]);
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+    expect(first.map((t: FakeTab) => t.id)).toEqual([1]);
+    expect(second.map((t: FakeTab) => t.id)).toEqual([1]);
+  });
+
+  it("never asks the router when the tab is already on the song", async () => {
+    const { context, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A }, { active: true });
+
+    expect(inPageNavs).toEqual([]);
+  });
+
+  // iPadOS purges background tabs and reloads them on activation, which would
+  // undo the in-page switch we just made.
+  it("does not re-activate a tab that is already in front", async () => {
+    const { context, updated } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1, active: true }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(updated).toHaveLength(0);
+  });
+
+  it("still brings a background tab to the front after an in-page switch", async () => {
+    const { context, updated } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1, active: false }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(updated).toEqual([{ id: 1, active: true }]);
+  });
+
   it("opens a new tab only when no Songsterr tab exists", async () => {
     const { context, created, updated } = loadBackground([
       { id: 9, url: "https://example.com/", windowId: 1 }
@@ -183,6 +382,155 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(1);
     expect(created[0].url).toBe(SONG_A);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+});
+
+describe("device naming", () => {
+  it("derives a name from the instrument and platform when the member set none", async () => {
+    const { context, sendRuntimeMessage } = loadBackground([]);
+
+    expect(context.resolveDeviceName()).toBe("Songsterr (Windows)");
+
+    const state: any = await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "bass" });
+    expect(state.effectiveDeviceName).toBe("Bass Songsterr (Windows)");
+  });
+
+  it("distinguishes the instruments so band mates do not collide by default", async () => {
+    const { sendRuntimeMessage } = loadBackground([]);
+    const names: string[] = [];
+
+    for (const instrument of ["guitar", "bass", "drum"]) {
+      const state: any = await sendRuntimeMessage({ type: "popupSetInstrument", instrument });
+      names.push(state.effectiveDeviceName);
+    }
+
+    expect(names).toEqual([
+      "Guitar Songsterr (Windows)",
+      "Bass Songsterr (Windows)",
+      "Drums Songsterr (Windows)"
+    ]);
+  });
+
+  it("lets the member's own name win over the derived default", async () => {
+    const { context, sendRuntimeMessage } = loadBackground([]);
+
+    const state: any = await sendRuntimeMessage({
+      type: "popupSetDeviceName",
+      deviceName: "  Toms   Laptop  "
+    });
+
+    // Collapsed whitespace, matching the coordinator's own trimText normalization.
+    expect(state.deviceName).toBe("Toms Laptop");
+    expect(state.effectiveDeviceName).toBe("Toms Laptop");
+    expect(context.resolveDeviceName()).toBe("Toms Laptop");
+  });
+
+  it("falls back to the derived default when the name is cleared", async () => {
+    const { context, sendRuntimeMessage } = loadBackground([]);
+
+    await sendRuntimeMessage({ type: "popupSetDeviceName", deviceName: "Toms Laptop" });
+    const state: any = await sendRuntimeMessage({ type: "popupSetDeviceName", deviceName: "   " });
+
+    expect(state.deviceName).toBe("");
+    expect(context.resolveDeviceName()).toBe("Songsterr (Windows)");
+  });
+
+  it("caps a pasted name at the length the coordinator accepts", async () => {
+    const { sendRuntimeMessage } = loadBackground([]);
+
+    const state: any = await sendRuntimeMessage({
+      type: "popupSetDeviceName",
+      deviceName: "x".repeat(200)
+    });
+
+    expect(state.deviceName).toHaveLength(80);
+  });
+
+  it("announces itself under the resolved name, not a hardcoded one", async () => {
+    const { context, openConnection, sendRuntimeMessage } = loadBackground([]);
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "drum" });
+
+    const socket = await openConnection();
+    const hello = socket.sent.map((raw: string) => JSON.parse(raw)).find((m: any) => m.type === "clientHello");
+    context.disconnectByUser();
+
+    expect(hello?.deviceName).toBe("Drums Songsterr (Windows)");
+  });
+
+  it("re-announces to the room when the member renames the device", async () => {
+    const { context, openConnection, sendRuntimeMessage } = loadBackground([]);
+
+    const first = await openConnection();
+    expect(first.readyState).toBe(1);
+
+    await sendRuntimeMessage({ type: "popupSetDeviceName", deviceName: "Toms Laptop" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // A rename only reaches the room via a fresh clientHello, so the old socket
+    // must have been replaced.
+    expect(first.readyState).toBe(3);
+    context.disconnectByUser();
+  });
+
+  it("does not reconnect when the name did not actually change", async () => {
+    const { context, openConnection, sendRuntimeMessage } = loadBackground([]);
+
+    const first = await openConnection();
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "auto" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(first.readyState).toBe(1);
+    context.disconnectByUser();
+  });
+});
+
+describe("dispatch lead self-correction", () => {
+  it("leaves the lead alone when prep had time to run before the downbeat", () => {
+    const { context, evaluate } = loadBackground([]);
+    const before = evaluate("adaptiveDispatchLeadMs");
+
+    expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: 320 })).toBe("");
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(before);
+  });
+
+  it("grows the lead by the overrun plus a cushion when prep ran out of time", () => {
+    const { context, evaluate } = loadBackground([]);
+    const before = evaluate("adaptiveDispatchLeadMs");
+
+    const detail = context.adjustDispatchLeadForTiming({ preparedAheadMs: -180 });
+
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(before + 180 + 150);
+    expect(detail).toContain("count-in was extended");
+  });
+
+  it("never grows the lead past the cap", () => {
+    const { context, evaluate } = loadBackground([]);
+
+    for (let i = 0; i < 20; i += 1) {
+      context.adjustDispatchLeadForTiming({ preparedAheadMs: -900 });
+    }
+
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(evaluate("MAX_DISPATCH_LEAD_MS"));
+  });
+
+  it("reports the lead it needs so the room's count-in can cover it", () => {
+    const { context, evaluate } = loadBackground([]);
+    context.adjustDispatchLeadForTiming({ preparedAheadMs: -200 });
+
+    const status = context.normalizeAdapterStatus({ ready: true });
+
+    expect(status.requiredLeadMs).toBe(evaluate("adaptiveDispatchLeadMs"));
+  });
+
+  it("explains a background Songsterr tab instead of leaving the lateness a mystery", () => {
+    const { context } = loadBackground([]);
+
+    expect(context.describeTiming({ deviationMs: 240, hidden: true }))
+      .toContain("started 240 ms late");
+    expect(context.describeTiming({ deviationMs: 240, hidden: true }))
+      .toContain("background");
+    // A start that landed on the beat needs no commentary.
+    expect(context.describeTiming({ deviationMs: 4, hidden: false })).toBe("");
   });
 });
 
@@ -306,9 +654,22 @@ describe("songKey / instrumentFromUrl / applyInstrument helpers", () => {
     expect(context.songKey(SONG_A_TAB)).not.toBe(context.songKey(SONG_B_TAB));
   });
 
-  it("does not strip a 't<n>' that is not the track suffix", () => {
+  // Songsterr canonicalizes the slug from the song id: a request for
+  // ".../metallica-nothing-else-matters-tab-s437" lands on
+  // ".../limp-bizkit-rollin-air-raid-vehicle-tab-s437" (observed on the live
+  // site). Keying on the slug therefore called a member's own page a different
+  // song and re-routed the player at the downbeat.
+  it("identifies a song by its id, not its slug", () => {
     const { context } = loadBackground([]);
-    const url = "https://www.songsterr.com/a/wsa/test123-s100";
+    expect(context.songKey("https://www.songsterr.com/a/wsa/whatever-tab-s437"))
+      .toBe(context.songKey("https://www.songsterr.com/a/wsa/limp-bizkit-rollin-tab-s437"));
+    expect(context.songKey("https://www.songsterr.com/a/wsa/same-slug-tab-s100"))
+      .not.toBe(context.songKey("https://www.songsterr.com/a/wsa/same-slug-tab-s200"));
+  });
+
+  it("falls back to the path for a legacy URL carrying no song id", () => {
+    const { context } = loadBackground([]);
+    const url = "https://www.songsterr.com/a/wsa/test123-tab";
     expect(context.songKey(url)).toContain("test123");
   });
 
