@@ -29,9 +29,16 @@ const SONG_B_BASS = "https://www.songsterr.com/a/wsa/song-b-bass-tab-s200";
 
 type FakeTab = { id: number; url: string; windowId: number; active?: boolean };
 
-function loadBackground(initialTabs: FakeTab[]) {
+function loadBackground(
+  initialTabs: FakeTab[],
+  // Whether the content script can swap songs through Songsterr's router. The
+  // default is "no", so every case that does not opt in exercises the full-tab
+  // navigation fallback.
+  { inPageNav = false }: { inPageNav?: boolean } = {}
+) {
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
+  const inPageNavs: string[] = [];
   let nextId = 1000;
   const onUpdatedListeners = new Set<(id: number, info: any, tab: FakeTab) => void>();
 
@@ -57,7 +64,19 @@ function loadBackground(initialTabs: FakeTab[]) {
       onRemoved: { addListener() {} },
       query: async () => initialTabs.map((tab) => ({ ...tab })),
       get: async (id: number) => initialTabs.find((tab) => tab.id === id),
-      sendMessage: async () => ({ ok: true }),
+      sendMessage: async (id: number, message: { type?: string; url?: string }) => {
+        if (message?.type === "bandcueNavigateInPage") {
+          inPageNavs.push(message.url ?? "");
+          if (!inPageNav) {
+            return { ok: false, detail: "Songsterr did not pick up the route change" };
+          }
+          // A real in-page switch leaves the tab on the new URL without a load.
+          const tab = initialTabs.find((t) => t.id === id);
+          if (tab && message.url) tab.url = message.url;
+          return { ok: true };
+        }
+        return { ok: true };
+      },
       create: async ({ url, active }: { url: string; active?: boolean }) => {
         const tab: FakeTab = { id: nextId++, url, windowId: 1, active };
         created.push({ url, active });
@@ -174,6 +193,7 @@ function loadBackground(initialTabs: FakeTab[]) {
     context,
     created,
     updated,
+    inPageNavs,
     deliverServerMessage,
     sendRuntimeMessage,
     openConnection,
@@ -208,6 +228,72 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(0);
     expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
     expect(tabs.map((t: FakeTab) => t.id)).toEqual([1]);
+  });
+
+  // A full navigation tears the document down, which on iPadOS discards the
+  // unlocked audio session with it and leaves playback silent until the member
+  // taps the screen again. Songsterr is an SPA, so the song can be swapped in
+  // place instead -- verified against the live player.
+  it("switches songs through Songsterr's own router instead of reloading the tab", async () => {
+    const { context, created, updated, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    const tabs = await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(inPageNavs).toEqual([SONG_B]);
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+    expect(tabs.map((t: FakeTab) => t.url)).toEqual([SONG_B]);
+  });
+
+  it("falls back to a full navigation when the router ignores the route change", async () => {
+    const { context, created, updated, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: false }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(inPageNavs).toEqual([SONG_B]);
+    expect(created).toHaveLength(0);
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
+  });
+
+  it("never asks the router when the tab is already on the song", async () => {
+    const { context, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A }, { active: true });
+
+    expect(inPageNavs).toEqual([]);
+  });
+
+  // iPadOS purges background tabs and reloads them on activation, which would
+  // undo the in-page switch we just made.
+  it("does not re-activate a tab that is already in front", async () => {
+    const { context, updated } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1, active: true }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(updated).toHaveLength(0);
+  });
+
+  it("still brings a background tab to the front after an in-page switch", async () => {
+    const { context, updated } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1, active: false }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    expect(updated).toEqual([{ id: 1, active: true }]);
   });
 
   it("opens a new tab only when no Songsterr tab exists", async () => {

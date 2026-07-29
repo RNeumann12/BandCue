@@ -1123,6 +1123,15 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
     }
 
     if (reusable?.id) {
+      // Prefer swapping the song inside the page the member already has open.
+      // A full navigation destroys the document, and on iPadOS that discards the
+      // unlocked audio session with it, so playback stays silent until the
+      // member taps the screen again (see the arming notes in content-script.js).
+      if (await navigateSongsterrTabInPage(reusable, targetUrl)) {
+        const activated = options.active ? await activateSongsterrTab(reusable) : reusable;
+        return [{ ...activated, url: targetUrl }];
+      }
+
       const navigated = await navigateSongsterrTab(reusable, targetUrl, Boolean(options.active));
       const loaded = navigated.id ? await waitForTabReady(navigated.id, 7000) : undefined;
       return [loaded || navigated];
@@ -1146,12 +1155,33 @@ async function activateSongsterrTab(tab) {
     return tab;
   }
 
-  const updated = await chrome.tabs.update(tab.id, { active: true }).catch(() => tab);
+  // Re-activating a tab that is already in front is not free everywhere: iPadOS
+  // purges background tabs under memory pressure and reloads them when they are
+  // activated, which would undo an in-page song switch. Focusing the window is
+  // still worth doing -- "active" is per window, so the window may be behind.
+  const updated = tab.active
+    ? tab
+    : await chrome.tabs.update(tab.id, { active: true }).catch(() => tab);
   if (tab.windowId) {
     await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
   }
 
   return updated || tab;
+}
+
+// Asks the content script to swap songs via Songsterr's own router instead of
+// reloading the tab. Returns false whenever that cannot be confirmed -- no
+// content script yet, an older extension build, or a router that ignored the
+// route change -- so the caller can fall back to a real navigation.
+async function navigateSongsterrTabInPage(tab, url) {
+  if (!tab?.id) {
+    return false;
+  }
+
+  const result = await chrome.tabs
+    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url })
+    .catch(() => undefined);
+  return Boolean(result?.ok);
 }
 
 // Point an existing Songsterr tab at a new song instead of opening a new tab,

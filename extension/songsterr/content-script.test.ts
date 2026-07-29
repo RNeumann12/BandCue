@@ -147,12 +147,16 @@ function loadContentScript({
   elements = [],
   media = [],
   sourceControl = null,
-  ipad = false
+  ipad = false,
+  // "spa" mimics Songsterr's real router: a popstate retitles the document once
+  // the new song has loaded. "none" is a router that ignores the route change.
+  router = "none"
 }: {
   elements?: FakeElement[];
   media?: FakeMediaElement[];
   sourceControl?: FakeSourceControl | null;
   ipad?: boolean;
+  router?: "spa" | "none";
 } = {}) {
   const messages: unknown[] = [];
   // Counts the document-wide element scans, so a test can prove the downbeat
@@ -222,10 +226,15 @@ function loadContentScript({
   }
 
   const keyEvents: string[] = [];
+  let routedTitles = 0;
   const window = {
     innerHeight: 900,
     dispatchEvent(event: { type?: string }) {
       keyEvents.push(event?.type ?? "");
+      if (event?.type === "popstate" && router === "spa") {
+        routedTitles += 1;
+        document.title = `Routed Song ${routedTitles} Tab by Artist`;
+      }
       return true;
     }
   };
@@ -234,11 +243,32 @@ function loadContentScript({
     return true;
   };
 
+  const toLocation = (href: string) => {
+    const url = new URL(href);
+    return { href: url.toString(), origin: url.origin, pathname: url.pathname, search: url.search };
+  };
+
   const context: any = {
     chrome,
     document,
     window,
-    location: { href: "https://www.songsterr.com/a/wsa/song-a-tab-s100" },
+    location: toLocation("https://www.songsterr.com/a/wsa/song-a-tab-s100"),
+    // Only what navigateInPage touches; both entry points rewrite the address
+    // the same way, which is what lets the failure path put it back.
+    history: {
+      pushState(_state: unknown, _title: string, url: string) {
+        context.location = toLocation(new URL(url, context.location.href).toString());
+      },
+      replaceState(_state: unknown, _title: string, url: string) {
+        context.location = toLocation(new URL(url, context.location.href).toString());
+      }
+    },
+    URL,
+    PopStateEvent: class {
+      constructor(public type: string, init: Record<string, unknown> = {}) {
+        Object.assign(this, init);
+      }
+    },
     MutationObserver: FakeMutationObserver,
     getComputedStyle: () => ({ visibility: "visible", display: "block" }),
     setInterval,
@@ -494,6 +524,75 @@ describe("Songsterr transport control resolution", () => {
 // document, so switching songs -- which reloads the tab -- silently disarms an
 // iPad: the synthetic click still flips Songsterr's button to Pause while its
 // AudioContext stays suspended.
+// Songsterr is an SPA, so the next song can be routed to inside the same
+// document. That keeps iPadOS's unlocked audio session alive, which a full tab
+// reload would throw away -- see the arming suite below.
+describe("Songsterr in-page song switching", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const SONG_B = "https://www.songsterr.com/a/wsa/song-b-tab-s200";
+
+  it("routes to the next song and confirms the player actually followed", async () => {
+    const { context } = loadContentScript({ router: "spa" });
+
+    const result = await context.navigateInPage(SONG_B);
+
+    expect(result.ok).toBe(true);
+    expect(context.location.pathname).toBe("/a/wsa/song-b-tab-s200");
+  });
+
+  it("keeps the iPad's armed audio across a song switch", async () => {
+    const { context, evaluate, fireGesture } = loadContentScript({
+      ipad: true,
+      router: "spa"
+    });
+    fireGesture("pointerdown");
+    expect(evaluate("audioArmed")).toBe(true);
+
+    await context.navigateInPage(SONG_B);
+
+    // The whole point: no new document, so the unlocked session survives and the
+    // member does not have to tap again before the downbeat.
+    expect(evaluate("audioArmed")).toBe(true);
+    expect(FakeAudioContext.created).toBe(1);
+  });
+
+  it("puts the address back when the router ignores the route change", async () => {
+    vi.useFakeTimers();
+    const { context } = loadContentScript({ router: "none" });
+    const before = context.location.href;
+
+    const pending = context.navigateInPage(SONG_B);
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await pending;
+
+    // Leaving a rewritten address behind would make the background think the tab
+    // is already on the song and skip the real navigation.
+    expect(result.ok).toBe(false);
+    expect(context.location.href).toBe(before);
+  });
+
+  it("does nothing when the tab is already on that path", async () => {
+    const { context, keyEvents } = loadContentScript({ router: "spa" });
+
+    const result = await context.navigateInPage(context.location.href);
+
+    expect(result.ok).toBe(true);
+    expect(keyEvents).not.toContain("popstate");
+  });
+
+  it("refuses to route off Songsterr's own origin", async () => {
+    const { context, keyEvents } = loadContentScript({ router: "spa" });
+
+    const result = await context.navigateInPage("https://example.com/a/wsa/x-tab-s1");
+
+    expect(result.ok).toBe(false);
+    expect(keyEvents).not.toContain("popstate");
+  });
+});
+
 describe("Songsterr audio arming on iPadOS", () => {
   afterEach(() => {
     vi.useRealTimers();

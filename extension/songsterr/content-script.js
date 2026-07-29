@@ -98,6 +98,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "bandcueNavigateInPage") {
+    navigateInPage(message.url).then(sendResponse);
+    return true;
+  }
+
   return false;
 });
 
@@ -860,6 +865,94 @@ function dispatchKeyShortcut(key) {
 
 function joinControlDetails(...details) {
   return details.filter(Boolean).join("; ");
+}
+
+// --- In-page song switching -------------------------------------------------
+// Songsterr is a single-page app: pushing the next song's path and firing a
+// popstate makes its router swap songs inside the *same* document. Verified
+// against the live player -- it routes on the "-s<id>" in the path, re-renders
+// the transport control, and leaves an existing AudioContext running.
+//
+// That last part is the whole point. A real tab navigation tears the document
+// down, and on iPadOS that takes the unlocked audio session with it (see the
+// arming section below), so the member has to tap the screen again before
+// playback makes any sound. Switching in place keeps the arm -- and it is
+// quicker than a page load, so the tab is ready for the downbeat sooner.
+//
+// Songsterr could change its router at any time, so the result is *verified*
+// before being reported as success; the background falls back to a full tab
+// navigation whenever this returns not-ok.
+
+const IN_PAGE_NAV_TIMEOUT_MS = 2500;
+const IN_PAGE_NAV_POLL_MS = 50;
+
+async function navigateInPage(rawUrl) {
+  let target;
+  try {
+    target = new URL(rawUrl, location.href);
+  } catch {
+    return { ok: false, detail: "Not a usable Songsterr URL" };
+  }
+
+  if (target.origin !== location.origin) {
+    return { ok: false, detail: "In-page navigation cannot leave the current origin" };
+  }
+
+  if (target.pathname === location.pathname) {
+    return { ok: true, detail: "Already on this Songsterr page" };
+  }
+
+  const previousHref = location.href;
+  const previousTitle = document.title;
+  try {
+    history.pushState({}, "", `${target.pathname}${target.search}`);
+    window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
+  } catch {
+    return { ok: false, detail: "Songsterr refused an in-page route change" };
+  }
+
+  if (!(await waitForTitleChange(previousTitle))) {
+    // Put the address back so the caller's full navigation is not mistaken for
+    // a tab that is already on the song.
+    try {
+      history.replaceState({}, "", previousHref);
+    } catch {
+      // Nothing further we can do; the caller reloads the tab either way.
+    }
+    return { ok: false, detail: "Songsterr did not pick up the in-page route change" };
+  }
+
+  // The document survived, so everything a reload would have rebuilt has to be
+  // re-established by hand.
+  lastObservedSource = location.href;
+  lastObservedDurationMs = undefined;
+  startDurationObservation();
+  enforceSynthOnLoad();
+  scheduleStatusReport(0);
+  return { ok: true, detail: "Switched Songsterr song without reloading the page" };
+}
+
+/**
+ * Songsterr retitles the document once its router has actually loaded the new
+ * song, which is the cheapest honest proof that the route took -- the path alone
+ * only proves we rewrote the address bar.
+ */
+function waitForTitleChange(previousTitle) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + IN_PAGE_NAV_TIMEOUT_MS;
+    const poll = () => {
+      if (document.title !== previousTitle) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, IN_PAGE_NAV_POLL_MS);
+    };
+    poll();
+  });
 }
 
 // --- Audio arming (iPadOS/iOS) ---------------------------------------------
