@@ -30,6 +30,8 @@ import {
   collectWarnings,
   clampHelixOffsetMs,
   applyGlobalHelixSettings,
+  helixLeadReadiness,
+  hostCueServerTime,
   formatElapsed,
   formatMs,
   formatSignedMs,
@@ -92,6 +94,7 @@ const elements = {
   globalHelixToggleButton: $button("#globalHelixToggleButton"),
   globalHelixOffsetInput: $input("#globalHelixOffsetInput"),
   globalHelixStatus: $("#globalHelixStatus"),
+  globalHelixLead: $("#globalHelixLead"),
   globalHelixScheduleDebug: $("#globalHelixScheduleDebug"),
   autoAdvanceToggle: $input("#autoAdvanceToggle"),
   autoStartToggle: $input("#autoStartToggle"),
@@ -194,7 +197,7 @@ if (isHost) {
   renderSetlist();
 }
 
-elements.playButton?.addEventListener("click", requestPlay);
+elements.playButton?.addEventListener("click", (event) => requestPlay(event));
 elements.stopButton?.addEventListener("click", requestStop);
 elements.autoAdvanceToggle?.addEventListener("change", () => {
   setAutoRun({ advance: elements.autoAdvanceToggle.checked });
@@ -296,7 +299,14 @@ elements.timingRows?.addEventListener("change", (event) => {
 // ready it stops sending status, so room-state events alone may not fire again.
 setInterval(tickSetlistLoading, 250);
 
-function requestPlay() {
+/**
+ * @param {Event} [cueEvent] The input event that asked for this play. For a
+ * Helix-synced song its instant is the cue the whole room is scheduled against,
+ * so it is stamped in room time and sent along; the coordinator then takes the
+ * cue's travel time off the count-in instead of starting the count from when the
+ * request reached it. Plays with no external cue (setlist auto-start) pass none.
+ */
+function requestPlay(cueEvent) {
   if (transportRequestPending) {
     return;
   }
@@ -307,7 +317,21 @@ function requestPlay() {
   }
 
   transportRequestPending = true;
-  send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
+  send({
+    type: "transportRequest",
+    action: "play",
+    requestedAt: Date.now(),
+    cueAtServerTime: cueEvent ? cueServerTimeForEvent(cueEvent) : undefined
+  });
+}
+
+function cueServerTimeForEvent(event) {
+  return hostCueServerTime({
+    eventTimeStampMs: event?.timeStamp,
+    timeOriginMs: typeof performance !== "undefined" ? performance.timeOrigin : undefined,
+    localNowMs: Date.now(),
+    serverOffsetMs
+  });
 }
 
 function requestStop() {
@@ -362,7 +386,9 @@ function handleHostHotkey(event) {
   event.preventDefault();
   const handler = {
     "toggle-arm": toggleArm,
-    play: requestPlay,
+    // The Helix triggers this hotkey at its cue; pass the event through so the
+    // count-in is measured from the keystroke, not from when the request lands.
+    play: () => requestPlay(event),
     stop: requestStop,
     "next-song": selectNextSong,
     "previous-song": selectPreviousSong,
@@ -546,6 +572,7 @@ function renderState(state) {
   applySavedCalibrations(state);
   renderTimingRows(state);
   renderWarnings(warnings);
+  renderHelixLeadReadiness();
   renderHostControls(state, readyAdapters);
   driveSetlistRun(state);
   prevTransportStatus = state.transport.status;
@@ -571,6 +598,10 @@ function scheduleTimingRowsRender(state) {
     timingRenderTimer = undefined;
     if (nextState) {
       renderTimingRows(nextState);
+      // The Helix lead requirement moves with the room's live RTT/jitter, which
+      // deliberately isn't part of the stable signature; refresh it on the same
+      // throttled tick as the timing rows it is derived from.
+      renderHelixLeadReadiness();
     }
   }, TIMING_RENDER_INTERVAL_MS);
 }
@@ -1123,6 +1154,34 @@ function renderGlobalHelixSettings() {
       ? `${formatSignedMs(globalHelixSettings.offsetMs)} global shift + each song's trim`
       : "Normal BandCue count-in active"
   );
+  renderHelixLeadReadiness();
+}
+
+// Says up front whether the current song's Helix count-in covers what this room
+// needs, so a too-short count-in is caught while there is still time to add a
+// measure -- instead of only after a start has already landed late.
+function renderHelixLeadReadiness() {
+  if (!elements.globalHelixLead) {
+    return;
+  }
+
+  const song = currentSongIndex >= 0 ? effectiveHelixSong(setlist[currentSongIndex]) : undefined;
+  const readiness = helixLeadReadiness(lastState, song);
+  if (!readiness) {
+    setText(elements.globalHelixLead, "");
+    elements.globalHelixLead.classList.remove("helix-global-debug--extended");
+    return;
+  }
+
+  const shift = readiness.offsetMs ? ` ${formatSignedMs(readiness.offsetMs)} shift` : "";
+  const countIn = `${readiness.targetMeasure} x ${readiness.measureDurationMs} ms${shift} = ${readiness.countInMs} ms`;
+  setText(
+    elements.globalHelixLead,
+    readiness.ok
+      ? `Count-in ${countIn}; this room needs ${readiness.minimumDelayMs} ms — ${readiness.spareMs} ms spare.`
+      : `Count-in ${countIn} is ${-readiness.spareMs} ms short of the ${readiness.minimumDelayMs} ms this room needs right now, so starts land that late. Use ${readiness.measuresNeeded} count-in measure${readiness.measuresNeeded === 1 ? "" : "s"} at ${readiness.bpm} BPM.`
+  );
+  elements.globalHelixLead.classList.toggle("helix-global-debug--extended", !readiness.ok);
 }
 
 function renderHelixScheduleDebug(info) {
@@ -1136,11 +1195,18 @@ function renderHelixScheduleDebug(info) {
   }
 
   const extended = info.extendedMs > 0;
+  // The cue's travel time is already deducted from the count-in, so it is shown
+  // as information, not as an error: it explains why the applied delay is a bit
+  // shorter than the configured count-in.
+  const cue = info.cueLatencyMs > 0 ? `, cue reached BandCue in ${info.cueLatencyMs} ms` : "";
+  const measuresNeeded = info.measureDurationMs > 0
+    ? Math.max(1, Math.ceil((info.minimumDelayMs + info.cueLatencyMs) / info.measureDurationMs))
+    : 0;
   setText(
     elements.globalHelixScheduleDebug,
     extended
-      ? `Last start: requested ${info.requestedDelayMs} ms, held to ${info.appliedDelayMs} ms (+${info.extendedMs} ms) — this room's network/device-prep floor needed more lead time than the configured count-in gives. Consider a smaller negative Helix offset or improving Wi-Fi.`
-      : `Last start: requested ${info.requestedDelayMs} ms, applied as-is.`
+      ? `Last start: count-in ${info.countInMs} ms${cue} left ${info.requestedDelayMs} ms, held to ${info.appliedDelayMs} ms — the room started ${info.extendedMs} ms after the Helix downbeat because its devices need ${info.minimumDelayMs} ms to prepare. Give the cue ${measuresNeeded} count-in measure${measuresNeeded === 1 ? "" : "s"} (or a smaller negative offset).`
+      : `Last start: count-in ${info.countInMs} ms${cue}, started ${info.requestedDelayMs} ms later — on the Helix downbeat.`
   );
   elements.globalHelixScheduleDebug.classList.toggle("helix-global-debug--extended", extended);
 }

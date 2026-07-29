@@ -21,7 +21,21 @@ export const HELIX_OFFSET_LIMIT_MS = 60_000;
 export const MAX_SCHEDULE_DELAY_MS = 5000;
 // Fixed budget a command needs on top of network transit: the extension's
 // dispatch lead (~400 ms), Songsterr prep, and safety margin.
-const SCHEDULE_PREP_BUDGET_MS = 1000;
+export const SCHEDULE_PREP_BUDGET_MS = 1000;
+// Floor base for a Helix-scheduled start. A button-press count-in may round the
+// wait up to the comfortable default (DEFAULT_SCHEDULE_DELAY_MS) because nothing
+// external is waiting on it. A Helix cue fixes the downbeat, so every millisecond
+// the room takes beyond what the devices actually need lands the band that much
+// behind the backing track. The floor therefore starts at the fixed prep budget --
+// what any device that acts on a command needs for dispatch, IPC, and app prep,
+// including one this song's app filter leaves out of the per-device maximum -- and
+// is raised from there only by a device's own measured requirement.
+export const HELIX_MIN_FLOOR_MS = SCHEDULE_PREP_BUDGET_MS;
+// How far back a Helix cue stamp may sit before the server stops trusting it.
+// The stamp is the host page's room-time reading of the keystroke instant; a
+// value older than this means a cold clock estimate, a clock step, or a stalled
+// page, and reclaiming that much "lost" time would start the room far too early.
+export const HELIX_MAX_CUE_AGE_MS = 3000;
 
 // Whether a transport-capable adapter's app is even in play for the current
 // song. A MuseScore adapter sitting idle during a Songsterr/Helix-only song
@@ -135,8 +149,47 @@ export function helixMeasureDurationMs(bpm: number, beatsPerMeasure: number): nu
   return beatsPerMeasure * 60_000 / bpm;
 }
 
+/**
+ * The room floor a Helix start has to clear. Same per-device requirement the
+ * normal count-in uses, but without rounding up to the default count-in: see
+ * HELIX_MIN_FLOOR_MS.
+ */
+export function helixMinimumDelayMs(
+  clients: Iterable<Pick<RoomClientSummary, "capabilities" | "clock" | "status">>,
+  song?: Pick<
+    SetlistSong,
+    "sourceType" | "source" | "songsterrUrl" | "songsterrBassUrl" | "songsterrDrumUrl" | "museScoreSource"
+  >
+): number {
+  return scheduleDelayForClients(clients, HELIX_MIN_FLOOR_MS, song);
+}
+
+/**
+ * How long the Helix cue spent getting from the pedal's downbeat to this server,
+ * in milliseconds, given the host's room-time stamp of the keystroke. That time
+ * has already been spent when the room is scheduled, so it comes off the count-in
+ * instead of being silently added to it. Missing, future, or implausibly old
+ * stamps yield 0 — the old behavior of counting the full count-in from now.
+ */
+export function helixCueElapsedMs(cueAtServerTime: number | undefined, now: number): number {
+  if (typeof cueAtServerTime !== "number" || !Number.isFinite(cueAtServerTime)) {
+    return 0;
+  }
+
+  const elapsed = now - cueAtServerTime;
+  if (!(elapsed > 0)) {
+    return 0;
+  }
+
+  return Math.min(Math.round(elapsed), HELIX_MAX_CUE_AGE_MS);
+}
+
 export interface HelixScheduleInfo {
-  /** What the configured count-in and offset asked for, before any safety floor. */
+  /** The configured count-in plus offset, measured from the Helix cue itself. */
+  countInMs: number;
+  /** Time the cue had already spent in transit when the server scheduled the room. */
+  cueLatencyMs: number;
+  /** What is left of the count-in from now: countInMs - cueLatencyMs, before any floor. */
   requestedDelayMs: number;
   /** The network/device-prep floor the delay was not allowed to go below. */
   minimumDelayMs: number;
@@ -150,7 +203,7 @@ export interface HelixScheduleInfo {
 export function helixScheduleInfo(song: Pick<
   SetlistSong,
   "helixSyncEnabled" | "helixBpm" | "helixBeatsPerMeasure" | "helixTargetMeasure" | "helixOffsetMs"
->, minimumDelayMs = 0): HelixScheduleInfo | undefined {
+>, minimumDelayMs = 0, cueLatencyMs = 0): HelixScheduleInfo | undefined {
   if (!song.helixSyncEnabled) {
     return undefined;
   }
@@ -165,7 +218,14 @@ export function helixScheduleInfo(song: Pick<
   const measureDurationMs = helixMeasureDurationMs(bpm, beatsPerMeasure);
   const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
   // `targetMeasure` is the number of complete Helix measures in the count-in.
-  const requestedDelayMs = targetMeasure * measureDurationMs + offsetMs;
+  const countInMs = targetMeasure * measureDurationMs + offsetMs;
+  // The count-in is anchored to the *cue*, not to the moment its request reached
+  // this server. Whatever the keystroke spent on input handling, Wi-Fi, and the
+  // server's own queue is count-in time that has already elapsed, so waiting the
+  // full countInMs from now would start the whole room exactly that late against
+  // the Helix -- and the jitter of that path would show up as start-to-start
+  // wobble even when the devices themselves are perfectly in sync.
+  const requestedDelayMs = countInMs - cueLatencyMs;
 
   // The Helix itself is not waiting on us: it fires the cue at measure 1 beat 1
   // and keeps running its own timeline regardless of what BandCue does next, so
@@ -177,6 +237,8 @@ export function helixScheduleInfo(song: Pick<
   const appliedDelayMs = Math.max(requestedDelayMs, minimumDelayMs);
 
   return {
+    countInMs: Math.round(countInMs),
+    cueLatencyMs: Math.round(cueLatencyMs),
     requestedDelayMs: Math.round(requestedDelayMs),
     minimumDelayMs: Math.round(minimumDelayMs),
     appliedDelayMs: Math.round(appliedDelayMs),
@@ -188,8 +250,8 @@ export function helixScheduleInfo(song: Pick<
 export function helixDelayMsForSong(song: Pick<
   SetlistSong,
   "helixSyncEnabled" | "helixBpm" | "helixBeatsPerMeasure" | "helixTargetMeasure" | "helixOffsetMs"
->, minimumDelayMs = 0): number | undefined {
-  return helixScheduleInfo(song, minimumDelayMs)?.appliedDelayMs;
+>, minimumDelayMs = 0, cueLatencyMs = 0): number | undefined {
+  return helixScheduleInfo(song, minimumDelayMs, cueLatencyMs)?.appliedDelayMs;
 }
 
 export function hasReadyTransportCapability(client: RoomClientSummary): boolean {
