@@ -1,5 +1,6 @@
 import type { ControlMode, RoomClientSummary, TransportAction, TransportState } from "./protocol.js";
 import type { SetlistSong } from "./protocol.js";
+import { appliesToMuseScore, appliesToSongsterr } from "./song-sources.js";
 
 export const DEFAULT_SCHEDULE_DELAY_MS = 1500;
 
@@ -22,19 +23,49 @@ export const MAX_SCHEDULE_DELAY_MS = 5000;
 // dispatch lead (~400 ms), Songsterr prep, and safety margin.
 const SCHEDULE_PREP_BUDGET_MS = 1000;
 
+// Whether a transport-capable adapter's app is even in play for the current
+// song. A MuseScore adapter sitting idle during a Songsterr/Helix-only song
+// (or vice versa) never touches this song, so its setup lead shouldn't stretch
+// everyone else's count-in.
+function appAppliesToSong(app: string, song: Pick<
+  SetlistSong,
+  "sourceType" | "source" | "songsterrUrl" | "songsterrBassUrl" | "songsterrDrumUrl" | "museScoreSource"
+>): boolean {
+  if (app === "musescore") {
+    return appliesToMuseScore(song as SetlistSong);
+  }
+  if (app === "songsterr") {
+    return appliesToSongsterr(song as SetlistSong);
+  }
+  return true;
+}
+
 /**
  * Count-in length for a play, adapted to the room's timing quality. The default
  * covers typical rehearsal Wi-Fi; a transport-capable client with a slow or
  * jittery measured path extends the count-in so its command still arrives and
  * preps in time. Companion displays never extend it — they mirror, not play.
+ * When `song` is given, only adapters whose app actually applies to that song
+ * can extend the count-in: an adapter for an app the song doesn't use will
+ * never spawn/activate anything, so it has nothing to prep for.
  */
 export function scheduleDelayForClients(
   clients: Iterable<Pick<RoomClientSummary, "capabilities" | "clock" | "status">>,
-  defaultDelayMs = DEFAULT_SCHEDULE_DELAY_MS
+  defaultDelayMs = DEFAULT_SCHEDULE_DELAY_MS,
+  song?: Pick<
+    SetlistSong,
+    "sourceType" | "source" | "songsterrUrl" | "songsterrBassUrl" | "songsterrDrumUrl" | "museScoreSource"
+  >
 ): number {
   let required = defaultDelayMs;
   for (const client of clients) {
-    if (!client.capabilities?.some((capability) => capability.canPlay && capability.canStop)) {
+    const transportCapability = client.capabilities?.find(
+      (capability) => capability.canPlay && capability.canStop
+    );
+    if (!transportCapability) {
+      continue;
+    }
+    if (song && !appAppliesToSong(transportCapability.app, song)) {
       continue;
     }
     const clock = client.clock;

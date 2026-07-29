@@ -232,6 +232,10 @@ the downbeat. Three things keep this in check:
   does for a client's measured clock RTT/jitter (`scheduleDelayForClients` in
   `shared/transport.ts`), so the *next* Play gets a longer count-in too — a locally-grown lead time
   is otherwise capped at whatever count-in the room already scheduled and can't help on its own.
+  This only stretches the count-in for songs the MuseScore adapter actually applies to
+  (`sourceType: "musescore"` or a `museScoreSource`) — a connected-but-idle adapter's setup lead
+  never bleeds into a Songsterr-only or Helix-only song's schedule, since it has nothing to
+  spawn/activate for that song.
   Verified live end-to-end (real coordinator, real MuseScore 4, real keyboard control path): after
   one adaptive correction, 17 further Play commands landed within 0–21 ms of the scheduled downbeat,
   down from up to ~900 ms of erratic lateness beforehand.

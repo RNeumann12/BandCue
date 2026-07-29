@@ -462,7 +462,7 @@ export class RoomController {
     // slow or jittery path gets a longer lead so its command still lands and
     // preps before the downbeat.
     const requiredLeadMs = request.action === "play"
-      ? scheduleDelayForClients(this.clients.values(), this.scheduleDelayMs)
+      ? scheduleDelayForClients(this.clients.values(), this.scheduleDelayMs, this.currentSong?.song)
       : this.scheduleDelayMs;
     const delayMs = request.action === "play"
       ? this.delayForPlayRequest(requiredLeadMs, client)
