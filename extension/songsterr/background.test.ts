@@ -41,6 +41,9 @@ function loadBackground(
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
   const inPageNavs: string[] = [];
+  // Request ids the background stamped on each in-page switch, so a test can
+  // answer a specific one the way the content script does.
+  const inPageNavRequestIds: number[] = [];
   let nextId = 1000;
   const onUpdatedListeners = new Set<(id: number, info: any, tab: FakeTab) => void>();
 
@@ -66,9 +69,10 @@ function loadBackground(
       onRemoved: { addListener() {} },
       query: async () => initialTabs.map((tab) => ({ ...tab })),
       get: async (id: number) => initialTabs.find((tab) => tab.id === id),
-      sendMessage: async (id: number, message: { type?: string; url?: string }) => {
+      sendMessage: async (id: number, message: { type?: string; url?: string; requestId?: number }) => {
         if (message?.type === "bandcueNavigateInPage") {
           inPageNavs.push(message.url ?? "");
+          inPageNavRequestIds.push(message.requestId ?? -1);
           if (inPageNav === "hang") {
             return new Promise(() => {});
           }
@@ -199,6 +203,7 @@ function loadBackground(
     created,
     updated,
     inPageNavs,
+    inPageNavRequestIds,
     deliverServerMessage,
     sendRuntimeMessage,
     openConnection,
@@ -271,7 +276,7 @@ describe("ensureSongsterrTabs tab reuse", () => {
   // sendResponse channel open, and losing the answer means falling back to the
   // very reload we are trying to avoid.
   it("takes the router's answer over the status channel when the reply is dropped", async () => {
-    const { context, created, updated, sendRuntimeMessage } = loadBackground(
+    const { context, created, updated, sendRuntimeMessage, inPageNavRequestIds } = loadBackground(
       [{ id: 1, url: SONG_A, windowId: 1 }],
       { inPageNav: "hang" }
     );
@@ -282,24 +287,54 @@ describe("ensureSongsterrTabs tab reuse", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     // A notification, so the handler answers nothing -- do not wait for a reply.
-    void sendRuntimeMessage({ type: "bandcueNavigateResult", ok: true }, { tab: { id: 1 } });
+    void sendRuntimeMessage(
+      { type: "bandcueNavigateResult", requestId: inPageNavRequestIds[0], ok: true },
+      { tab: { id: 1 } }
+    );
     await pending;
 
     expect(created).toHaveLength(0);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
   });
 
-  it("ignores a route result from some other tab", async () => {
+  it("ignores a route result that answers some other request", async () => {
     const { context, sendRuntimeMessage, updated } = loadBackground(
       [{ id: 1, url: SONG_A, windowId: 1 }],
       { inPageNav: false }
     );
 
-    void sendRuntimeMessage({ type: "bandcueNavigateResult", ok: true }, { tab: { id: 99 } });
+    void sendRuntimeMessage(
+      { type: "bandcueNavigateResult", requestId: 9999, ok: true },
+      { tab: { id: 1 } }
+    );
     await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
 
-    // A stale/foreign result must not be mistaken for this tab's answer.
+    // A stale result must not be mistaken for this switch's answer.
     expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
+  });
+
+  // The exact shape of the bug this replaced: the host's openSongCommand and the
+  // count-in's eager pre-open both open the same song, and while they were keyed
+  // by tab the second overwrote the first's resolver -- so one call's timeout
+  // answered the other with a spurious refusal and reloaded a tab that was
+  // already on the right song.
+  it("does not reload when two callers open the same song at once", async () => {
+    const { context, created, updated, inPageNavs } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    const [first, second] = await Promise.all([
+      context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true }),
+      context.ensureSongsterrTabs({ songsterrUrl: SONG_B })
+    ]);
+
+    // One switch, shared by both callers -- and no reload for either.
+    expect(inPageNavs).toEqual([SONG_B]);
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+    expect(first.map((t: FakeTab) => t.id)).toEqual([1]);
+    expect(second.map((t: FakeTab) => t.id)).toEqual([1]);
   });
 
   it("never asks the router when the tab is already on the song", async () => {

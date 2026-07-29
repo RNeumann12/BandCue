@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.3.4 - 2026-07-29
+
+### Fixed
+
+- A Songsterr tab already showing the right song could still be reloaded on the downbeat, which
+  reset the song and left playback dead — on iPad it also discarded the armed audio. Two callers
+  open a song at once (the host's `openSongCommand`, and the eager pre-open at the start of the
+  count-in), and the in-page switch introduced in 1.3.2 tracked its pending answer per *tab*. The
+  second caller overwrote the first's resolver, so one call could never complete and the other was
+  answered by the first's timeout with a spurious "the router refused" — which triggered exactly
+  the full reload the switch exists to avoid.
+
+  Pending switches are now tracked per request, and concurrent opens of the same song share one
+  operation instead of racing two switches down the same tab.
+
 ## 1.3.3 - 2026-07-29
 
 ### Fixed

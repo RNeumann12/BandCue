@@ -243,7 +243,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "bandcueNavigateResult") {
-    settleInPageNav(sender.tab?.id, Boolean(message.ok));
+    settleInPageNav(message.requestId, Boolean(message.ok));
     return false;
   }
 
@@ -1105,7 +1105,35 @@ function getSongsterrTabIdentity(tab) {
   return `${tab.id}:${songKey(tab.url)}`;
 }
 
+// A song open is routinely requested twice at once: the host's openSongCommand
+// and the eager pre-open at the start of the count-in. Letting both run raced
+// two in-page switches down one tab, so concurrent callers for the same song
+// share a single operation. A later caller that wants the tab in front still
+// gets it -- activation is cheap and idempotent, unlike the switch itself.
+const inFlightSongOpens = new Map();
+
 async function ensureSongsterrTabs(currentSong, options = {}) {
+  const key = songsterrReferences(currentSong).map(songKey).filter(Boolean).join("|");
+  if (!key) {
+    return openSongsterrTabs(currentSong, options);
+  }
+
+  const inFlight = inFlightSongOpens.get(key);
+  if (inFlight) {
+    const tabs = await inFlight;
+    return options.active && tabs[0]
+      ? [await activateSongsterrTab(tabs[0]), ...tabs.slice(1)]
+      : tabs;
+  }
+
+  const opening = openSongsterrTabs(currentSong, options).finally(() => {
+    inFlightSongOpens.delete(key);
+  });
+  inFlightSongOpens.set(key, opening);
+  return opening;
+}
+
+async function openSongsterrTabs(currentSong, options = {}) {
   const references = songsterrReferences(currentSong);
   const urls = references.map(normalizeSongsterrUrl).filter(Boolean);
   if (references.length) {
@@ -1201,24 +1229,30 @@ async function activateSongsterrTab(tab) {
 // silently fail every switch back to a full reload. The runtime.sendMessage
 // channel used by the second route is the same one status reports already use
 // successfully from those devices.
+// Keyed by request, not by tab: two switches can be in flight for one tab (the
+// host's openSongCommand and the count-in's eager pre-open), and keying by tab
+// let the second overwrite the first's resolver -- stranding one call forever
+// and letting the *other* call's timeout answer it with a spurious "refused",
+// which reloaded a tab that was already on the right song.
 const pendingInPageNavs = new Map();
+let nextInPageNavId = 1;
 
 async function navigateSongsterrTabInPage(tab, url) {
   if (!tab?.id) {
     return false;
   }
 
-  const tabId = tab.id;
+  const requestId = nextInPageNavId++;
   const settled = new Promise((resolve) => {
-    pendingInPageNavs.set(tabId, resolve);
-    setTimeout(() => settleInPageNav(tabId, false), IN_PAGE_NAV_REPLY_TIMEOUT_MS);
+    pendingInPageNavs.set(requestId, resolve);
+    setTimeout(() => settleInPageNav(requestId, false), IN_PAGE_NAV_REPLY_TIMEOUT_MS);
   });
 
   chrome.tabs
-    .sendMessage(tabId, { type: "bandcueNavigateInPage", url })
+    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url, requestId })
     .then((result) => {
       if (result) {
-        settleInPageNav(tabId, Boolean(result.ok));
+        settleInPageNav(requestId, Boolean(result.ok));
       }
     })
     .catch(() => undefined);
@@ -1226,13 +1260,13 @@ async function navigateSongsterrTabInPage(tab, url) {
   return settled;
 }
 
-function settleInPageNav(tabId, ok) {
-  const resolve = pendingInPageNavs.get(tabId);
+function settleInPageNav(requestId, ok) {
+  const resolve = pendingInPageNavs.get(requestId);
   if (!resolve) {
     return;
   }
 
-  pendingInPageNavs.delete(tabId);
+  pendingInPageNavs.delete(requestId);
   resolve(ok);
 }
 
