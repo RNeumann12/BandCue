@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- MuseScore only sometimes jumped back to the start of the score before playing. The reset key
+  (Ctrl+Home) was read back out of the bridge command queue, but `queueBridgeCommand` drops the
+  command entirely when no bridge server is listening — which is every session started with
+  `Start-BandCueMuseScoreAdapter.ps1` / *BandCue MuseScore Bridge - Connect.cmd*, since that
+  launcher passes no `--bridge-port`. The reset therefore resolved to `false` and only Esc was
+  sent, so playback resumed from MuseScore's own start position: correct whenever that already was
+  bar 1, wrong as soon as playback had last been started anywhere else. The requested reset now
+  travels with the scheduled command instead of via the bridge queue.
+
 ## 1.3.5 - 2026-07-29
 
 ### Fixed
