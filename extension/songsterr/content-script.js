@@ -99,7 +99,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message.type === "bandcueNavigateInPage") {
-    navigateInPage(message.url).then(sendResponse);
+    navigateInPage(message.url).then((result) => {
+      // Reported twice on purpose: Safari-derived browsers (Orion on iPadOS --
+      // the platform this path exists for) do not reliably hold an async
+      // sendResponse channel open for as long as the router takes, and losing
+      // the answer means falling back to the reload we are trying to avoid.
+      // runtime.sendMessage is the channel status reports already use from
+      // those devices; the background takes whichever arrives first.
+      sendRuntimeMessage({ type: "bandcueNavigateResult", ok: result.ok, detail: result.detail });
+      sendResponse(result);
+    });
     return true;
   }
 

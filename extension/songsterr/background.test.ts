@@ -34,7 +34,9 @@ function loadBackground(
   // Whether the content script can swap songs through Songsterr's router. The
   // default is "no", so every case that does not opt in exercises the full-tab
   // navigation fallback.
-  { inPageNav = false }: { inPageNav?: boolean } = {}
+  // true/false: the content script replies. "hang": the reply channel is
+  // dropped, as Safari-derived browsers do for a slow async sendResponse.
+  { inPageNav = false }: { inPageNav?: boolean | "hang" } = {}
 ) {
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
@@ -67,6 +69,9 @@ function loadBackground(
       sendMessage: async (id: number, message: { type?: string; url?: string }) => {
         if (message?.type === "bandcueNavigateInPage") {
           inPageNavs.push(message.url ?? "");
+          if (inPageNav === "hang") {
+            return new Promise(() => {});
+          }
           if (!inPageNav) {
             return { ok: false, detail: "Songsterr did not pick up the route change" };
           }
@@ -165,9 +170,9 @@ function loadBackground(
   }
 
   // Drive the real onMessage handler the popup uses (e.g. to set the instrument).
-  function sendRuntimeMessage(message: unknown) {
+  function sendRuntimeMessage(message: unknown, sender: unknown = {}) {
     return new Promise((resolve) => {
-      messageListener?.(message, {}, resolve);
+      messageListener?.(message, sender, resolve);
     });
   }
 
@@ -258,6 +263,42 @@ describe("ensureSongsterrTabs tab reuse", () => {
 
     expect(inPageNavs).toEqual([SONG_B]);
     expect(created).toHaveLength(0);
+    expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
+  });
+
+  // The reason the answer is accepted from two directions: Orion on iPadOS --
+  // the only platform this path exists for -- does not reliably hold an async
+  // sendResponse channel open, and losing the answer means falling back to the
+  // very reload we are trying to avoid.
+  it("takes the router's answer over the status channel when the reply is dropped", async () => {
+    const { context, created, updated, sendRuntimeMessage } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: "hang" }
+    );
+
+    const pending = context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+    // Let ensureSongsterrTabs reach the in-page request before answering it.
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    // A notification, so the handler answers nothing -- do not wait for a reply.
+    void sendRuntimeMessage({ type: "bandcueNavigateResult", ok: true }, { tab: { id: 1 } });
+    await pending;
+
+    expect(created).toHaveLength(0);
+    expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+
+  it("ignores a route result from some other tab", async () => {
+    const { context, sendRuntimeMessage, updated } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: false }
+    );
+
+    void sendRuntimeMessage({ type: "bandcueNavigateResult", ok: true }, { tab: { id: 99 } });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+
+    // A stale/foreign result must not be mistaken for this tab's answer.
     expect(updated.some((u) => u.id === 1 && u.url === SONG_B)).toBe(true);
   });
 

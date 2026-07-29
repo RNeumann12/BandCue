@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 1.3.3 - 2026-07-29
+
+### Fixed
+
+- The in-page song switch added in 1.3.2 no longer silently falls back to reloading the tab on
+  iPad. The content script's answer was only carried on the `sendMessage` reply channel, and
+  Safari-derived browsers — Orion on iPadOS, the one platform the whole path exists for — do not
+  reliably hold that channel open for the second or so Songsterr's router takes. A lost answer
+  looks exactly like a refusal, so every switch fell back to the full reload it was meant to
+  avoid. The answer is now also sent over the `runtime.sendMessage` channel that status reports
+  already use successfully from those devices, and whichever arrives first wins.
+
+### Changed
+
+- The host now says *how* a song was reached: `switched in place, no reload`, `reloaded the tab —
+  the in-page switch was not confirmed`, `tab was already on the song`, or `opened a new tab`.
+  A member who sees their tab reload can tell whether the in-page switch was tried and refused or
+  never attempted, instead of the host reporting only that the song opened.
+
+**Note on 1.3.2:** its published extension zip was replaced in place about 35 minutes after
+release, and the two builds share a filename and version. If Songsterr still reloads on every song
+change, an install taken from the earlier zip is the likely cause — this release carries a distinct
+version number so the installed build can be identified.
+
 ## 1.3.2 - 2026-07-29
 
 ### Changed

@@ -43,6 +43,10 @@ let tabStatusInFlight = false;
 let tabStatusPending = false;
 let lastDeliveredStatusSignature = "";
 let lastSongsterrTabIdentity = "";
+// How the last open/advance actually reached the song, reported to the host so
+// a member who sees their tab reload can tell whether the in-page switch was
+// tried and refused, or never attempted at all.
+let lastSongOpenMethod = "";
 let lastContentScriptStatusAt = 0;
 // When true, this machine never auto-opens a Songsterr tab. Use it on a host
 // that plays from MuseScore so transport/open commands don't pop Songsterr.
@@ -147,6 +151,10 @@ const MAX_DISPATCH_LEAD_MS = 2500;
 // Self-adjusting copy of DISPATCH_LEAD_MS, reported to the room as
 // requiredLeadMs so the coordinator's count-in itself grows to cover it.
 let adaptiveDispatchLeadMs = DISPATCH_LEAD_MS;
+// How long to wait for the content script to confirm an in-page song switch.
+// Comfortably over the content script's own 2.5 s router timeout, so a slow
+// device still gets its real answer rather than being forced onto a reload.
+const IN_PAGE_NAV_REPLY_TIMEOUT_MS = 3500;
 const TAB_STATUS_DEBOUNCE_MS = 750;
 const CONTENT_SCRIPT_STATUS_TTL_MS = 15_000;
 const DEFAULT_ROOM_PORT = 4173;
@@ -232,6 +240,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     send({ type: "transportRequest", action: message.action, requestedAt: Date.now() });
     sendResponse({ ok: true });
     return true;
+  }
+
+  if (message.type === "bandcueNavigateResult") {
+    settleInPageNav(sender.tab?.id, Boolean(message.ok));
+    return false;
   }
 
   if (message.type === "songsterrStatus") {
@@ -904,9 +917,12 @@ async function openSongsterrFromRoom(currentSong, sequenceId) {
     sequenceId,
     status: "succeeded",
     ready: true,
-    detail: currentSong?.title
-      ? `Opened Songsterr tab for ${currentSong.title}`
-      : "Opened current Songsterr tab",
+    detail: [
+      currentSong?.title
+        ? `Opened Songsterr tab for ${currentSong.title}`
+        : "Opened current Songsterr tab",
+      lastSongOpenMethod
+    ].filter(Boolean).join("; "),
     controlPath: "browser-tab",
     at: Date.now()
   });
@@ -1099,6 +1115,7 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
 
     const existing = await findSongsterrTabsForUrls(urls);
     if (existing.length) {
+      lastSongOpenMethod = "tab was already on the song";
       return options.active ? [await activateSongsterrTab(existing[0]), ...existing.slice(1)] : existing;
     }
 
@@ -1128,15 +1145,18 @@ async function ensureSongsterrTabs(currentSong, options = {}) {
       // unlocked audio session with it, so playback stays silent until the
       // member taps the screen again (see the arming notes in content-script.js).
       if (await navigateSongsterrTabInPage(reusable, targetUrl)) {
+        lastSongOpenMethod = "switched in place, no reload";
         const activated = options.active ? await activateSongsterrTab(reusable) : reusable;
         return [{ ...activated, url: targetUrl }];
       }
 
+      lastSongOpenMethod = "reloaded the tab -- the in-page switch was not confirmed";
       const navigated = await navigateSongsterrTab(reusable, targetUrl, Boolean(options.active));
       const loaded = navigated.id ? await waitForTabReady(navigated.id, 7000) : undefined;
       return [loaded || navigated];
     }
 
+    lastSongOpenMethod = "opened a new tab -- no Songsterr tab was open to reuse";
     const tab = await chrome.tabs.create({ url: targetUrl, active: Boolean(options.active) });
     const loaded = tab.id ? await waitForTabReady(tab.id, 7000) : undefined;
     return loaded ? [loaded] : tab.id ? [tab] : [];
@@ -1173,15 +1193,47 @@ async function activateSongsterrTab(tab) {
 // reloading the tab. Returns false whenever that cannot be confirmed -- no
 // content script yet, an older extension build, or a router that ignored the
 // route change -- so the caller can fall back to a real navigation.
+//
+// The answer is accepted from *either* the sendMessage reply or an unsolicited
+// bandcueNavigateResult, whichever lands first. Safari-derived browsers (Orion
+// on iPadOS, the one platform this whole path exists for) do not reliably hold
+// an async sendResponse channel open for the ~1 s the router takes, which would
+// silently fail every switch back to a full reload. The runtime.sendMessage
+// channel used by the second route is the same one status reports already use
+// successfully from those devices.
+const pendingInPageNavs = new Map();
+
 async function navigateSongsterrTabInPage(tab, url) {
   if (!tab?.id) {
     return false;
   }
 
-  const result = await chrome.tabs
-    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url })
+  const tabId = tab.id;
+  const settled = new Promise((resolve) => {
+    pendingInPageNavs.set(tabId, resolve);
+    setTimeout(() => settleInPageNav(tabId, false), IN_PAGE_NAV_REPLY_TIMEOUT_MS);
+  });
+
+  chrome.tabs
+    .sendMessage(tabId, { type: "bandcueNavigateInPage", url })
+    .then((result) => {
+      if (result) {
+        settleInPageNav(tabId, Boolean(result.ok));
+      }
+    })
     .catch(() => undefined);
-  return Boolean(result?.ok);
+
+  return settled;
+}
+
+function settleInPageNav(tabId, ok) {
+  const resolve = pendingInPageNavs.get(tabId);
+  if (!resolve) {
+    return;
+  }
+
+  pendingInPageNavs.delete(tabId);
+  resolve(ok);
 }
 
 // Point an existing Songsterr tab at a new song instead of opening a new tab,
