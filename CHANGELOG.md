@@ -2,15 +2,15 @@
 
 ## Unreleased
 
-## 1.3.3 - 2026-07-29
+## 1.3.2 - 2026-07-29
 
 ### Changed
 
 - Switching songs no longer reloads the Songsterr tab. Songsterr is a single-page app, so the
   extension now asks its router for the next song inside the same document instead of navigating
-  the tab. This is what finally fixes iPad playback: 1.3.2 could arm the audio, but every song
-  change tore the document down and threw the unlocked session away again, so the member had to
-  tap the screen before each song. The arm now survives a song change.
+  the tab. This is the other half of the iPad fix below: arming the audio is worth little on its
+  own, because every song change would tear the document down and throw the unlocked session away
+  again, leaving the member to tap the screen before each song. The arm now survives a song change.
 
   The result is verified before it is trusted — the switch counts as successful only once the
   player has actually loaded the new song — and anything else falls back to the full tab
@@ -23,10 +23,6 @@
 - A Songsterr tab that is already in front is no longer re-activated when a song is selected.
   iPadOS purges background tabs under memory pressure and reloads them when they are activated,
   which could undo the in-page switch above.
-
-## 1.3.2 - 2026-07-29
-
-### Fixed
 
 - Songsterr on iPad/iPhone (Orion) no longer goes silent after switching songs. WebKit only lets
   Web Audio start from inside a *trusted* user gesture and re-imposes that rule on every new
