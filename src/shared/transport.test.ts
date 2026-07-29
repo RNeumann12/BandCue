@@ -172,6 +172,31 @@ describe("scheduleDelayForClients", () => {
 
     expect(scheduleDelayForClients(clients)).toBe(MAX_SCHEDULE_DELAY_MS);
   });
+
+  it("ignores a MuseScore adapter's required lead time when the song doesn't use MuseScore", () => {
+    const clients = [
+      client({
+        capabilities: [{ app: "musescore", canPlay: true, canStop: true }],
+        status: { app: "musescore", ready: true, requiredLeadMs: 4000 }
+      })
+    ];
+    const helixOnlySong = { sourceType: "other" as const, helixSyncEnabled: true };
+
+    expect(scheduleDelayForClients(clients, DEFAULT_SCHEDULE_DELAY_MS, helixOnlySong))
+      .toBe(DEFAULT_SCHEDULE_DELAY_MS);
+  });
+
+  it("still honors a MuseScore adapter's required lead time when the song does use MuseScore", () => {
+    const clients = [
+      client({
+        capabilities: [{ app: "musescore", canPlay: true, canStop: true }],
+        status: { app: "musescore", ready: true, requiredLeadMs: 1900 }
+      })
+    ];
+    const museScoreSong = { sourceType: "musescore" as const };
+
+    expect(scheduleDelayForClients(clients, DEFAULT_SCHEDULE_DELAY_MS, museScoreSong)).toBe(2900);
+  });
 });
 
 describe("Helix sync timing", () => {
