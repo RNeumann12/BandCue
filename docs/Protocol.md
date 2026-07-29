@@ -145,7 +145,13 @@ Asks to play or stop. Runs through `decideTransportRequest`; on rejection the re
 an `error`, on acceptance everyone receives a `transportCommand` + new `roomState`.
 
 ```jsonc
-{ "type": "transportRequest", "action": "play", "requestedAt": 1718900000000 }
+{
+  "type": "transportRequest",
+  "action": "play",
+  "requestedAt": 1718900000000,
+  "cueAtServerTime": 1718899999955  // optional; room time of the external cue,
+                                    // see Helix sync under SetlistSong
+}
 ```
 
 ---
@@ -254,20 +260,40 @@ dedicated field (`songsterrUrl` / `museScoreSource`) wins, else `source` is used
 primary `sourceType` matches that app. For Songsterr adapters, `songsterrBassUrl` and
 `songsterrDrumUrl` override the main Songsterr URL for members who selected those instruments.
 When `helixSyncEnabled` is true, the server schedules Play from the Helix fields instead of the
-normal adaptive count-in. The Helix cue fires once and keeps its own timeline regardless of
-BandCue, so if the offset leaves too little lead time for the room, the server does *not* roll the
-start forward to the next complete measure -- that would start BandCue a full measure behind a
-Helix count-in that can't be extended. Instead it holds the delay to exactly the room's
-network/device-prep floor. Right after such a Play request, the server broadcasts a
-`helixScheduleUpdate` message so host UIs can show whether that happened and by how much:
+normal adaptive count-in.
+
+The count-in is measured from the **cue**, not from when its request reached the coordinator. A
+`transportRequest` may carry `cueAtServerTime` -- the requester's room-time stamp of the keystroke
+the Helix sent (host page: the keydown's `event.timeStamp` converted with the measured clock
+offset). The server subtracts the time the cue spent in input handling, Wi-Fi, and its own queue
+from the count-in, so the downbeat lands one count-in after the *Helix's* beat instead of a
+transit time later -- and the jitter of that path stops showing up as room-vs-Helix wobble. Stamps
+that are missing, in the future, or older than 3 s are ignored (the count-in is then timed from
+now, as before). Plays without an external cue -- the Play button, setlist auto-start -- omit the
+field.
+
+The floor a Helix start has to clear is only what the connected devices actually need
+(`max(rtt/2 + 4*jitter, requiredLeadMs) + 1 s` prep budget), **not** the room's default count-in:
+that default is a comfort setting for button presses, and rounding a Helix start up to it would
+push the band off the backing track's downbeat for no device's benefit.
+
+The Helix cue fires once and keeps its own timeline regardless of BandCue, so if the count-in is
+still shorter than that floor, the server does *not* roll the start forward to the next complete
+measure -- that would start BandCue a full measure behind a Helix count-in that can't be extended.
+Instead it holds the delay to exactly the floor. Right after such a Play request, the server
+broadcasts a `helixScheduleUpdate` message so host UIs can show whether that happened and by how
+much:
 
 ```jsonc
 {
   "type": "helixScheduleUpdate",
-  "requestedDelayMs": 1200,   // count-in + offset, before any floor
-  "minimumDelayMs": 1500,     // network/device-prep floor for this room right now
-  "appliedDelayMs": 1500,     // delay actually scheduled: max(requestedDelayMs, minimumDelayMs)
-  "extendedMs": 300           // appliedDelayMs - requestedDelayMs; 0 when honored as-is
+  "countInMs": 1200,          // count-in + offset, measured from the Helix cue
+  "cueLatencyMs": 45,         // cue -> coordinator travel time, already deducted below
+  "requestedDelayMs": 1155,   // countInMs - cueLatencyMs, before any floor
+  "minimumDelayMs": 1400,     // device-prep floor for this room right now
+  "appliedDelayMs": 1400,     // delay actually scheduled: max(requestedDelayMs, minimumDelayMs)
+  "extendedMs": 245,          // appliedDelayMs - requestedDelayMs; 0 when honored as-is
+  "measureDurationMs": 1200   // one Helix measure at this song's BPM and meter
 }
 ```
 

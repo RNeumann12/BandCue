@@ -140,6 +140,16 @@ export interface TransportRequest {
   type: "transportRequest";
   action: TransportAction;
   requestedAt: number;
+  /**
+   * When the external cue that asked for this play actually happened, in server
+   * time (the requester's local event time plus its measured clock offset). Only
+   * meaningful for a play triggered by something with its own timeline -- today
+   * the Helix's Play keystroke on the host page. The coordinator subtracts the
+   * time the cue spent in transit from the Helix count-in so the room lands on
+   * the Helix downbeat rather than a transit time later. Omit it when the play
+   * has no external anchor (button press, setlist auto-start).
+   */
+  cueAtServerTime?: number;
 }
 
 export interface OpenSongRequest {
@@ -300,10 +310,15 @@ export interface ErrorMessage {
  */
 export interface HelixScheduleUpdate {
   type: "helixScheduleUpdate";
+  /** Configured count-in plus offset, measured from the Helix cue itself. */
+  countInMs: number;
+  /** How long the cue took to reach the coordinator; already deducted below. */
+  cueLatencyMs: number;
   requestedDelayMs: number;
   minimumDelayMs: number;
   appliedDelayMs: number;
   extendedMs: number;
+  measureDurationMs: number;
 }
 
 export type ClientMessage =

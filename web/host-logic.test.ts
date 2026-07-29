@@ -21,6 +21,11 @@ import {
   getSongsterrUrl,
   getTimingQuality,
   helixDelayMsForSong,
+  helixLeadReadiness,
+  helixMinimumDelayMs,
+  hostCueServerTime,
+  HELIX_MIN_FLOOR_MS,
+  HOTKEY_CUE_MAX_AGE_MS,
   hostHotkeyActionForEvent,
   isOpenableSong,
   median,
@@ -413,6 +418,131 @@ describe("Helix sync timing", () => {
       helixSyncEnabled: true,
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2
+    })).toBeUndefined();
+  });
+});
+
+describe("Helix lead requirement", () => {
+  const helixSong = (overrides: Record<string, unknown> = {}) => ({
+    id: "song-1",
+    title: "Helix Song",
+    sourceType: "songsterr",
+    source: "https://songsterr.test/song",
+    helixSyncEnabled: true,
+    helixBpm: 120,
+    helixBeatsPerMeasure: 4,
+    helixTargetMeasure: 1,
+    helixOffsetMs: 0,
+    ...overrides
+  });
+
+  const roomWith = (status: Record<string, unknown>, clock = { rttMs: 20, jitterMs: 4 }) => ({
+    clients: [{
+      id: "a1",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }],
+      status,
+      clock
+    }]
+  });
+
+  it("mirrors the coordinator's floor: device need, not the default count-in", () => {
+    expect(helixMinimumDelayMs({ clients: [] })).toBe(HELIX_MIN_FLOOR_MS);
+    expect(helixMinimumDelayMs(roomWith({ ready: true, requiredLeadMs: 400 }))).toBe(1400);
+    expect(helixMinimumDelayMs(roomWith({ ready: true, requiredLeadMs: 2500 }))).toBe(3500);
+  });
+
+  it("ignores an adapter the song never uses", () => {
+    const museScoreRoom = {
+      clients: [{
+        id: "a1",
+        role: "desktop-adapter",
+        capabilities: [{ app: "musescore", canPlay: true, canStop: true }],
+        status: { ready: true, requiredLeadMs: 4000 },
+        clock: { rttMs: 20, jitterMs: 4 }
+      }]
+    };
+    // Skipped entirely -- an idle MuseScore adapter has nothing to prep for a
+    // Songsterr song, so neither its lead nor its link quality bounds the start.
+    expect(helixMinimumDelayMs(museScoreRoom, helixSong())).toBe(HELIX_MIN_FLOOR_MS);
+  });
+
+  it("reports spare lead time when the count-in clears the room's floor", () => {
+    // One 4/4 measure at 120 BPM is 2000 ms; the room needs 1400 ms.
+    expect(helixLeadReadiness(roomWith({ ready: true, requiredLeadMs: 400 }), helixSong()))
+      .toMatchObject({
+        countInMs: 2000,
+        minimumDelayMs: 1400,
+        spareMs: 600,
+        measuresNeeded: 1,
+        ok: true
+      });
+  });
+
+  it("says how many count-in measures a too-short count-in needs", () => {
+    // The room needs 3500 ms, so one 2000 ms measure is 1500 ms short and two
+    // measures are the smallest count-in that lands on the Helix downbeat.
+    expect(helixLeadReadiness(roomWith({ ready: true, requiredLeadMs: 2500 }), helixSong()))
+      .toMatchObject({
+        countInMs: 2000,
+        minimumDelayMs: 3500,
+        spareMs: -1500,
+        measuresNeeded: 2,
+        ok: false
+      });
+  });
+
+  it("counts a negative song trim against the available count-in", () => {
+    expect(helixLeadReadiness(
+      roomWith({ ready: true, requiredLeadMs: 400 }),
+      helixSong({ helixTargetMeasure: 2, helixOffsetMs: -2500 })
+    )).toMatchObject({
+      countInMs: 1500,
+      minimumDelayMs: 1400,
+      measuresNeeded: 2,
+      ok: true
+    });
+  });
+
+  it("returns undefined without Helix sync or without the numbers to judge", () => {
+    expect(helixLeadReadiness(roomWith({ ready: true }), undefined)).toBeUndefined();
+    expect(helixLeadReadiness(roomWith({ ready: true }), helixSong({ helixSyncEnabled: false })))
+      .toBeUndefined();
+    expect(helixLeadReadiness(roomWith({ ready: true }), helixSong({ helixBpm: undefined })))
+      .toBeUndefined();
+  });
+});
+
+describe("hostCueServerTime", () => {
+  it("stamps the keystroke instant in room time", () => {
+    expect(hostCueServerTime({
+      eventTimeStampMs: 5_000,
+      timeOriginMs: 1_000_000,
+      localNowMs: 1_005_030,
+      serverOffsetMs: 250
+    })).toBe(1_005_250);
+  });
+
+  it("falls back to now for a stamp that is synthetic, future, or too old", () => {
+    const base = {
+      timeOriginMs: 1_000_000,
+      localNowMs: 1_005_030,
+      serverOffsetMs: 250
+    };
+    expect(hostCueServerTime({ ...base, eventTimeStampMs: undefined })).toBe(1_005_280);
+    expect(hostCueServerTime({ ...base, eventTimeStampMs: 6_000 })).toBe(1_005_280);
+    expect(hostCueServerTime({
+      ...base,
+      eventTimeStampMs: 5_030 - HOTKEY_CUE_MAX_AGE_MS - 1
+    })).toBe(1_005_280);
+  });
+
+  it("sends no stamp at all until the clock offset is trustworthy", () => {
+    expect(hostCueServerTime({
+      eventTimeStampMs: 5_000,
+      timeOriginMs: 1_000_000,
+      localNowMs: 1_005_030,
+      serverOffsetMs: undefined
     })).toBeUndefined();
   });
 });

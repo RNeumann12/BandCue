@@ -132,7 +132,8 @@ export function sanitizeClientMessage(value: unknown): ClientMessage | undefined
         ? {
             type: "transportRequest",
             action: value.action as TransportAction,
-            requestedAt: isFiniteNumber(value.requestedAt) ? value.requestedAt : 0
+            requestedAt: isFiniteNumber(value.requestedAt) ? value.requestedAt : 0,
+            cueAtServerTime: isFiniteNumber(value.cueAtServerTime) ? value.cueAtServerTime : undefined
           }
         : undefined;
     default:

@@ -32,6 +32,8 @@ import {
   clampHelixOffsetMs,
   decideTransportRequest,
   hasReadyTransportCapability,
+  helixCueElapsedMs,
+  helixMinimumDelayMs,
   helixScheduleInfo,
   sanitizeHelixBeatsPerMeasure,
   sanitizeHelixBpm,
@@ -458,14 +460,8 @@ export class RoomController {
     request: TransportRequest,
     now: number
   ): void {
-    // A play's count-in adapts to the room: a transport-capable client on a
-    // slow or jittery path gets a longer lead so its command still lands and
-    // preps before the downbeat.
-    const requiredLeadMs = request.action === "play"
-      ? scheduleDelayForClients(this.clients.values(), this.scheduleDelayMs, this.currentSong?.song)
-      : this.scheduleDelayMs;
     const delayMs = request.action === "play"
-      ? this.delayForPlayRequest(requiredLeadMs, client)
+      ? this.delayForPlayRequest(client, request, now)
       : this.scheduleDelayMs;
     if (delayMs === undefined) {
       return;
@@ -526,14 +522,29 @@ export class RoomController {
     }
   }
 
-  private delayForPlayRequest(requiredLeadMs: number, client: RoomClientSummary): number | undefined {
+  private delayForPlayRequest(
+    client: RoomClientSummary,
+    request: TransportRequest,
+    now: number
+  ): number | undefined {
     this.lastHelixScheduleInfo = undefined;
     const song = this.currentSong?.song;
     if (!song?.helixSyncEnabled) {
-      return requiredLeadMs;
+      // A play's count-in adapts to the room: a transport-capable client on a
+      // slow or jittery path gets a longer lead so its command still lands and
+      // preps before the downbeat.
+      return scheduleDelayForClients(this.clients.values(), this.scheduleDelayMs, song);
     }
 
-    const info = helixScheduleInfo(song, requiredLeadMs);
+    // A Helix start may not round its wait up to the comfortable default
+    // count-in the way a button press does -- the Helix's downbeat is already
+    // fixed, so the floor is only what the connected devices actually need.
+    const requiredLeadMs = helixMinimumDelayMs(this.clients.values(), song);
+    const info = helixScheduleInfo(
+      song,
+      requiredLeadMs,
+      helixCueElapsedMs(request.cueAtServerTime, now)
+    );
     if (info === undefined) {
       this.send(client, {
         type: "error",

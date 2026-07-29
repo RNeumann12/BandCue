@@ -150,6 +150,118 @@ export function helixDelayMsForSong(song, minimumDelayMs = 0) {
   return Math.round(Math.max(delayMs, minimumDelayMs));
 }
 
+// Mirrors of the coordinator's scheduling floor (src/shared/transport.ts). Kept
+// here so the host can tell the player *before* a start whether the configured
+// count-in clears what this room needs, instead of only reporting it afterwards.
+export const SCHEDULE_PREP_BUDGET_MS = 1000;
+export const MAX_SCHEDULE_DELAY_MS = 5000;
+export const HELIX_MIN_FLOOR_MS = SCHEDULE_PREP_BUDGET_MS;
+
+function helixAppAppliesToSong(app, song) {
+  if (app === "musescore") return appliesToMuseScore(song);
+  if (app === "songsterr") return appliesToSongsterr(song);
+  return true;
+}
+
+/**
+ * The lead time this room needs right now for a Helix start: the largest
+ * per-device requirement among the transport-capable clients that this song
+ * actually uses. Mirror of helixMinimumDelayMs in src/shared/transport.ts.
+ */
+export function helixMinimumDelayMs(state, song) {
+  let required = HELIX_MIN_FLOOR_MS;
+  for (const client of state?.clients ?? []) {
+    const transportCapability = (client.capabilities ?? []).find(
+      (capability) => capability.canPlay && capability.canStop
+    );
+    if (!transportCapability) {
+      continue;
+    }
+    if (song && !helixAppAppliesToSong(transportCapability.app, song)) {
+      continue;
+    }
+    const clock = client.clock;
+    if (clock) {
+      required = Math.max(
+        required,
+        (clock.rttMs ?? 0) / 2 + (clock.jitterMs ?? 0) * 4 + SCHEDULE_PREP_BUDGET_MS
+      );
+    }
+    const requiredLeadMs = client.status?.requiredLeadMs;
+    if (Number.isFinite(requiredLeadMs)) {
+      required = Math.max(required, requiredLeadMs + SCHEDULE_PREP_BUDGET_MS);
+    }
+  }
+  return Math.round(Math.min(required, MAX_SCHEDULE_DELAY_MS));
+}
+
+/**
+ * Whether the current song's Helix count-in is long enough for this room, and
+ * if not, how many count-in measures it would take. `undefined` when the song
+ * isn't Helix-synced or is missing the numbers to say anything.
+ */
+export function helixLeadReadiness(state, song) {
+  if (!song?.helixSyncEnabled) {
+    return undefined;
+  }
+
+  const bpm = sanitizeHelixBpm(song.helixBpm);
+  const beatsPerMeasure = sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure);
+  const targetMeasure = sanitizeHelixTargetMeasure(song.helixTargetMeasure);
+  if (!bpm || !beatsPerMeasure || !targetMeasure) {
+    return undefined;
+  }
+
+  const measureDurationMs = helixMeasureDurationMs(bpm, beatsPerMeasure);
+  const offsetMs = clampHelixOffsetMs(song.helixOffsetMs);
+  const countInMs = targetMeasure * measureDurationMs + offsetMs;
+  const minimumDelayMs = helixMinimumDelayMs(state, song);
+  // How many complete count-in measures would clear the floor with this offset.
+  const measuresNeeded = Math.max(
+    1,
+    Math.ceil((minimumDelayMs - offsetMs) / measureDurationMs)
+  );
+
+  return {
+    bpm,
+    beatsPerMeasure,
+    targetMeasure,
+    offsetMs,
+    measureDurationMs: Math.round(measureDurationMs),
+    countInMs: Math.round(countInMs),
+    minimumDelayMs,
+    spareMs: Math.round(countInMs - minimumDelayMs),
+    measuresNeeded,
+    ok: countInMs >= minimumDelayMs
+  };
+}
+
+// The Helix cue reaches BandCue as a Play keystroke on this page. `timeStamp` is
+// written when the browser created the event -- before any of our JS ran -- so it
+// is a closer reading of the pedal's downbeat than Date.now() inside the handler,
+// and it survives the page being busy when the key arrives. Converted to room
+// time it lets the coordinator take the cue's travel time off the count-in.
+export const HOTKEY_CUE_MAX_AGE_MS = 1500;
+
+export function hostCueServerTime({ eventTimeStampMs, timeOriginMs, localNowMs, serverOffsetMs }) {
+  if (!Number.isFinite(serverOffsetMs)) {
+    // No trusted clock offset yet: a "room time" stamp would be a guess, and a
+    // wrong one moves the downbeat. Let the coordinator time the cue instead.
+    return undefined;
+  }
+
+  const eventLocalMs = Number.isFinite(timeOriginMs) && Number.isFinite(eventTimeStampMs)
+    ? timeOriginMs + eventTimeStampMs
+    : NaN;
+  // Only trust a stamp that sits just before now: a synthetic event, or one from
+  // a different time origin, would otherwise claim the cue was long past.
+  const usable = Number.isFinite(eventLocalMs)
+    && eventLocalMs <= localNowMs
+    && localNowMs - eventLocalMs <= HOTKEY_CUE_MAX_AGE_MS;
+
+  return Math.round((usable ? eventLocalMs : localNowMs) + serverOffsetMs);
+}
+
 export function applyGlobalHelixSettings(song, settings) {
   const normalized = normalizeSong(song);
   if (!normalized) {

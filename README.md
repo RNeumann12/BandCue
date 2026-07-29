@@ -264,15 +264,30 @@ positive starts later; the combined Helix range is ±60 seconds. This is separat
 **Timing** panel's per-device manual offset, which still fixes one specific adapter that
 consistently fires early or late.
 
+The count-in is measured **from the Helix's cue**, not from when the keystroke finished reaching
+the coordinator. The host page stamps the keystroke the moment the browser creates it, converts it
+to room time with its measured clock offset, and the coordinator deducts that travel time from the
+count-in — so the band lands on the Helix downbeat instead of a Wi-Fi hop later, and the wobble of
+that path no longer shows up as room-vs-Helix drift.
+
+**How much count-in BandCue needs.** Only what the connected devices need to prepare, which the
+Helix panel shows live for the current song ("Count-in 1 x 2000 ms = 2000 ms; this room needs
+1400 ms — 600 ms spare"). As a rule of thumb: about **1.4 s** with the Songsterr extension or the
+Android app, and about **2 s** with the Windows MuseScore adapter (up to ~5 s if that adapter has
+had to grow its own lead). At 120 BPM in 4/4 a single count-in measure is 2000 ms, so one extra
+measure covers a Songsterr/Android room with room to spare; add a second measure for a
+MuseScore-driven song or anything above ~170 BPM. If the panel says the count-in is short, it also
+says how many measures would cover it.
+
 The Helix sends its cue once, at measure 1 beat 1, and keeps running its own timeline regardless
-of what BandCue does next — it is not waiting for BandCue to catch up. So if a negative offset
-leaves too little Wi-Fi/device preparation time, BandCue holds the start to exactly the lead time
-the room needs, never a whole extra measure: rolling forward to the next measure would start
-BandCue a full measure behind a Helix count-in that can't be made any longer (e.g. when the
-count-in has to stay a single measure). After a Helix-triggered Play, the host panel's status line
-reports whether the request was honored as-is or held back to meet device prep time, and by how
-much — if it's regularly held back, use a smaller negative offset or improve the room's Wi-Fi
-rather than expecting BandCue to add count-in time on its own.
+of what BandCue does next — it is not waiting for BandCue to catch up. So if the count-in (or a
+negative offset) leaves too little Wi-Fi/device preparation time, BandCue holds the start to
+exactly the lead time the room needs, never a whole extra measure: rolling forward to the next
+measure would start BandCue a full measure behind a Helix count-in that can't be made any longer.
+After a Helix-triggered Play, the host panel's status line reports whether the start landed on the
+downbeat or was held back, and by how much — if it's regularly held back, add a count-in measure,
+use a smaller negative offset, or improve the room's Wi-Fi rather than expecting BandCue to add
+count-in time on its own.
 
 ## Adapters
 

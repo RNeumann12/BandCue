@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import type { RoomClientSummary, TransportState } from "./protocol.js";
 import {
   DEFAULT_SCHEDULE_DELAY_MS,
+  HELIX_MAX_CUE_AGE_MS,
+  HELIX_MIN_FLOOR_MS,
   MAX_SCHEDULE_DELAY_MS,
   decideTransportRequest,
+  helixCueElapsedMs,
   helixDelayMsForSong,
+  helixMinimumDelayMs,
   helixScheduleInfo,
   scheduleDelayForClients
 } from "./transport.js";
@@ -257,6 +261,18 @@ describe("Helix sync timing", () => {
     }, 1500)).toBe(1500);
   });
 
+  it("subtracts the cue's travel time so the downbeat stays anchored to the cue", () => {
+    // 2 measures at 120 BPM is 4000 ms after the *cue*; 60 ms of that is already
+    // gone by the time the request is scheduled, so only 3940 ms are left.
+    expect(helixDelayMsForSong({
+      helixSyncEnabled: true,
+      helixBpm: 120,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 2,
+      helixOffsetMs: 0
+    }, 0, 60)).toBe(3940);
+  });
+
   it("returns undefined for disabled or invalid Helix sync metadata", () => {
     expect(helixDelayMsForSong({ helixSyncEnabled: false })).toBeUndefined();
     expect(helixDelayMsForSong({
@@ -305,7 +321,56 @@ describe("helixScheduleInfo", () => {
     });
   });
 
+  it("reports the cue latency it took off the count-in", () => {
+    expect(helixScheduleInfo({
+      helixSyncEnabled: true,
+      helixBpm: 120,
+      helixBeatsPerMeasure: 4,
+      helixTargetMeasure: 1,
+      helixOffsetMs: 0
+    }, 1400, 45)).toMatchObject({
+      countInMs: 2000,
+      cueLatencyMs: 45,
+      requestedDelayMs: 1955,
+      minimumDelayMs: 1400,
+      appliedDelayMs: 1955,
+      extendedMs: 0
+    });
+  });
+
   it("returns undefined for disabled or invalid Helix sync metadata", () => {
     expect(helixScheduleInfo({ helixSyncEnabled: false })).toBeUndefined();
+  });
+});
+
+describe("helixCueElapsedMs", () => {
+  it("reports how long the cue spent reaching the coordinator", () => {
+    expect(helixCueElapsedMs(10_000, 10_042)).toBe(42);
+  });
+
+  it("ignores a missing, future, or implausibly old stamp", () => {
+    // No stamp, or a clock estimate that puts the cue ahead of now: fall back to
+    // timing the count-in from now, which is what the room did before.
+    expect(helixCueElapsedMs(undefined, 10_000)).toBe(0);
+    expect(helixCueElapsedMs(Number.NaN, 10_000)).toBe(0);
+    expect(helixCueElapsedMs(10_050, 10_000)).toBe(0);
+    // A stale page or a clock step would otherwise "reclaim" seconds and start
+    // the whole room far too early.
+    expect(helixCueElapsedMs(0, 60_000)).toBe(HELIX_MAX_CUE_AGE_MS);
+  });
+});
+
+describe("helixMinimumDelayMs", () => {
+  it("does not round a Helix start up to the comfortable default count-in", () => {
+    // Nothing in the room reports a need, so the Helix's own count-in decides.
+    expect(helixMinimumDelayMs([client({ status: undefined, clock: undefined })]))
+      .toBe(HELIX_MIN_FLOOR_MS);
+    expect(HELIX_MIN_FLOOR_MS).toBeLessThan(DEFAULT_SCHEDULE_DELAY_MS);
+  });
+
+  it("still covers a device's own measured lead requirement", () => {
+    expect(helixMinimumDelayMs([
+      client({ status: { app: "mock", ready: true, requiredLeadMs: 1800 }, clock: undefined })
+    ])).toBe(2800);
   });
 });

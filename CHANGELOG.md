@@ -22,6 +22,27 @@
 
 ### Fixed
 
+- Helix-triggered starts landed a Wi-Fi hop late, every time. The Helix's count-in was timed from
+  the moment its Play request reached the coordinator, so everything the cue spent on its way there
+  — input handling on the host page, the browser's event loop, the LAN hop, the coordinator's own
+  queue — was added on top of the configured count-in instead of counted as part of it. The room
+  stayed perfectly in sync with itself and consistently behind the backing track, and the variance
+  of that path came through as start-to-start wobble against the Helix. The host page now stamps
+  the cue keystroke in room time (from the browser's own event timestamp, so a busy page cannot
+  shift it) and the coordinator schedules the downbeat one count-in after *that*, ignoring stamps
+  that are missing, in the future, or more than 3 s old. Measured against a live coordinator: a cue
+  152 ms in transit now lands the downbeat 2000 ms after the Helix beat at 120 BPM, where it
+  previously landed at 2151 ms.
+- A Helix start could be pushed off the downbeat by the room's *default* count-in rather than by
+  any real device need. The floor a Helix start had to clear started at the 1500 ms default —
+  a comfort setting for button presses, where nothing external is waiting. It is now only what the
+  connected devices actually report needing, so a short count-in is honoured whenever the room can
+  in fact make it (e.g. a single 1200 ms measure at 200 BPM in a Songsterr-only room now starts on
+  the beat instead of 300 ms late).
+- The host's Helix panel now says up front whether the current song's count-in covers what this
+  room needs, and how many count-in measures it would take if not, instead of only reporting the
+  shortfall after a start had already landed late. The post-start line now also shows the cue's
+  travel time and whether the start landed on the Helix downbeat.
 - MuseScore only sometimes jumped back to the start of the score before playing. The reset key
   (Ctrl+Home) was read back out of the bridge command queue, but `queueBridgeCommand` drops the
   command entirely when no bridge server is listening — which is every session started with

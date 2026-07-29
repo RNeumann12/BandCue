@@ -130,6 +130,19 @@ describe("RoomController", () => {
       role: "host",
       capabilities: []
     }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+    // 400 ms of dispatch lead + the fixed prep budget = a 1400 ms floor.
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus",
+      ready: true,
+      app: "songsterr",
+      requiredLeadMs: 400
+    }, 1050);
 
     room.handleMessage(host.id, {
       type: "currentSongUpdate",
@@ -139,7 +152,8 @@ describe("RoomController", () => {
       song: {
         id: "song-1",
         title: "Too Soon",
-        sourceType: "other",
+        sourceType: "songsterr",
+        source: "https://songsterr.test/too-soon",
         helixSyncEnabled: true,
         helixBpm: 200,
         helixBeatsPerMeasure: 4,
@@ -154,16 +168,108 @@ describe("RoomController", () => {
 
     expect(room.getState(1200).transport).toMatchObject({
       status: "scheduled",
-      scheduledServerTime: 2700
+      scheduledServerTime: 2600
     });
     expect(room.getState(1200).safety.armed).toBe(false);
     const parsedHostMessages = hostMessages.map((message) => JSON.parse(message));
     expect(parsedHostMessages.find((message) => message.type === "error")).toBeUndefined();
     expect(parsedHostMessages.find((message) => message.type === "helixScheduleUpdate")).toMatchObject({
+      countInMs: 1200,
+      cueLatencyMs: 0,
       requestedDelayMs: 1200,
-      minimumDelayMs: 1500,
-      appliedDelayMs: 1500,
-      extendedMs: 300
+      minimumDelayMs: 1400,
+      appliedDelayMs: 1400,
+      extendedMs: 200
+    });
+  });
+
+  it("honors a short Helix count-in when no device in the room needs more lead", () => {
+    // The default count-in (1500 ms here) is a comfort setting for button
+    // presses, not a device requirement, so it must not push a Helix start off
+    // the downbeat: only what the connected devices actually need may.
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1100,
+      song: {
+        id: "song-1",
+        title: "Short Count-In",
+        sourceType: "other",
+        helixSyncEnabled: true,
+        helixBpm: 200,
+        helixBeatsPerMeasure: 4,
+        helixTargetMeasure: 1,
+        helixOffsetMs: 0
+      }
+    }, 1100);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    expect(room.getState(1200).transport).toMatchObject({
+      status: "scheduled",
+      scheduledServerTime: 2400
+    });
+  });
+
+  it("takes the Helix cue's travel time off the count-in", () => {
+    const hostMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      index: 1,
+      total: 1,
+      updatedAt: 1100,
+      song: {
+        id: "song-1",
+        title: "Helix Song",
+        sourceType: "other",
+        helixSyncEnabled: true,
+        helixBpm: 120,
+        helixBeatsPerMeasure: 4,
+        helixTargetMeasure: 2,
+        helixOffsetMs: 0
+      }
+    }, 1100);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+    hostMessages.length = 0;
+
+    // The cue fired at 1140; the request only reached the room at 1200. The
+    // downbeat still lands 4000 ms after the cue, not 4000 ms after now.
+    room.handleMessage(host.id, {
+      type: "transportRequest",
+      action: "play",
+      requestedAt: 1200,
+      cueAtServerTime: 1140
+    }, 1200);
+
+    expect(room.getState(1200).transport).toMatchObject({
+      status: "scheduled",
+      scheduledServerTime: 5140
+    });
+    const parsedHostMessages = hostMessages.map((message) => JSON.parse(message));
+    expect(parsedHostMessages.find((message) => message.type === "helixScheduleUpdate")).toMatchObject({
+      countInMs: 4000,
+      cueLatencyMs: 60,
+      requestedDelayMs: 3940,
+      appliedDelayMs: 3940,
+      extendedMs: 0
     });
   });
 
