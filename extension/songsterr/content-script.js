@@ -6,6 +6,28 @@ let lastObservedDurationMs;
 let lastObservedSource = location.href;
 const observedMediaElements = new WeakSet();
 
+// Audio arming (iPadOS/iOS) -- see the section at the end of this file for what
+// this is for. The state lives here because the bootstrap block below reads it.
+const AUDIO_ARM_EVENTS = [
+  "pointerdown",
+  "pointerup",
+  "touchstart",
+  "touchend",
+  "mousedown",
+  "click",
+  "keydown"
+];
+const AUDIO_ARMED_DETAIL = "BandCue audio is armed on this device";
+const AUDIO_NOT_ARMED_DETAIL =
+  "Audio is not armed on this device -- tap the Songsterr page once so BandCue can start playback";
+let audioArmContext;
+let audioArmed = false;
+let audioArmOverlay;
+let audioArmingInstalled = false;
+// Forces the first setAudioArmed call through even though `false` is already the
+// current value, so the very first status report carries the arm state.
+let audioArmStateReported = false;
+
 // The "audio, video" selector guarantees media elements, but querySelectorAll
 // types them as bare Elements; centralize the JSDoc cast (tsconfig.web.json).
 function queryMediaElements() {
@@ -19,6 +41,10 @@ function reportStatus() {
     startDurationObservation();
   }
   observeDurationSources();
+  if (audioArmingInstalled) {
+    // Songsterr re-renders can drop the banner out of the DOM; put it back.
+    syncAudioArmOverlay();
+  }
   const durationMs = readSongDurationMs();
   lastObservedDurationMs = durationMs;
   if (durationMs !== undefined) {
@@ -75,6 +101,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
+installAudioArming();
 reportStatus();
 statusTimer = setInterval(reportStatus, 5000);
 startDurationObservation();
@@ -264,7 +291,12 @@ async function controlSongsterr(action, resetBeforePlay = false, prepared = unde
   if (control.kind === "media") {
     const mediaResult = await controlMediaElement(action, control.mediaElements);
     if (mediaResult.ok) {
-      lastControlDetail = joinControlDetails(synthDetail, resetDetail, `Used native media ${action}`);
+      lastControlDetail = joinControlDetails(
+        synthDetail,
+        resetDetail,
+        `Used native media ${action}`,
+        audioArmWarning(action)
+      );
       return { ok: true, detail: lastControlDetail, controlPath: "media-element" };
     }
     // Rare: the media element refused. Re-resolve (late) rather than give up.
@@ -297,7 +329,8 @@ async function controlSongsterr(action, resetBeforePlay = false, prepared = unde
     lastControlDetail = joinControlDetails(
       synthDetail,
       resetDetail,
-      `Clicked Songsterr player control: ${control.label}`
+      `Clicked Songsterr player control: ${control.label}`,
+      audioArmWarning(action)
     );
     return { ok: true, detail: lastControlDetail, controlPath: "player-button" };
   }
@@ -306,7 +339,8 @@ async function controlSongsterr(action, resetBeforePlay = false, prepared = unde
     lastControlDetail = joinControlDetails(
       synthDetail,
       resetDetail,
-      `Used safe Space shortcut fallback for ${action}`
+      `Used safe Space shortcut fallback for ${action}`,
+      audioArmWarning(action)
     );
     return { ok: true, detail: lastControlDetail, controlPath: "space-shortcut" };
   }
@@ -826,4 +860,190 @@ function dispatchKeyShortcut(key) {
 
 function joinControlDetails(...details) {
   return details.filter(Boolean).join("; ");
+}
+
+// --- Audio arming (iPadOS/iOS) ---------------------------------------------
+// WebKit only lets an AudioContext start or resume from inside a *trusted* user
+// gesture, and it re-imposes that restriction on every new document. Chrome does
+// not: one real click anywhere grants the page sticky activation, which is why
+// synthetic clicks drive Songsterr fine on desktop.
+//
+// Songsterr's Synth source is Web Audio, so on an iPad the consequence is a
+// silent failure that looks like success: after BandCue navigates the tab to the
+// next song, the fresh document has no audio permission, our synthetic click
+// still reaches Songsterr's handler (the button flips to Pause) and its context
+// stays suspended -- no sound, and the cursor never moves.
+//
+// Nothing here can manufacture a gesture, so we ride along on any real touch the
+// player makes: sounding one silent frame inside a trusted event clears WebKit's
+// per-document restriction for the rest of that document's life, after which our
+// synthetic click can resume Songsterr's own context. A banner asks for that tap
+// while it is still missing, and the arm state is reported to the host so a dark
+// iPad is visible *before* the count-in rather than after.
+//
+// None of this touches the downbeat path: arming runs on the user's tap, and the
+// transport code only reads a boolean.
+
+// State for this section lives with the other module state at the top of the
+// file, because the bootstrap block reads it before this point.
+
+/**
+ * True only on the browsers that gate Web Audio behind a live user gesture per
+ * document: WebKit on a touch device. Orion on iPadOS reports the desktop Safari
+ * user agent, so the touch-point count -- not an "iPad" string match -- is what
+ * identifies it. Chromium and desktop Safari never pay for any of this.
+ */
+function needsAudioArming() {
+  const runtimeNavigator = globalThis.navigator;
+  if (!runtimeNavigator || typeof audioContextConstructor() !== "function") {
+    return false;
+  }
+
+  const userAgent = runtimeNavigator.userAgent || "";
+  const isWebKit = /AppleWebKit/.test(userAgent) && !/Chrome|Chromium|Edg\//.test(userAgent);
+  const isTouch =
+    (runtimeNavigator.maxTouchPoints || 0) > 1 || /iPad|iPhone|iPod/.test(userAgent);
+  return isWebKit && isTouch;
+}
+
+function audioContextConstructor() {
+  return globalThis.AudioContext || globalThis.webkitAudioContext;
+}
+
+function installAudioArming() {
+  if (audioArmingInstalled || typeof document.addEventListener !== "function" || !needsAudioArming()) {
+    return;
+  }
+
+  audioArmingInstalled = true;
+  for (const type of AUDIO_ARM_EVENTS) {
+    // Passive so the listeners can never delay a scroll or a tap, and capture so
+    // they see the gesture even if Songsterr stops it from bubbling.
+    document.addEventListener(type, handleArmingGesture, { capture: true, passive: true });
+  }
+  document.addEventListener("visibilitychange", handleAudioArmVisibilityChange);
+  setAudioArmed(false);
+}
+
+function handleArmingGesture(event) {
+  // Our own Space/Backspace shortcuts dispatch untrusted KeyboardEvents; those
+  // do not unlock anything, so they must not be mistaken for a real gesture.
+  if (audioArmed || event?.isTrusted === false) {
+    return;
+  }
+
+  armAudio();
+}
+
+function armAudio() {
+  const AudioContextConstructor = audioContextConstructor();
+  if (typeof AudioContextConstructor !== "function") {
+    return;
+  }
+
+  try {
+    // Constructed inside the gesture, so WebKit starts it running rather than
+    // suspended, and kept afterwards so the unlocked session is never torn down.
+    audioArmContext = audioArmContext || new AudioContextConstructor();
+    audioArmContext.onstatechange = refreshAudioArmState;
+    // Actually *sounding* a sample -- silent, one frame -- is what clears the
+    // per-document restriction; resume() on its own can leave it in place.
+    const source = audioArmContext.createBufferSource();
+    source.buffer = audioArmContext.createBuffer(1, 1, audioArmContext.sampleRate);
+    source.connect(audioArmContext.destination);
+    source.start(0);
+    const resumed = audioArmContext.resume();
+    if (resumed?.then) {
+      resumed.then(refreshAudioArmState, refreshAudioArmState);
+    }
+  } catch {
+    // A browser that refuses to build the context simply stays unarmed, and the
+    // banner keeps asking.
+  }
+
+  refreshAudioArmState();
+}
+
+function refreshAudioArmState() {
+  setAudioArmed(audioArmContext?.state === "running");
+}
+
+// iOS suspends the context when the tab is backgrounded or the screen locks.
+// Coming back may be enough to resume it (the restriction was already lifted for
+// this document); if it is not, the state read below re-raises the banner.
+function handleAudioArmVisibilityChange() {
+  if (document.visibilityState !== "visible" || !audioArmContext) {
+    return;
+  }
+
+  const resumed = audioArmContext.resume?.();
+  if (resumed?.then) {
+    resumed.then(refreshAudioArmState, refreshAudioArmState);
+    return;
+  }
+
+  refreshAudioArmState();
+}
+
+function setAudioArmed(next) {
+  if (audioArmed === next && audioArmStateReported) {
+    return;
+  }
+
+  audioArmed = next;
+  audioArmStateReported = true;
+  lastControlDetail = next ? AUDIO_ARMED_DETAIL : AUDIO_NOT_ARMED_DETAIL;
+  syncAudioArmOverlay();
+  scheduleStatusReport(0);
+}
+
+/**
+ * Shows/hides the "tap once" banner. Cheap and idempotent: it is also called
+ * from the 5 s status tick so a Songsterr re-render that drops the node puts it
+ * back. Never called from the transport path.
+ */
+function syncAudioArmOverlay() {
+  if (audioArmed) {
+    audioArmOverlay?.remove();
+    audioArmOverlay = undefined;
+    return;
+  }
+
+  if (audioArmOverlay?.isConnected || typeof document.createElement !== "function" || !document.body) {
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  // A plain div on purpose: findTransportButton scans `button, [role='button']`,
+  // and the wording avoids every transport word scoreTransportCandidate matches,
+  // so the banner can never be mistaken for the player control. position:fixed
+  // keeps it out of Songsterr's layout.
+  overlay.textContent = "Tap to enable BandCue audio on this device";
+  overlay.setAttribute("style", [
+    "position:fixed",
+    "left:50%",
+    "bottom:16px",
+    "transform:translateX(-50%)",
+    "z-index:2147483647",
+    "padding:14px 22px",
+    "border-radius:999px",
+    "background:#1f6feb",
+    "color:#fff",
+    "font:600 15px/1.2 system-ui,-apple-system,sans-serif",
+    "box-shadow:0 4px 16px rgba(0,0,0,0.35)",
+    "cursor:pointer",
+    "touch-action:manipulation",
+    "-webkit-user-select:none",
+    "user-select:none"
+  ].join(";"));
+  document.body.appendChild(overlay);
+  audioArmOverlay = overlay;
+}
+
+/**
+ * Note for the host when a play is about to "succeed" visibly but stay silent.
+ * Two boolean reads, so it costs the downbeat nothing.
+ */
+function audioArmWarning(action) {
+  return action === "play" && audioArmingInstalled && !audioArmed ? AUDIO_NOT_ARMED_DETAIL : "";
 }

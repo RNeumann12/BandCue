@@ -28,6 +28,13 @@ interface Navigator {
   userAgentData?: { platform?: string };
 }
 
+// WebKit's prefixed Web Audio constructor, still the only one on older
+// iPadOS/iOS builds. content-script.js uses it to arm audio playback there.
+// Not part of the bundled DOM lib.
+interface Window {
+  webkitAudioContext?: typeof AudioContext;
+}
+
 // Shared room-permission helpers (room-permissions.js) attach themselves to
 // globalThis for use from both the service worker and the popup.
 declare var BandCueRoomPermissions: {

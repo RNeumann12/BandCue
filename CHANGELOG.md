@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.3.2 - 2026-07-29
+
+### Fixed
+
+- Songsterr on iPad/iPhone (Orion) no longer goes silent after switching songs. WebKit only lets
+  Web Audio start from inside a *trusted* user gesture and re-imposes that rule on every new
+  document, so once BandCue navigated the tab to the next song, the synthetic click still reached
+  Songsterr — the button flipped to Pause — while its audio context stayed suspended: no sound, and
+  the play cursor never moved. The extension now rides along on any real touch on the Songsterr
+  page to unlock the document's audio session, shows a "Tap to enable BandCue audio" banner while
+  that touch is still missing, and reports the unarmed state to the host so a dark iPad is visible
+  before the count-in instead of after. Chromium and desktop Safari are unaffected — they grant a
+  page sticky activation after one interaction, so none of this runs there.
+
+  Arming happens on the player's tap and never on the downbeat: the scheduled transport path is
+  unchanged, and the control action still reads only a boolean, so start timing is untouched.
+
 ## 1.3.1 - 2026-07-29
 
 ### Changed

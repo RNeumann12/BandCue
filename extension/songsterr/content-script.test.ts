@@ -62,6 +62,22 @@ class FakeElement {
   click() {
     this.clicks += 1;
   }
+
+  // Elements handed out by querySelectorAll stand for nodes already in the
+  // document; createElement below hands back detached ones.
+  isConnected = true;
+
+  children: FakeElement[] = [];
+
+  appendChild(child: FakeElement) {
+    this.children.push(child);
+    child.isConnected = true;
+    return child;
+  }
+
+  remove() {
+    this.isConnected = false;
+  }
 }
 
 class FakeSourceControl {
@@ -82,25 +98,81 @@ class FakeKeyboardEvent {
   }
 }
 
+// iPadOS reports the *desktop* Safari user agent (Orion included), so the
+// content script identifies it by touch points rather than an "iPad" match.
+const IPAD_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+
+class FakeAudioContext {
+  static created = 0;
+
+  state = "suspended";
+  sampleRate = 44_100;
+  destination = {};
+  onstatechange: (() => void) | undefined;
+  // Counts silent frames actually sounded -- the step that clears WebKit's
+  // per-document gesture restriction.
+  sounded = 0;
+
+  constructor() {
+    FakeAudioContext.created += 1;
+  }
+
+  createBuffer() {
+    return {};
+  }
+
+  createBufferSource() {
+    return {
+      buffer: null,
+      connect: () => {},
+      start: () => {
+        this.sounded += 1;
+      }
+    };
+  }
+
+  resume() {
+    this.state = "running";
+    return Promise.resolve();
+  }
+
+  suspendFromSystem() {
+    this.state = "suspended";
+    this.onstatechange?.();
+  }
+}
+
 function loadContentScript({
   elements = [],
   media = [],
-  sourceControl = null
+  sourceControl = null,
+  ipad = false
 }: {
   elements?: FakeElement[];
   media?: FakeMediaElement[];
   sourceControl?: FakeSourceControl | null;
+  ipad?: boolean;
 } = {}) {
   const messages: unknown[] = [];
   // Counts the document-wide element scans, so a test can prove the downbeat
   // does no scanning of its own.
   const scans = { controlQueries: 0 };
+  const documentListeners: Record<string, Array<(event: unknown) => void>> = {};
   const document = {
     title: "Song A Tab by Artist",
     documentElement: new FakeElement(),
     body: new FakeElement(),
     activeElement: null,
     visibilityState: "visible",
+    addEventListener(type: string, listener: (event: unknown) => void) {
+      (documentListeners[type] ??= []).push(listener);
+    },
+    createElement() {
+      const created = new FakeElement();
+      created.isConnected = false;
+      return created;
+    },
     querySelector(selector: string) {
       if (sourceControl && /control-source/.test(selector)) {
         return sourceControl;
@@ -182,12 +254,34 @@ function loadContentScript({
     RegExp,
     WeakSet
   };
+  if (ipad) {
+    FakeAudioContext.created = 0;
+    context.navigator = { userAgent: IPAD_USER_AGENT, maxTouchPoints: 5 };
+    context.AudioContext = FakeAudioContext;
+  }
+
   vm.createContext(context);
   vm.runInContext(contentScriptSource, context);
   // `let` bindings live in the script's lexical scope, not on the context object,
   // so module-level state has to be read by evaluating in the same context.
   const evaluate = (expression: string) => vm.runInContext(expression, context);
-  return { context, messages, mutationObserver, scans, keyEvents, evaluate };
+  const fireGesture = (type: string, init: Record<string, unknown> = {}) => {
+    for (const listener of documentListeners[type] ?? []) {
+      listener({ type, isTrusted: true, ...init });
+    }
+  };
+  const overlay = () => document.body.children[0];
+  return {
+    context,
+    messages,
+    mutationObserver,
+    scans,
+    keyEvents,
+    evaluate,
+    documentListeners,
+    fireGesture,
+    overlay
+  };
 }
 
 describe("Songsterr content duration discovery", () => {
@@ -393,6 +487,105 @@ describe("Songsterr transport control resolution", () => {
 
     const result = await context.controlSongsterr("play", false, plan);
     expect(result).toMatchObject({ ok: true, controlPath: "space-shortcut" });
+  });
+});
+
+// WebKit re-imposes its "audio needs a live user gesture" rule on every new
+// document, so switching songs -- which reloads the tab -- silently disarms an
+// iPad: the synthetic click still flips Songsterr's button to Pause while its
+// AudioContext stays suspended.
+describe("Songsterr audio arming on iPadOS", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("asks for a tap and tells the host while audio is unarmed", () => {
+    vi.useFakeTimers();
+    const { messages, overlay } = loadContentScript({ ipad: true });
+    vi.runOnlyPendingTimers();
+
+    expect(overlay()?.textContent).toMatch(/tap to enable/i);
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/not armed/i) })
+    );
+  });
+
+  it("arms on a real tap and drops the banner", () => {
+    vi.useFakeTimers();
+    const { messages, evaluate, fireGesture, overlay } = loadContentScript({ ipad: true });
+
+    fireGesture("pointerdown");
+    vi.runOnlyPendingTimers();
+
+    expect(evaluate("audioArmed")).toBe(true);
+    // Sounding a silent frame is what clears the restriction; resume() alone can
+    // leave it in place.
+    expect(evaluate("audioArmContext").sounded).toBe(1);
+    expect(overlay()?.isConnected).toBe(false);
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/audio is armed/i) })
+    );
+  });
+
+  it("ignores untrusted events, so our own Space shortcut cannot fake a gesture", () => {
+    const { evaluate, fireGesture } = loadContentScript({ ipad: true });
+
+    fireGesture("keydown", { isTrusted: false });
+
+    expect(evaluate("audioArmed")).toBe(false);
+    expect(FakeAudioContext.created).toBe(0);
+  });
+
+  it("re-raises the banner when iOS suspends the context behind our back", () => {
+    vi.useFakeTimers();
+    const { evaluate, fireGesture, overlay } = loadContentScript({ ipad: true });
+    fireGesture("pointerdown");
+    vi.runOnlyPendingTimers();
+
+    evaluate("audioArmContext").suspendFromSystem();
+    vi.runOnlyPendingTimers();
+
+    expect(evaluate("audioArmed")).toBe(false);
+    expect(overlay()?.textContent).toMatch(/tap to enable/i);
+  });
+
+  it("warns the host when a play fires while audio is still unarmed", async () => {
+    const play = new FakeElement("", {
+      "aria-label": "Play",
+      class: "_8e144G_button _8e144G_play"
+    });
+    const { context } = loadContentScript({ elements: [play], ipad: true });
+
+    const result = await context.controlSongsterr("play", false);
+
+    // The click lands and Songsterr's button flips, so this is a "success" that
+    // would otherwise be silent -- say so rather than reporting a clean start.
+    expect(result).toMatchObject({ ok: true, controlPath: "player-button" });
+    expect(result.detail).toMatch(/not armed/i);
+  });
+
+  it("keeps the downbeat free of arming work once armed", async () => {
+    const play = new FakeElement("", {
+      "aria-label": "Play",
+      class: "_8e144G_button _8e144G_play"
+    });
+    const { context, scans, fireGesture } = loadContentScript({ elements: [play], ipad: true });
+    fireGesture("pointerdown");
+
+    const plan = context.prepareTransport("play", true);
+    const scansAfterPrep = scans.controlQueries;
+    const result = await context.controlSongsterr("play", true, plan);
+
+    expect(scans.controlQueries).toBe(scansAfterPrep);
+    expect(play.clicks).toBe(1);
+    expect(result.detail).not.toMatch(/not armed/i);
+  });
+
+  it("stays completely out of the way on desktop Chrome", () => {
+    const { documentListeners, overlay } = loadContentScript();
+
+    expect(documentListeners.pointerdown).toBeUndefined();
+    expect(overlay()).toBeUndefined();
   });
 });
 

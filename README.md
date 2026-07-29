@@ -288,6 +288,14 @@ extensions, so the BandCue Songsterr extension works there. On iPad/iPhone, auto
 (room code, port, mDNS, LAN scan) does **not** work — you must connect with the full
 `host:port` (e.g. `192.168.1.23:4173`) or the full room URL.
 
+**Tap once per song.** WebKit only lets audio start from a real touch, and it forgets that
+permission every time the page loads — including when BandCue moves the tab to the next song. The
+extension shows a **"Tap to enable BandCue audio"** banner whenever that touch is missing: tap
+anywhere on the Songsterr page and it disappears. Until you do, a play command still flips
+Songsterr's button to Pause but stays silent, and the host shows the device as not armed. Keep the
+Songsterr tab in the foreground and set **Auto-Lock** to **Never**, or iOS suspends the audio and
+the banner comes back.
+
 ### Songsterr on Android
 
 A native Android adapter lives in `android/`. Build the debug APK with `npm run build:android`,
