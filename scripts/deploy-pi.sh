@@ -46,11 +46,13 @@ tar -czf - dist/server dist/shared web package.json package-lock.json \
 echo "==> Installing runtime dependencies only"
 ssh "$PI" "cd ~/$APP_DIR && PATH=$NODE_BIN:\$PATH npm ci --omit=dev --no-audit --no-fund"
 
-echo "==> Restarting the service (prompts for the Pi's sudo password once)"
-# A system unit needs root to restart, and sudo on this Pi requires a password,
-# so allocate a TTY (-t). If you add a passwordless sudoers rule for
-# 'systemctl restart bandcue', you can drop the -t.
-ssh -t "$PI" "sudo systemctl restart bandcue"
+echo "==> Restarting the service"
+# Restarting a system unit needs root, and plain 'sudo systemctl' asks this Pi
+# for a password. Its sudoers does carry a NOPASSWD rule for /usr/sbin/service,
+# which systemd's compat wrapper turns back into a systemctl restart -- so the
+# deploy stays non-interactive. If the rule is ever dropped, fall back to
+# 'ssh -t "$PI" "sudo systemctl restart bandcue"' and type the password.
+ssh "$PI" "sudo -n service bandcue restart"
 
 echo "==> Waiting for the coordinator to answer (checked on the Pi itself)"
 for i in $(seq 1 30); do
