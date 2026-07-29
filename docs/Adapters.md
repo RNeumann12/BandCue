@@ -52,6 +52,16 @@ Build a distributable zip with `npm run package:extension`.
 - **Auto-open** — when a transport command arrives and no matching Songsterr tab is open, the
   adapter opens the current song's Songsterr URL first. The extension reuses an already-open
   Songsterr tab and pre-opens it at count-in start.
+- **Device name** — each member can type a name for this device in the popup; it's persisted in
+  `chrome.storage.local` and sent as `clientHello.deviceName`. Left empty, the name is derived
+  from the member's instrument and platform (`Bass Songsterr (Windows)`, or `Songsterr (Windows)`
+  on **Auto**). Chrome gives an extension no way to read the *computer's* name — the only API
+  that does, `chrome.enterprise.deviceAttributes.getDeviceHostname()`, is ChromeOS-and-policy-only,
+  and no permission unlocks it elsewhere. This matters beyond cosmetics: the host keys saved
+  per-device calibration by device name, and the coordinator caches a recently-seen clock per
+  `role + name + apps`, so when every extension reported the same `"Songsterr tab"` one member's
+  manual offset was pushed to all of them and a joining device could adopt another member's clock
+  estimate. A rename reconnects, since `clientHello` is only read when a connection opens.
 - **Per-member instrument** — each member picks **Guitar / Bass / Drums**, or **Auto** (the
   default), which inherits the category from the currently open Songsterr tab. Explicit
   per-song `songsterrBassUrl` / `songsterrDrumUrl` fields win for arrangements that live on

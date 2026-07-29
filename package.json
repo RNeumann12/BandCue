@@ -1,6 +1,6 @@
 {
   "name": "bandcue",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "description": "Local-first playback sync for band rehearsals — press play once and every device (Songsterr, MuseScore) starts on the same beat.",
   "license": "MIT",

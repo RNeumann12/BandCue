@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 1.3.1 - 2026-07-29
+
+### Changed
+
+- Songsterr devices can now be told apart in the room. Each member can name their device in the
+  extension popup; left empty, the name is derived from their instrument and platform
+  (`Bass Songsterr (Windows)`, or `Songsterr (Windows)` on Auto) instead of every device reporting
+  the identical `"Songsterr tab"`. Chrome gives an extension no way to read the computer's own
+  name — the only API that does is ChromeOS-and-policy-only, and no permission unlocks it
+  elsewhere — so the name is the member's to set, as it already was in the Android app and the
+  MuseScore adapter.
+
+### Fixed
+
+- Per-device timing calibration now applies to the device it was set for. The host keys saved
+  manual offsets by device name, so while every extension reported `"Songsterr tab"` they shared a
+  single entry and one member's offset was pushed to every Songsterr device in the room.
+- A joining Songsterr device no longer adopts another member's clock estimate. The coordinator
+  caches a recently-seen clock per `role + name + apps` to survive reconnects; identical names made
+  every Songsterr device share one cache entry, including its manual offset.
+
+**Upgrading:** saved calibrations are keyed by device name, so offsets stored under the old shared
+`"Songsterr tab"` name stop matching once devices are renamed and need setting once more. They were
+being cross-applied to every Songsterr device before this release, so this is a reset rather than a
+loss.
+
 ## 1.3.0 - 2026-07-29
 
 Start-timing release. Every adapter now does its setup during the count-in and only

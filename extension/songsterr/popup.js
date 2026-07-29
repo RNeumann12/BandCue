@@ -15,6 +15,7 @@ const play = /** @type {HTMLButtonElement} */ (document.querySelector("#play"));
 const stopButton = /** @type {HTMLButtonElement} */ (document.querySelector("#stop"));
 const suppressAutoOpen = /** @type {HTMLInputElement} */ (document.querySelector("#suppressAutoOpen"));
 const instrument = /** @type {HTMLSelectElement} */ (document.querySelector("#instrument"));
+const deviceName = /** @type {HTMLInputElement} */ (document.querySelector("#deviceName"));
 const statusEl = /** @type {HTMLElement} */ (document.querySelector("#status"));
 const connectionState = /** @type {HTMLElement} */ (document.querySelector("#connectionState"));
 const connectionDot = /** @type {HTMLElement} */ (document.querySelector("#connectionDot"));
@@ -41,6 +42,7 @@ chrome.runtime.sendMessage({ type: "popupState" }, (state) => {
   }
   suppressAutoOpen.checked = Boolean(state?.suppressAutoOpen);
   instrument.value = state?.instrument || "auto";
+  deviceName.value = state?.deviceName || "";
   renderState(state);
 });
 
@@ -96,6 +98,15 @@ instrument.addEventListener("change", () => {
   );
 });
 
+// "change" (not "input") so a rename reconnects once, on blur/Enter, rather than
+// on every keystroke -- clientHello is only read when a connection is opened.
+deviceName.addEventListener("change", () => {
+  chrome.runtime.sendMessage(
+    { type: "popupSetDeviceName", deviceName: deviceName.value },
+    renderState
+  );
+});
+
 play.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupTransport", action: "play" }, renderState);
 });
@@ -119,6 +130,9 @@ function renderState(state) {
   adapterState.textContent = adapter;
   statusEl.textContent = detail || "No connection detail yet.";
   commandState.textContent = command;
+  // Shows the instrument/platform default the room will use while the field is
+  // empty, so a member can see their name without having to invent one.
+  deviceName.placeholder = state?.effectiveDeviceName || "Songsterr";
   disconnect.disabled = disconnectedByUser || (!connected && !state?.autoConnectEnabled);
   play.disabled = !connected;
   stopButton.disabled = !connected;

@@ -62,6 +62,73 @@ let knownHosts = [];
 // single example URL from the host is enough to build the right URL for everyone.
 // Persisted per-machine.
 let memberInstrument = "auto";
+// What this device calls itself in the room. Chrome gives an extension no way to
+// read the computer's name -- chrome.enterprise.deviceAttributes.getDeviceHostname()
+// is ChromeOS-and-policy-only, and nothing else (userAgent, userAgentData, the
+// system.* APIs) exposes it, so there is no permission we could ask for either.
+// Instead the member can type a name in the popup, and until they do we derive one
+// from their instrument and platform. Every extension used to report the identical
+// "Songsterr tab", which collides in two places that matter:
+//   * the host keys saved per-device calibration by device name, so one member's
+//     manual offset was pushed to every Songsterr device in the room;
+//   * the coordinator caches a recently-seen clock per role+name+app, so a joining
+//     device could adopt another member's clock estimate and manual offset.
+let deviceNameOverride = "";
+const DEVICE_NAME_MAX_LENGTH = 80;
+const INSTRUMENT_LABELS = { guitar: "Guitar", bass: "Bass", drum: "Drums" };
+
+/** The name reported to the room: the member's own, else an instrument/platform default. */
+function resolveDeviceName() {
+  return deviceNameOverride || defaultDeviceName();
+}
+
+function defaultDeviceName() {
+  const instrumentLabel = INSTRUMENT_LABELS[memberInstrument] || "";
+  const platform = detectPlatformName();
+  const stem = instrumentLabel ? `${instrumentLabel} Songsterr` : "Songsterr";
+  return platform ? `${stem} (${platform})` : stem;
+}
+
+function detectPlatformName() {
+  const reported = globalThis.navigator?.userAgentData?.platform;
+  if (typeof reported === "string" && reported.trim()) {
+    return reported.trim();
+  }
+
+  // userAgentData is Chromium-only and can be absent in older builds; fall back to
+  // the classic user agent, which is enough to tell the common desktops apart.
+  const userAgent = globalThis.navigator?.userAgent || "";
+  for (const candidate of PLATFORM_PATTERNS) {
+    if (candidate.pattern.test(userAgent)) {
+      return candidate.name;
+    }
+  }
+  return "";
+}
+
+// Checked in order: "CrOS" and "Android" user agents also contain "Linux".
+const PLATFORM_PATTERNS = [
+  { pattern: /windows/i, name: "Windows" },
+  { pattern: /macintosh|mac os x/i, name: "macOS" },
+  { pattern: /cros/i, name: "ChromeOS" },
+  { pattern: /android/i, name: "Android" },
+  { pattern: /linux/i, name: "Linux" }
+];
+
+function normalizeDeviceName(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, DEVICE_NAME_MAX_LENGTH);
+}
+
+// clientHello is only read when a connection is established, so a rename has to
+// reconnect for the room to see it. Reusing the resolved endpoint keeps this to a
+// single quick socket swap rather than a rediscovery.
+function reannounceIdentity() {
+  if (socket?.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  reconnectAttempts = 0;
+  connect();
+}
 
 // How far ahead of the scheduled downbeat a transport command is forwarded to
 // the content script. Covers the tab query, the IPC hop, and Songsterr prep
@@ -192,8 +259,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "popupSetInstrument") {
+    const previousName = resolveDeviceName();
     memberInstrument = normalizeInstrument(message.instrument);
     chrome.storage.local.set({ instrument: memberInstrument });
+    // The default name is derived from the instrument, so picking Bass renames an
+    // unnamed device in the room too.
+    if (resolveDeviceName() !== previousName) {
+      reannounceIdentity();
+    }
+    sendResponse(getPopupState());
+    return true;
+  }
+
+  if (message.type === "popupSetDeviceName") {
+    const previousName = resolveDeviceName();
+    deviceNameOverride = normalizeDeviceName(message.deviceName);
+    chrome.storage.local.set({ deviceName: deviceNameOverride });
+    if (resolveDeviceName() !== previousName) {
+      reannounceIdentity();
+    }
     sendResponse(getPopupState());
     return true;
   }
@@ -207,11 +291,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument", "deviceName"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
   autoConnectEnabled = Boolean(stored.autoConnectEnabled);
   knownHosts = Array.isArray(stored.knownHosts) ? stored.knownHosts : [];
   memberInstrument = normalizeInstrument(stored.instrument);
+  deviceNameOverride = normalizeDeviceName(stored.deviceName);
   // Seed from a previously successful room URL so a known host is probed first
   // even on the first connect after this feature shipped.
   if (!knownHosts.length && stored.roomUrl) {
@@ -347,7 +432,7 @@ async function connect() {
     }, HEARTBEAT_CHECK_INTERVAL_MS);
     send({
       type: "clientHello",
-      deviceName: "Songsterr tab",
+      deviceName: resolveDeviceName(),
       role: "desktop-adapter",
       capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
     });
@@ -1789,6 +1874,10 @@ function getPopupState() {
     autoConnectEnabled,
     suppressAutoOpen,
     instrument: memberInstrument,
+    // The member's own name (empty when they haven't set one) plus the name the
+    // room actually sees, so the popup can show the derived default as a hint.
+    deviceName: deviceNameOverride,
+    effectiveDeviceName: resolveDeviceName(),
     status: lastStatus
   };
 }

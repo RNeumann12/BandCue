@@ -21,6 +21,13 @@ declare class BarcodeDetector {
 // MV3 service-worker global used by background.js; not part of the DOM lib.
 declare function importScripts(...urls: string[]): void;
 
+// User-Agent Client Hints (Chromium); background.js reads the low-entropy
+// platform to build this device's default room name. Not yet in the bundled
+// DOM lib, and absent in older builds, hence the optional property.
+interface Navigator {
+  userAgentData?: { platform?: string };
+}
+
 // Shared room-permission helpers (room-permissions.js) attach themselves to
 // globalThis for use from both the service worker and the popup.
 declare var BandCueRoomPermissions: {

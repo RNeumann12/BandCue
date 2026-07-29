@@ -81,6 +81,7 @@ function loadBackground(initialTabs: FakeTab[]) {
   class FakeSocket {
     static OPEN = 1;
     readyState = 0;
+    sent: string[] = [];
     listeners: Record<string, Array<(evt: any) => void>> = {};
     constructor(public url: string) {
       sockets.push(this);
@@ -88,8 +89,12 @@ function loadBackground(initialTabs: FakeTab[]) {
     addEventListener(type: string, fn: (evt: any) => void) {
       (this.listeners[type] ??= []).push(fn);
     }
-    send() {}
-    close() {}
+    send(data: string) {
+      this.sent.push(data);
+    }
+    close() {
+      this.readyState = 3;
+    }
     emit(type: string, evt: any) {
       for (const fn of this.listeners[type] ?? []) fn(evt);
     }
@@ -116,6 +121,12 @@ function loadBackground(initialTabs: FakeTab[]) {
     Math,
     console,
     importScripts() {},
+    // Fixed so the derived device name is deterministic; userAgentData is left
+    // undefined to exercise the classic user-agent fallback too.
+    navigator: {
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+    },
     WebSocket: FakeSocket
   };
   vm.createContext(context);
@@ -141,11 +152,33 @@ function loadBackground(initialTabs: FakeTab[]) {
     });
   }
 
+  // Brings the socket fully up (the "open" handler is what sends clientHello),
+  // then hands back everything the script pushed to the coordinator. Callers
+  // should disconnect afterwards so the clock/heartbeat intervals don't outlive
+  // the test.
+  async function openConnection() {
+    await context.configureConnection("http://127.0.0.1:4173/");
+    await flush();
+    const socket = sockets[sockets.length - 1];
+    socket.readyState = 1;
+    socket.emit("open", {});
+    await flush();
+    return socket;
+  }
+
   // `let` bindings live in the script's lexical scope, not on the context
   // object, so module-level state has to be read by evaluating in the context.
   const evaluate = (expression: string) => vm.runInContext(expression, context);
 
-  return { context, created, updated, deliverServerMessage, sendRuntimeMessage, evaluate };
+  return {
+    context,
+    created,
+    updated,
+    deliverServerMessage,
+    sendRuntimeMessage,
+    openConnection,
+    evaluate
+  };
 }
 
 describe("ensureSongsterrTabs tab reuse", () => {
@@ -187,6 +220,105 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(1);
     expect(created[0].url).toBe(SONG_A);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+});
+
+describe("device naming", () => {
+  it("derives a name from the instrument and platform when the member set none", async () => {
+    const { context, sendRuntimeMessage } = loadBackground([]);
+
+    expect(context.resolveDeviceName()).toBe("Songsterr (Windows)");
+
+    const state: any = await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "bass" });
+    expect(state.effectiveDeviceName).toBe("Bass Songsterr (Windows)");
+  });
+
+  it("distinguishes the instruments so band mates do not collide by default", async () => {
+    const { sendRuntimeMessage } = loadBackground([]);
+    const names: string[] = [];
+
+    for (const instrument of ["guitar", "bass", "drum"]) {
+      const state: any = await sendRuntimeMessage({ type: "popupSetInstrument", instrument });
+      names.push(state.effectiveDeviceName);
+    }
+
+    expect(names).toEqual([
+      "Guitar Songsterr (Windows)",
+      "Bass Songsterr (Windows)",
+      "Drums Songsterr (Windows)"
+    ]);
+  });
+
+  it("lets the member's own name win over the derived default", async () => {
+    const { context, sendRuntimeMessage } = loadBackground([]);
+
+    const state: any = await sendRuntimeMessage({
+      type: "popupSetDeviceName",
+      deviceName: "  Toms   Laptop  "
+    });
+
+    // Collapsed whitespace, matching the coordinator's own trimText normalization.
+    expect(state.deviceName).toBe("Toms Laptop");
+    expect(state.effectiveDeviceName).toBe("Toms Laptop");
+    expect(context.resolveDeviceName()).toBe("Toms Laptop");
+  });
+
+  it("falls back to the derived default when the name is cleared", async () => {
+    const { context, sendRuntimeMessage } = loadBackground([]);
+
+    await sendRuntimeMessage({ type: "popupSetDeviceName", deviceName: "Toms Laptop" });
+    const state: any = await sendRuntimeMessage({ type: "popupSetDeviceName", deviceName: "   " });
+
+    expect(state.deviceName).toBe("");
+    expect(context.resolveDeviceName()).toBe("Songsterr (Windows)");
+  });
+
+  it("caps a pasted name at the length the coordinator accepts", async () => {
+    const { sendRuntimeMessage } = loadBackground([]);
+
+    const state: any = await sendRuntimeMessage({
+      type: "popupSetDeviceName",
+      deviceName: "x".repeat(200)
+    });
+
+    expect(state.deviceName).toHaveLength(80);
+  });
+
+  it("announces itself under the resolved name, not a hardcoded one", async () => {
+    const { context, openConnection, sendRuntimeMessage } = loadBackground([]);
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "drum" });
+
+    const socket = await openConnection();
+    const hello = socket.sent.map((raw: string) => JSON.parse(raw)).find((m: any) => m.type === "clientHello");
+    context.disconnectByUser();
+
+    expect(hello?.deviceName).toBe("Drums Songsterr (Windows)");
+  });
+
+  it("re-announces to the room when the member renames the device", async () => {
+    const { context, openConnection, sendRuntimeMessage } = loadBackground([]);
+
+    const first = await openConnection();
+    expect(first.readyState).toBe(1);
+
+    await sendRuntimeMessage({ type: "popupSetDeviceName", deviceName: "Toms Laptop" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // A rename only reaches the room via a fresh clientHello, so the old socket
+    // must have been replaced.
+    expect(first.readyState).toBe(3);
+    context.disconnectByUser();
+  });
+
+  it("does not reconnect when the name did not actually change", async () => {
+    const { context, openConnection, sendRuntimeMessage } = loadBackground([]);
+
+    const first = await openConnection();
+    await sendRuntimeMessage({ type: "popupSetInstrument", instrument: "auto" });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(first.readyState).toBe(1);
+    context.disconnectByUser();
   });
 });
 
