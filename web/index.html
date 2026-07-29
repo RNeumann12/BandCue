@@ -63,6 +63,23 @@
           </label>
           <span class="safety-state" id="safetyState">Not armed</span>
         </div>
+        <div class="auto-run" aria-labelledby="autoRunTitle">
+          <div class="auto-run-heading">
+            <span class="auto-run-kicker">End of song</span>
+            <strong id="autoRunTitle">Setlist automation</strong>
+          </div>
+          <div class="auto-run-toggles">
+            <label class="auto-run-toggle">
+              <input id="autoAdvanceToggle" type="checkbox" data-hotkey-action="toggle-auto-advance" data-hotkey-label="Auto-load next song" />
+              <span>Auto-load next song</span>
+            </label>
+            <label class="auto-run-toggle">
+              <input id="autoStartToggle" type="checkbox" data-hotkey-action="toggle-auto-start" data-hotkey-label="Auto-start next song" />
+              <span>Auto-start it</span>
+            </label>
+          </div>
+          <span class="auto-run-status" id="autoRunStatus"></span>
+        </div>
         <div class="helix-global" aria-labelledby="helixGlobalTitle">
           <div class="helix-global-heading">
             <span class="helix-global-kicker">Helix Stadium</span>
@@ -88,7 +105,8 @@
           <kbd>Ctrl+Alt+N</kbd> Next
           <kbd>Ctrl+Alt+B</kbd> Previous
           <kbd>Ctrl+Alt+O</kbd> Open
-          <kbd>Ctrl+Alt+R</kbd> Setlist
+          <kbd>Ctrl+Alt+R</kbd> Auto-load
+          <kbd>Ctrl+Alt+T</kbd> Auto-start
         </div>
         <p class="host-warning" id="hostWarning"></p>
       </section>
@@ -201,13 +219,6 @@
             <button class="secondary compact" id="exportSetlistButton" type="button">Export</button>
             <button class="secondary compact" id="importSetlistButton" type="button">Import</button>
             <input id="importSetlistInput" type="file" accept="application/json,.json" hidden />
-          </div>
-          <div class="setlist-mode-row">
-            <label class="setlist-mode">
-              <input id="setlistModeToggle" type="checkbox" data-hotkey-action="toggle-setlist-mode" data-hotkey-label="Setlist mode" />
-              <span>Setlist mode: auto-load &amp; play each song, advance at the end</span>
-            </label>
-            <span class="small" id="setlistModeStatus"></span>
           </div>
           <div id="setlistItems" class="setlist-items"></div>
         </article>

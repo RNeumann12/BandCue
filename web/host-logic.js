@@ -401,6 +401,30 @@ export function playBlockedReason(state) {
   return "Play is not available yet.";
 }
 
+// --- Setlist automation settings ------------------------------------------
+// Two independent host switches, both living next to Arm/Play/Stop:
+//   advance -- when a song ends by itself, select the next entry and load it
+//   start   -- once that entry has loaded, arm and play it too
+// `start` is only consulted while `advance` is on; it is still remembered when
+// `advance` is off so toggling the pair back on restores the host's choice.
+export function normalizeAutoRunSettings(value) {
+  return {
+    advance: Boolean(value?.advance),
+    // Default on: this is what the old single "setlist mode" toggle did.
+    start: value?.start !== false
+  };
+}
+
+export function describeAutoRun(settings) {
+  if (!settings?.advance) {
+    return "Manual: load and start every song yourself.";
+  }
+
+  return settings.start
+    ? "At the end of a song: load the next one and start it."
+    : "At the end of a song: load the next one, then wait for Play.";
+}
+
 // Decide what the setlist auto-runner should do while a song is loading on the
 // adapters. Kept pure so the timing branches can be unit tested without a DOM.
 //   - "wait":    keep waiting (transport busy, adapter not ready, or still settling)
@@ -442,7 +466,8 @@ export const DEFAULT_HOST_HOTKEYS = Object.freeze([
   { action: "next-song", key: "n", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+N" },
   { action: "previous-song", key: "b", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+B" },
   { action: "open-current-song", key: "o", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+O" },
-  { action: "toggle-setlist-mode", key: "r", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+R" }
+  { action: "toggle-auto-advance", key: "r", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+R" },
+  { action: "toggle-auto-start", key: "t", ctrlKey: true, altKey: true, shiftKey: false, metaKey: false, label: "Ctrl+Alt+T" }
 ]);
 
 export function hostHotkeyActionForEvent(event) {

@@ -34,6 +34,8 @@ import {
   sanitizeHelixBpm,
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
+  normalizeAutoRunSettings,
+  describeAutoRun,
   summarizeClock
 } from "./host-logic.js";
 
@@ -506,6 +508,30 @@ describe("shouldAdvanceSetlistOnStop", () => {
     expect(shouldAdvanceSetlistOnStop({
       transport: { status: "stopped", stopReason: "auto-duration" }
     }, "scheduled")).toBe(false);
+  });
+});
+
+describe("normalizeAutoRunSettings", () => {
+  it("defaults to manual advancing with auto-start pre-armed", () => {
+    expect(normalizeAutoRunSettings(undefined)).toEqual({ advance: false, start: true });
+    expect(normalizeAutoRunSettings({})).toEqual({ advance: false, start: true });
+  });
+
+  it("keeps the two switches independent so auto-start survives an auto-load toggle", () => {
+    expect(normalizeAutoRunSettings({ advance: true, start: false })).toEqual({ advance: true, start: false });
+    expect(normalizeAutoRunSettings({ advance: false, start: false })).toEqual({ advance: false, start: false });
+  });
+
+  it("coerces junk from storage", () => {
+    expect(normalizeAutoRunSettings({ advance: "yes", start: 0 })).toEqual({ advance: true, start: true });
+  });
+});
+
+describe("describeAutoRun", () => {
+  it("describes each combination", () => {
+    expect(describeAutoRun({ advance: false, start: true })).toContain("Manual");
+    expect(describeAutoRun({ advance: true, start: true })).toContain("start it");
+    expect(describeAutoRun({ advance: true, start: false })).toContain("wait for Play");
   });
 });
 

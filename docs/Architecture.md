@@ -178,9 +178,9 @@ name locally and re-applies them on reconnect.
 Adapters may report `durationMs` in their `adapterStatus`. When a report matches the current song
 (by normalized source URL, or by exact normalized title after stripping a Songsterr "… Tab by …"
 suffix), the server records `durationSource: "adapter"` on the song and (re)arms the auto-stop
-timer. Setlist mode can also advance without a duration when adapter playback status naturally
-settles from playing to stopped. Manual room Stop still uses `stopReason: "manual"`, so the host
-knows to cancel the run instead of advancing.
+timer. The host's auto-load switch can also advance without a duration when adapter playback
+status naturally settles from playing to stopped. Manual room Stop still uses
+`stopReason: "manual"`, so the host knows not to advance.
 
 ## Safety & Permissions
 

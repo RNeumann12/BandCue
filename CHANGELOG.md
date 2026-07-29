@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Changed
+
+- Setlist mode is gone as a mode. It was a third place to start and stop playback — turning the
+  toggle on loaded, armed and played the current song, turning it off stopped the room, and a
+  manual Stop silently switched it back off — so it never sat still next to the Arm/Play/Stop the
+  host actually uses. Its behaviour is now two switches inside the host's transport panel, both
+  simply on or off and remembered across reloads:
+  - **Auto-load next song** (`Ctrl+Alt+R`): when a song ends by itself, make the next entry
+    current and ask every adapter to load it.
+  - **Auto-start it** (`Ctrl+Alt+T`): once that song has loaded, arm and play it too. Off, the
+    next song sits loaded and waiting for the host's Play — which is the split the old single
+    toggle could not express. Only meaningful for auto-loaded songs, so it greys out with
+    auto-load off.
+
+  Play and Stop keep their plain meaning: nothing is auto-started unless a song ended on its own,
+  a manual Stop never advances the list, and Stop pressed while the next song is still loading
+  calls off its auto-start.
+
 ### Fixed
 
 - MuseScore only sometimes jumped back to the start of the score before playing. The reset key
