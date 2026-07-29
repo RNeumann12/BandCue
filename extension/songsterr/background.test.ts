@@ -654,9 +654,22 @@ describe("songKey / instrumentFromUrl / applyInstrument helpers", () => {
     expect(context.songKey(SONG_A_TAB)).not.toBe(context.songKey(SONG_B_TAB));
   });
 
-  it("does not strip a 't<n>' that is not the track suffix", () => {
+  // Songsterr canonicalizes the slug from the song id: a request for
+  // ".../metallica-nothing-else-matters-tab-s437" lands on
+  // ".../limp-bizkit-rollin-air-raid-vehicle-tab-s437" (observed on the live
+  // site). Keying on the slug therefore called a member's own page a different
+  // song and re-routed the player at the downbeat.
+  it("identifies a song by its id, not its slug", () => {
     const { context } = loadBackground([]);
-    const url = "https://www.songsterr.com/a/wsa/test123-s100";
+    expect(context.songKey("https://www.songsterr.com/a/wsa/whatever-tab-s437"))
+      .toBe(context.songKey("https://www.songsterr.com/a/wsa/limp-bizkit-rollin-tab-s437"));
+    expect(context.songKey("https://www.songsterr.com/a/wsa/same-slug-tab-s100"))
+      .not.toBe(context.songKey("https://www.songsterr.com/a/wsa/same-slug-tab-s200"));
+  });
+
+  it("falls back to the path for a legacy URL carrying no song id", () => {
+    const { context } = loadBackground([]);
+    const url = "https://www.songsterr.com/a/wsa/test123-tab";
     expect(context.songKey(url)).toContain("test123");
   });
 

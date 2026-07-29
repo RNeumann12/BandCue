@@ -201,7 +201,13 @@ function loadContentScript({
   };
   const chrome = {
     runtime: {
-      onMessage: { addListener() {} },
+      // Kept so a test can drive the real handler the background talks to.
+      onMessage: {
+        listener: undefined as undefined | ((m: any, s: any, r: any) => unknown),
+        addListener(fn: (m: any, s: any, r: any) => unknown) {
+          chrome.runtime.onMessage.listener = fn;
+        }
+      },
       sendMessage(message: unknown) {
         messages.push(message);
       }
@@ -581,6 +587,66 @@ describe("Songsterr in-page song switching", () => {
 
     expect(result.ok).toBe(true);
     expect(keyEvents).not.toContain("popstate");
+  });
+
+  // The reported bug: a re-route fired at the downbeat on a page that was
+  // already showing the right song. Songsterr canonicalizes its address after
+  // loading -- it rewrites the whole slug from the song id and appends a track
+  // suffix -- so the setlist's URL and the player's own URL almost never match
+  // literally, and comparing them re-rendered the score just as playback should
+  // have started.
+  it("recognises the song it is already on after Songsterr rewrote the address", async () => {
+    const { context, keyEvents } = loadContentScript({ router: "spa" });
+    // What Songsterr left in the address bar: canonical slug, track suffix.
+    context.location = {
+      href: "https://www.songsterr.com/a/wsa/limp-bizkit-rollin-tab-s100t2",
+      origin: "https://www.songsterr.com",
+      pathname: "/a/wsa/limp-bizkit-rollin-tab-s100t2",
+      search: ""
+    };
+
+    // What the setlist still holds for the same song: the original slug.
+    const result = await context.navigateInPage(
+      "https://www.songsterr.com/a/wsa/song-a-tab-s100"
+    );
+
+    expect(result.ok).toBe(true);
+    expect(keyEvents).not.toContain("popstate");
+  });
+
+  // Guards the seam the background test cannot see: it fakes the content script,
+  // so it cannot catch the real one failing to echo the request id -- which
+  // silently killed the fallback answer channel and reloaded the tab instead.
+  it("echoes the request id on the answer the background matches on", async () => {
+    const { context, messages } = loadContentScript({ router: "spa" });
+    const listener = context.chrome.runtime.onMessage.listener;
+
+    await new Promise((resolve) => {
+      listener(
+        {
+          type: "bandcueNavigateInPage",
+          url: "https://www.songsterr.com/a/wsa/song-b-tab-s200",
+          requestId: 42
+        },
+        {},
+        resolve
+      );
+    });
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({ type: "bandcueNavigateResult", requestId: 42, ok: true })
+    );
+  });
+
+  it("still routes when the song id genuinely differs", async () => {
+    const { context, keyEvents } = loadContentScript({ router: "spa" });
+
+    const result = await context.navigateInPage(
+      "https://www.songsterr.com/a/wsa/song-a-tab-s999"
+    );
+
+    expect(result.ok).toBe(true);
+    expect(keyEvents).toContain("popstate");
   });
 
   it("refuses to route off Songsterr's own origin", async () => {

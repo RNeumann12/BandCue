@@ -641,6 +641,9 @@ function handleTransportCommand(message) {
   // band out of sync. This is the only place that navigates; the downbeat
   // (sendTransportToSongsterr) only locates the already-loaded tab.
   if (message.action === "play") {
+    // Cleared first so the play's status reports how *this* command reached the
+    // song rather than repeating whatever the last open did.
+    lastSongOpenMethod = "";
     ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
   }
   // Dispatch to the content script *ahead* of the downbeat: the tab query,
@@ -851,7 +854,7 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     sequenceId,
     status: final.ok ? "succeeded" : "failed",
     ready: lastStatus.ready || tabs.length > 0,
-    detail: [final.detail, timingDetail, leadDetail].filter(Boolean).join("; "),
+    detail: [final.detail, timingDetail, leadDetail, lastSongOpenMethod].filter(Boolean).join("; "),
     controlPath: final.controlPath,
     firedAtServerTime: final.ok && Number.isFinite(final.firedAtLocal)
       ? Math.round(final.firedAtLocal + (serverOffsetMs ?? 0))
@@ -1402,16 +1405,25 @@ function normalizePath(pathname) {
 function songKey(value) {
   try {
     const url = value instanceof URL ? value : new URL(value);
-    // Collapse the instrument slug ("-bass-tab"/"-drum-tab" -> "-tab") and strip
-    // the per-track "t<n>" suffix so every instrument of one song shares a key.
-    // The track query is ignored implicitly since we key on the path alone.
-    const path = normalizePath(url.pathname)
-      .replace(/-(?:bass|drum)-tab(-s\d+)/i, "-tab$1")
-      .replace(/(-s\d+)t\d+/i, "$1");
-    return path;
+    return songKeyFromPath(normalizePath(url.pathname));
   } catch {
     return "";
   }
+}
+
+// The "-s<id>" is the only stable part of a Songsterr address. Songsterr
+// canonicalizes the rest after loading: it rewrites the *whole* slug from the
+// song id -- a request for ".../metallica-nothing-else-matters-tab-s437" lands
+// on ".../limp-bizkit-rollin-air-raid-vehicle-tab-s437" -- and appends a
+// per-track "t<n>". Comparing slugs therefore reports "different song" for the
+// page a member is already on, which had BandCue re-route the player at the
+// downbeat. Keying on the id also gives instrument variants of one song a shared
+// key for free, which is the behaviour this has always wanted. Legacy URLs with
+// no song id fall back to the normalized path.
+// Keep in sync with songsterrSongKey() in content-script.js.
+function songKeyFromPath(path) {
+  const songId = path.match(/-s(\d+)(?:t\d+)?(?:\/|$)/)?.[1];
+  return songId ? `s${songId}` : path;
 }
 
 // The instrument category a Songsterr URL points at: "bass"/"drum" when the slug

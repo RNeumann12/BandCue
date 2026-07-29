@@ -106,7 +106,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       // the answer means falling back to the reload we are trying to avoid.
       // runtime.sendMessage is the channel status reports already use from
       // those devices; the background takes whichever arrives first.
-      sendRuntimeMessage({ type: "bandcueNavigateResult", ok: result.ok, detail: result.detail });
+      sendRuntimeMessage({
+        type: "bandcueNavigateResult",
+        // Echoed so the background can match this answer to the request it
+        // belongs to; without it the answer is dropped and the switch degrades
+        // to the reload this path exists to avoid.
+        requestId: message.requestId,
+        ok: result.ok,
+        detail: result.detail
+      });
       sendResponse(result);
     });
     return true;
@@ -907,8 +915,8 @@ async function navigateInPage(rawUrl) {
     return { ok: false, detail: "In-page navigation cannot leave the current origin" };
   }
 
-  if (target.pathname === location.pathname) {
-    return { ok: true, detail: "Already on this Songsterr page" };
+  if (songsterrSongKey(target.pathname) === songsterrSongKey(location.pathname)) {
+    return { ok: true, detail: "Already on this Songsterr song" };
   }
 
   const previousHref = location.href;
@@ -939,6 +947,21 @@ async function navigateInPage(rawUrl) {
   enforceSynthOnLoad();
   scheduleStatusReport(0);
   return { ok: true, detail: "Switched Songsterr song without reloading the page" };
+}
+
+/**
+ * Track-agnostic identity for a Songsterr song path. Songsterr canonicalizes its
+ * address after loading -- it rewrites the whole slug from the song id, and
+ * appends a per-track "t<n>" -- so the "-s<id>" is the only stable part. A raw
+ * pathname comparison therefore says "different song" about the page we are
+ * already on, and re-routing the player at the downbeat is exactly what this
+ * whole path exists to avoid.
+ * Keep in sync with songKeyFromPath() in background.js.
+ */
+function songsterrSongKey(pathname) {
+  const path = String(pathname || "").replace(/\/+$/, "").toLowerCase();
+  const songId = path.match(/-s(\d+)(?:t\d+)?(?:\/|$)/)?.[1];
+  return songId ? `s${songId}` : path;
 }
 
 /**

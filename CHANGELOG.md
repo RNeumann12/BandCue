@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.3.5 - 2026-07-29
+
+### Fixed
+
+- Songsterr is now identified by its song id rather than its URL slug. Songsterr canonicalizes the
+  address after loading — it rewrites the *whole* slug from the id (a request for
+  `.../metallica-nothing-else-matters-tab-s437` lands on
+  `.../limp-bizkit-rollin-air-raid-vehicle-tab-s437`) and appends a per-track `t<n>`. The setlist's
+  stored URL therefore almost never matches the player's own address literally, so BandCue decided
+  the member was on the wrong song and re-routed the player — re-rendering the whole score just as
+  playback should have started, which reads as a reload and leaves the song dead. The `-s<id>` is
+  the only stable part of a Songsterr address, and is what both sides now compare.
+- The content script now echoes the request id on its in-page navigation answer. 1.3.4 changed the
+  background to match answers by request id but did not update the sender, so every answer on that
+  channel was dropped and each switch fell back to a full reload after the timeout. The background
+  test fakes the content script and so could not see it; a content-script test now covers the seam.
+
 ## 1.3.4 - 2026-07-29
 
 ### Fixed
