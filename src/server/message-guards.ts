@@ -136,6 +136,16 @@ export function sanitizeClientMessage(value: unknown): ClientMessage | undefined
             cueAtServerTime: isFiniteNumber(value.cueAtServerTime) ? value.cueAtServerTime : undefined
           }
         : undefined;
+    case "externalCue":
+      // Without a usable cue instant there is nothing to anchor a count-in to,
+      // and relaying it would just be a play request in disguise.
+      return isFiniteNumber(value.cueAtServerTime)
+        ? {
+            type: "externalCue",
+            cueAtServerTime: value.cueAtServerTime,
+            source: typeof value.source === "string" ? value.source.slice(0, 120) : undefined
+          }
+        : undefined;
     default:
       return undefined;
   }

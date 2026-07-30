@@ -18,3 +18,6 @@ android/keystore.properties
 playwright-report/
 test-results/
 bandcue-setlist-*.json
+
+# Windows shortcuts users drop next to the launchers.
+*.lnk

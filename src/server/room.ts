@@ -8,6 +8,7 @@ import type {
   ClientMessage,
   CurrentSongState,
   CurrentSongUpdate,
+  ExternalCue,
   OpenSongCommand,
   OpenSongRequest,
   RoomClientSummary,
@@ -27,6 +28,7 @@ import type {
 import type { HelixScheduleInfo } from "../shared/transport.js";
 import {
   DEFAULT_SCHEDULE_DELAY_MS,
+  HELIX_MAX_CUE_AGE_MS,
   MANUAL_OFFSET_LIMIT_MS,
   MAX_SCHEDULE_DELAY_MS,
   clampHelixOffsetMs,
@@ -267,6 +269,48 @@ export class RoomController {
 
     if (message.type === "transportRequest") {
       this.handleTransportRequest(client, message, now);
+      return;
+    }
+
+    if (message.type === "externalCue") {
+      this.handleExternalCue(client, message, now);
+    }
+  }
+
+  /**
+   * Relays a pedal cue captured by an adapter to the hosts, which then make their
+   * own ordinary play request. The cue never starts playback by itself: who may
+   * start it is a room policy, and an adapter that claimed a hotkey has not
+   * acquired any authority it did not already have.
+   */
+  private handleExternalCue(client: RoomClientSummary, cue: ExternalCue, now: number): void {
+    // A stale stamp cannot anchor a count-in, and reclaiming that much elapsed
+    // time would start the room far too early. Mirrors HELIX_MAX_CUE_AGE_MS.
+    const ageMs = now - cue.cueAtServerTime;
+    if (!(ageMs >= 0) || ageMs > HELIX_MAX_CUE_AGE_MS) {
+      this.send(client, {
+        type: "error",
+        message: `External cue ignored: its timestamp is ${Math.round(ageMs)} ms old.`
+      });
+      return;
+    }
+
+    const hosts = [...this.clients.values()].filter((candidate) => candidate.role === "host");
+    if (hosts.length === 0) {
+      this.send(client, {
+        type: "error",
+        message: "External cue ignored: no host is connected to act on it."
+      });
+      return;
+    }
+
+    const relayed: ExternalCue = {
+      type: "externalCue",
+      cueAtServerTime: cue.cueAtServerTime,
+      source: cue.source ?? client.deviceName
+    };
+    for (const host of hosts) {
+      this.send(host, relayed);
     }
   }
 
@@ -554,6 +598,15 @@ export class RoomController {
     }
 
     this.lastHelixScheduleInfo = info;
+    // The Helix decision in one line, next to the per-device [timing] lines, so a
+    // room that lands off the backing track can be diagnosed from the coordinator
+    // log alone instead of from whatever the host page happened to be showing.
+    console.log(
+      `[helix] count-in ${info.countInMs} ms (${info.measureDurationMs} ms/measure)` +
+        `, cue travelled ${info.cueLatencyMs} ms, left ${info.requestedDelayMs} ms` +
+        `, room floor ${info.minimumDelayMs} ms -> scheduled ${info.appliedDelayMs} ms` +
+        (info.extendedMs > 0 ? ` (held ${info.extendedMs} ms past the Helix downbeat)` : " (on the downbeat)")
+    );
     return info.appliedDelayMs;
   }
 

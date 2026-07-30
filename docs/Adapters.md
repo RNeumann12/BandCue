@@ -209,6 +209,54 @@ npm run dev:musescore -- --score-folder "C:\Users\you\Documents\MuseScore4\Score
   Disable with `--close-old-instances 0`. Status polling and keystroke commands also prefer the
   **newest** MuseScore window, so a lingering old instance no longer receives play/stop keys.
 
+### MuseScore plugin (bridge) — the only way to reset the playhead
+
+Keystrokes cannot make MuseScore start from the top of a score, and this is a property of
+MuseScore rather than of how the keys are delivered:
+
+| Action | Shortcut | Why it doesn't reset playback |
+| --- | --- | --- |
+| `first-element` | `Ctrl+Home` | moves the cursor and the view; the **playback position** stays put |
+| `rewind` | unbound by default | does nothing at all while playback is stopped |
+| `play-from-selection` | `Shift+Space` | starts at the cursor — but only helps if the cursor is on a note, and `Ctrl+Home` lands on the score's first *element*, typically a title frame |
+
+The plugin at [`extension/musescore/bandcue.qml`](../extension/musescore/bandcue.qml) solves it from
+inside MuseScore, where the cursor API is available:
+
+```js
+var cursor = curScore.newCursor();
+cursor.rewind(0);                       // start of the score
+curScore.selection.select(cursor.element);  // the first real chord or rest
+cmd("play-from-selection");
+```
+
+That selects a **note**, not a frame, so playback starts at bar 1 every time.
+
+**Install.** Copy the folder into MuseScore's Plugins directory (Preferences → Folders shows the
+path; usually `%USERPROFILE%\Documents\MuseScore4\Plugins`), enable **BandCue Bridge** under
+Home → Plugins, and leave its window open while playing — `pluginType: "dialog"` is what keeps the
+plugin resident, since a plain plugin exits after `onRun` and could never wait for a cue.
+
+**Transport.** The plugin talks to the adapter's `--bridge-port` over a WebSocket on the same port
+as the HTTP API. MuseScore's plugin sandbox has no HTTP client, but it does expose
+`api.websocket.open(port, callback)` — note that it takes a *port*, not a URL, which is why the
+adapter accepts the upgrade on any path. Commands are **pushed** rather than polled, so no poll
+interval sits between the count-in and the plugin.
+
+| Direction | Message | Meaning |
+| --- | --- | --- |
+| → plugin | `hello` | `{ fallbackMs, currentSong }` on connect |
+| → plugin | `command` | `{ sequenceId, action, dueLocalAt, resetBeforePlay, currentSong }` |
+| → plugin | `song` | the current song changed |
+| → adapter | `claim` | stops the keyboard fallback from also firing |
+| → adapter | `result` | `{ sequenceId, status, playback, detail }` |
+| → adapter | `status` | `{ ready, title, playback }`; also the keep-alive, every 2 s |
+
+These route through the same handlers as the HTTP endpoints, so the two transports cannot drift
+apart. While a bridge is attached the adapter reports **`requiredLeadMs: 0`** — there is no window
+to foreground and no shell to launch — and if the plugin claims a command but reports no result
+within `--bridge-fallback-ms`, keyboard control still runs.
+
 ### MuseScore Bridge API
 
 When started with `--bridge-port` (e.g. `4731`), the helper exposes a small HTTP API on
@@ -249,16 +297,62 @@ commands too, completed through the same claim/result
 endpoints; if no helper handles `open-song`, the Windows helper opens the single matched local
 score itself.
 
-**Keeping the Play key's timing consistent.** Spawning `powershell.exe` and loading the
-`System.Windows.Forms`/`Microsoft.VisualBasic` assemblies it needs is the main source of the
-occasional near-1-second delay before Play fires — a cold DLL load or a busy scheduler can push
-that setup past the lead time, and the final Play key then fires immediately (late) instead of on
-the downbeat. Three things keep this in check:
+**Resident trigger (the normal path).** Spawning `powershell.exe` and loading the
+`System.Windows.Forms`/`Microsoft.VisualBasic` assemblies costs ~1.8 s, and doing that per command
+puts the cost inside the count-in — which a room synced to an external timeline cannot absorb
+(one 4/4 measure at 128 BPM is 1875 ms). The helper therefore keeps **one** PowerShell resident
+for the session ([`musescore-trigger.ts`](../src/adapters/musescore-trigger.ts)) and splits the
+work around the cue:
 
-- **Background priming.** Every ~45 s (and once at startup) the helper spawns a throwaway
-  PowerShell that only loads those assemblies and exits. Windows keeps recently used DLL pages in
-  its standby cache, so the real trigger spawn later in the same session usually loads them from
-  RAM instead of disk.
+| When | Work | Measured |
+| --- | --- | --- |
+| Adapter startup | Launch the shell, load the assemblies | 1.0–3.4 s, once |
+| Room **arms** (`resolve`) | Scan for the MuseScore window and cache it | 16–100 ms |
+| Lead time (`fire`) | Post the stop/reset prefix into MuseScore's queue | 248–436 ms of a 550 ms lead |
+| Downbeat | Post the Play key | 1–21 ms off the downbeat |
+
+Requests are newline-delimited JSON over the process's stdin/stdout, correlated by id. The lead
+this path asks of the room (`requiredLeadMs`) is therefore **550 ms**, not the ~2.3 s the
+shell-per-command path needs.
+
+**Keys are posted, not typed — and this is why.** `SendKeys` types into whatever window holds the
+keyboard focus, so using it means MuseScore must be foregrounded first. That turns out not to be
+something an adapter can rely on: Windows only permits `SetForegroundWindow` under narrow
+conditions — the caller is already the foreground process, *was started by* it, or received the
+last input event — and a helper launched from an unfocused console meets none of them. The
+activation is then refused outright, with no error beyond the window not changing.
+
+Worse, it is refused precisely when it matters. On a Helix rig the host page needs the keyboard
+focus to receive the cue, so MuseScore cannot have it, so activation fails, so every command falls
+back to the slow shell path and fires hundreds of milliseconds late.
+
+The resident trigger therefore delivers keystrokes with `PostMessage` straight into MuseScore's own
+message queue (`WM_KEYDOWN`/`WM_KEYUP`, modifiers posted around the key and released in reverse).
+Qt reads them from the queue like any other input, so **no foreground window is required at all** —
+verified against a real MuseScore 4 window while another application held the focus. Keys are
+translated from their SendKeys spelling by `parseSendKeysToken`, and if any key in a sequence cannot
+be expressed that way the whole sequence falls back to `SendKeys` rather than being half-posted.
+
+Because focus no longer matters, [`--cue-hotkey`](Configuration.md#external-cue-helix-and-other-pedals)
+is now optional rather than required — it remains useful when you want to *use* MuseScore's window
+yourself, or keep the host page on a phone, without the cue going missing.
+
+When a command does fall back, the adapter says so on its console and immediately reports the
+fallback's much larger `requiredLeadMs` to the room, so a degraded path can never quietly sit
+behind a count-in that was sized for the fast one.
+
+A trigger that exits, times out, or cannot take the window falls back to the shell-per-command
+path below, and the adapter immediately reports the higher `requiredLeadMs` so the room's count-in
+grows to match.
+
+**Keeping the fallback path's timing consistent.** When commands do fall back to a shell each, a
+cold DLL load or a busy scheduler can push the setup past the lead time, and the final Play key
+then fires immediately (late) instead of on the downbeat. Three things keep this in check:
+
+- **Background priming.** Every ~45 s the helper spawns a throwaway PowerShell that only loads
+  those assemblies and exits (skipped while the resident trigger is up, which holds them already).
+  Windows keeps recently used DLL pages in its standby cache, so the real trigger spawn later in
+  the same session usually loads them from RAM instead of disk.
 - **Self-adjusting lead time.** Each Play command reports how long its setup (spawn, activation,
   prefix keys) actually took. If it overran `--dispatch-lead-ms` and the key fired late, the helper
   grows its effective lead time (by the overrun plus a small cushion, capped at 4 s), logs a
@@ -278,11 +372,17 @@ the downbeat. Three things keep this in check:
   timer tick (`timeBeginPeriod(1)`) for the duration of the precise wait loop, so `Start-Sleep`
   tracks `dueLocalAt` more tightly than the default ~15.6 ms system tick allows.
 
-If Play keeps firing late even after the lead time grows toward the 4 s cap, the bottleneck is
-outside BandCue's control — most commonly antivirus real-time scanning of every new `powershell.exe`
-launch. Excluding `powershell.exe` (or the specific `System.Windows.Forms`/`Microsoft.VisualBasic`
-assemblies) from real-time scanning, or switching to bridge mode (which does not re-spawn a shell
-per command), removes that variable entirely.
+If Play keeps firing late even after the lead time grows toward the 4 s cap, the resident trigger
+is not being used and the bottleneck is outside BandCue's control — most commonly antivirus
+real-time scanning of every new `powershell.exe` launch. Excluding `powershell.exe` (or the
+specific `System.Windows.Forms`/`Microsoft.VisualBasic` assemblies) from real-time scanning, or
+switching to bridge mode (which does not re-spawn a shell per command), removes that variable
+entirely. A room whose count-in requirement sits in the seconds is always worth investigating
+rather than covering with extra count-in measures.
+
+**Several MuseScore windows open.** Both paths pick the *newest* window matching `--process-match`
+/ `--title-match`. Leaving old instances open makes the window scan slower and the choice
+ambiguous, so let `--close-old-instances` do its job (on by default) or close them yourself.
 
 For driving the host entirely from MuseScore while the band stays on Songsterr, see
 [Running the Host on MuseScore (Bridge Mode)](../README.md#running-the-host-on-musescore-bridge-mode).

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-07-30
 
 ### Changed
 
@@ -20,8 +20,93 @@
   a manual Stop never advances the list, and Stop pressed while the next song is still loading
   calls off its auto-start.
 
+### Changed
+
+- **The Windows MuseScore adapter no longer needs MuseScore in the foreground.** Keystrokes are
+  posted straight into its window's message queue (`WM_KEYDOWN`/`WM_KEYUP`) instead of typed into
+  whatever window has the keyboard focus. `SendKeys` had made a foreground MuseScore a hard
+  requirement, and that requirement could not be met: Windows only permits a foreground change when
+  the caller is already the foreground process, was started by it, or received the last input event,
+  and an adapter launched from an unfocused console meets none of them — the activation is simply
+  refused, silently. It failed exactly when it mattered, too, since on a Helix rig the host page
+  needs that same focus to receive the cue. Verified against a real MuseScore 4 window while another
+  application held the focus. Keys whose SendKeys spelling cannot be expressed as a single
+  keystroke keep the old path, per sequence rather than per key. The lead the adapter asks of the
+  room is now **550 ms**, and the Play key landed 1–21 ms off the downbeat.
+
+### Added
+
+- **A MuseScore Studio plugin** (`extension/musescore/bandcue.qml`) that runs BandCue's play/stop
+  from inside MuseScore, and with it the only reliable way to start a song from bar 1. Keystrokes
+  cannot do it, and that is MuseScore's own doing rather than a delivery problem: `Ctrl+Home`
+  (`first-element`) moves the cursor and the view but not the playback position, `rewind` does
+  nothing while playback is stopped and ships unbound anyway, and `play-from-selection` starts at
+  the cursor — which `Ctrl+Home` leaves on the score's first *element*, usually a title frame
+  rather than a note. So a reset looked like it almost worked: the score scrolled back to the top
+  while playback carried on from wherever it was last clicked. Inside a plugin the cursor API can
+  select the first real chord or rest (`cursor.rewind(0)` → `selection.select(cursor.element)`),
+  which is exactly what keystrokes could not express.
+
+  The plugin reaches the adapter's `--bridge-port` over a WebSocket on the same port as the HTTP
+  API, because MuseScore's plugin sandbox has no HTTP client but does expose
+  `api.websocket.open(port, callback)`. Commands are pushed rather than polled, so no poll interval
+  sits between the count-in and the downbeat, and `claim`/`result`/`status` route through the same
+  handlers as the HTTP endpoints so the two transports cannot drift apart. While the plugin is
+  attached the adapter asks the room for **no extra count-in at all** (`requiredLeadMs: 0`): there
+  is no window to foreground and no shell to launch. If it claims a command and then reports
+  nothing within `--bridge-fallback-ms`, keyboard control still runs.
+- **`--cue-hotkey` on the Windows MuseScore adapter**, which claims the cue combination (e.g.
+  `ctrl+alt+p`) system-wide and turns it into a Play request stamped with the instant Windows
+  generated the input. It exists to resolve a standoff that had no solution inside BandCue: the
+  host page can only see a pedal's keystroke while the browser holds the keyboard focus, and
+  MuseScore can only be driven by keystrokes while *it* holds the focus. On a machine doing both —
+  the normal Helix setup — one of them always lost, and a background adapter is usually refused
+  the foreground outright, so every Play fell back to the slow path and landed several hundred
+  milliseconds late. With the cue claimed system-wide, MuseScore keeps the foreground all night,
+  activation becomes a no-op, and the host page can live on a phone. Use it on one machine per
+  room; the room must still be armed. Also exposed as `-CueHotkey` on the adapter launcher and
+  `BANDCUE_CUE_HOTKEY`, and as a double-clickable
+  **`BandCue MuseScore Bridge - Helix Cue.cmd`** for the machine the pedal is plugged into.
+
+  A captured cue is sent as a new `externalCue` message, **not** as a play request: the coordinator
+  relays it to the host, which then makes its own ordinary Play. Who may start playback is a room
+  policy — in host-only mode nobody but the host may — and owning a hotkey must not promote an
+  adapter into an authority it did not have. So the pedal behaves exactly like the host pressing
+  its own Play hotkey, host-only keeps meaning what it says, and a cue with a stamp in the future,
+  older than 3 s, or with no host connected is refused with a reason.
+
 ### Fixed
 
+- The MuseScore adapter could report that it needed only a few hundred milliseconds of count-in
+  while every command was in fact falling back to the slow shell-per-command path, which needs
+  seconds. The room sized its count-in for the fast path, the fallback could not make it, and
+  starts landed late with nothing in the logs to say why. A fallback now says so on the console
+  and immediately reports the lead time it really needs.
+- A Helix-synced room started about a beat behind the backing track, and no count-in or offset
+  setting would move it. The Windows MuseScore adapter did all of its work *inside* the count-in —
+  launch `powershell.exe`, load the SendKeys/AppActivate assemblies, scan every process, foreground
+  the window, send the reset key — which measured ~2.3 s on a real machine. It asked the room for
+  that much lead time, the coordinator raised the floor under every start to match, and since one
+  4/4 measure at 128 BPM is only 1875 ms, every Helix start was held ~1.1 s past the Helix's
+  downbeat. Because the floor swallowed the whole count-in, the global Helix offset and the
+  count-in measures had no effect at all — the symptom that made this look like a scheduling bug
+  rather than a slow adapter. (Before the adapter had grown its lead, the room *was* scheduled on
+  the downbeat and MuseScore simply fired 1162 ms late instead; the lateness moved, it never left.)
+
+  The adapter now keeps one PowerShell resident for the session and moves everything it can off
+  the count-in:
+  - the shell launch and assembly load (~1.8 s together) happen once, at adapter startup;
+  - the MuseScore window is looked up when the room **arms**, without touching the foreground —
+    the cue is a keystroke, so taking focus early would send it into MuseScore instead of the
+    host page and no Play would ever be requested;
+  - the count-in only has to cover taking the window and sending the reset.
+
+  Measured on a real window: startup 1.0 s (once), arm-time lookup ~16 ms, and setup using
+  248–294 ms of its lead with the Play key landing on the downbeat. The lead the adapter asks of
+  the room drops from 2298 ms to 600 ms, so a single count-in measure now clears the floor and the
+  Helix offset does what it says again. A trigger that dies, times out, or cannot take the window
+  falls back to the old shell-per-command path, and the room hears the higher lead requirement
+  immediately.
 - Helix-triggered starts landed a Wi-Fi hop late, every time. The Helix's count-in was timed from
   the moment its Play request reached the coordinator, so everything the cue spent on its way there
   — input handling on the host page, the browser's event loop, the LAN hop, the coordinator's own

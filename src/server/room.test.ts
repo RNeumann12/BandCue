@@ -1457,6 +1457,122 @@ describe("RoomController", () => {
   });
 });
 
+describe("RoomController external cue", () => {
+  function roomWithHostAndAdapter() {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const hostMessages: string[] = [];
+    const adapterMessages: string[] = [];
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    const adapter = room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "MuseScore laptop",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+    return { room, host, adapter, hostMessages, adapterMessages };
+  }
+
+  function parsed(messages: string[], type: string) {
+    return messages
+      .map((message) => JSON.parse(message) as { type: string })
+      .filter((message) => message.type === type);
+  }
+
+  it("relays a cue to the host instead of starting playback itself", () => {
+    const { room, adapter, hostMessages } = roomWithHostAndAdapter();
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      cueAtServerTime: 1950
+    }, 2000);
+
+    // The room must not start on the adapter's word: who may start playback is a
+    // room policy, and a pedal press grants no new authority.
+    expect(room.getState(2000).transport.status).toBe("stopped");
+    expect(parsed(hostMessages, "externalCue")).toEqual([
+      { type: "externalCue", cueAtServerTime: 1950, source: "MuseScore laptop" }
+    ]);
+  });
+
+  it("keeps the adapter's own label when it supplies one", () => {
+    const { room, adapter, hostMessages } = roomWithHostAndAdapter();
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      cueAtServerTime: 1950,
+      source: "ctrl+alt+p on MASTASURFACE"
+    }, 2000);
+
+    expect(parsed(hostMessages, "externalCue")[0]).toMatchObject({
+      source: "ctrl+alt+p on MASTASURFACE"
+    });
+  });
+
+  it("rejects a stale cue rather than starting the room far too early", () => {
+    const { room, adapter, hostMessages, adapterMessages } = roomWithHostAndAdapter();
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      cueAtServerTime: 1000
+    }, 9000);
+
+    expect(parsed(hostMessages, "externalCue")).toEqual([]);
+    expect(parsed(adapterMessages, "error")).toHaveLength(1);
+  });
+
+  it("rejects a cue stamped in the future", () => {
+    const { room, adapter, hostMessages } = roomWithHostAndAdapter();
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      cueAtServerTime: 5000
+    }, 2000);
+
+    expect(parsed(hostMessages, "externalCue")).toEqual([]);
+  });
+
+  it("tells the adapter when no host is there to act on the cue", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const adapterMessages: string[] = [];
+    const adapter = room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "MuseScore laptop",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      cueAtServerTime: 1950
+    }, 2000);
+
+    expect(parsed(adapterMessages, "error")).toHaveLength(1);
+  });
+
+  it("still relays in host-only mode, because the host is the one who acts", () => {
+    const { room, host, adapter, hostMessages } = roomWithHostAndAdapter();
+    room.handleMessage(host.id, {
+      type: "safetyUpdate",
+      controlMode: "host-only",
+      updatedAt: 1100
+    }, 1100);
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      cueAtServerTime: 1950
+    }, 2000);
+
+    // The whole point of relaying: an adapter's own transportRequest would be
+    // refused here, so a pedal would be dead in host-only mode.
+    expect(parsed(hostMessages, "externalCue")).toHaveLength(1);
+  });
+});
+
 function fakeSocket(messages: string[]): WebSocket {
   return {
     OPEN: 1,

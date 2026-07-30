@@ -152,6 +152,25 @@ export interface TransportRequest {
   cueAtServerTime?: number;
 }
 
+/**
+ * An external cue (a pedal sending BandCue's Play shortcut) captured by an
+ * adapter that claimed the combination system-wide, rather than by the host page.
+ *
+ * It is deliberately *not* a `transportRequest`. Who may start playback is a room
+ * policy -- in host-only mode nobody but the host may -- and a cue is a pedal
+ * press, not a new authority. The coordinator relays this to the host, which then
+ * makes its own ordinary play request carrying `cueAtServerTime`, so the pedal
+ * behaves exactly like the host's own Play hotkey and every safety rule still
+ * applies unchanged.
+ */
+export interface ExternalCue {
+  type: "externalCue";
+  /** Room time of the cue itself, for anchoring the count-in to the pedal's beat. */
+  cueAtServerTime: number;
+  /** Human-readable origin for host status text, e.g. "Ctrl+Alt+P on MASTASURFACE". */
+  source?: string;
+}
+
 export interface OpenSongRequest {
   type: "openSongRequest";
   requestedAt: number;
@@ -331,7 +350,8 @@ export type ClientMessage =
   | SetlistUpdate
   | SafetyUpdate
   | OpenSongRequest
-  | TransportRequest;
+  | TransportRequest
+  | ExternalCue;
 
 export type ServerMessage =
   | ServerHello
@@ -340,4 +360,5 @@ export type ServerMessage =
   | OpenSongCommand
   | RoomState
   | ErrorMessage
-  | HelixScheduleUpdate;
+  | HelixScheduleUpdate
+  | ExternalCue;

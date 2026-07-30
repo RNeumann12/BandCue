@@ -264,6 +264,23 @@ positive starts later; the combined Helix range is ±60 seconds. This is separat
 **Timing** panel's per-device manual offset, which still fixes one specific adapter that
 consistently fires early or late.
 
+**Where the cue is received.** The Helix's keystroke reaches BandCue through the **host page**, so
+that page's window needs the keyboard focus. MuseScore does *not* compete for it — the Windows
+adapter posts keys straight into MuseScore's window and never needs it in front — so leaving the
+host page focused is enough.
+
+If you would rather use MuseScore's window yourself during a song, or keep the host page on a
+phone, start that machine's adapter with **`BandCue MuseScore Bridge - Helix Cue.cmd`** instead of
+the plain Connect launcher. It claims `Ctrl+Alt+P` system-wide, so the cue arrives whatever has
+focus. Use it on exactly one machine per room — it prints `Listening for the Ctrl+Alt+P cue
+system-wide` when it has the hotkey, and says so plainly if another application already owns it. A
+cue captured this way is relayed to the host, which still issues the Play, so `host-only` control
+mode keeps working unchanged.
+
+To pick a different combination, or to run it by hand, the underlying flag is `--cue-hotkey`
+(`-CueHotkey` on the launcher script) — see
+[Configuration.md](docs/Configuration.md#external-cue-helix-and-other-pedals).
+
 The count-in is measured **from the Helix's cue**, not from when the keystroke finished reaching
 the coordinator. The host page stamps the keystroke the moment the browser creates it, converts it
 to room time with its measured clock offset, and the coordinator deducts that travel time from the
@@ -273,11 +290,15 @@ that path no longer shows up as room-vs-Helix drift.
 **How much count-in BandCue needs.** Only what the connected devices need to prepare, which the
 Helix panel shows live for the current song ("Count-in 1 x 2000 ms = 2000 ms; this room needs
 1400 ms — 600 ms spare"). As a rule of thumb: about **1.4 s** with the Songsterr extension or the
-Android app, and about **2 s** with the Windows MuseScore adapter (up to ~5 s if that adapter has
-had to grow its own lead). At 120 BPM in 4/4 a single count-in measure is 2000 ms, so one extra
-measure covers a Songsterr/Android room with room to spare; add a second measure for a
-MuseScore-driven song or anything above ~170 BPM. If the panel says the count-in is short, it also
-says how many measures would cover it.
+Android app, and about **1.6 s** with the Windows MuseScore adapter, which keeps a control process
+resident instead of launching one inside every count-in. At 120 BPM in 4/4 a single count-in
+measure is 2000 ms, so one measure covers any of them. If the panel says the count-in is short, it
+also says how many measures would cover it.
+
+If a room ever *does* need much more than that, read it as a warning rather than something to
+absorb with extra measures: it means an adapter is falling back to launching a shell per command
+(see [Adapters.md](docs/Adapters.md#musescore-on-windows)), and the count-in is paying for a
+process launch every time you press play.
 
 The Helix sends its cue once, at measure 1 beat 1, and keeps running its own timeline regardless
 of what BandCue does next — it is not waiting for BandCue to catch up. So if the count-in (or a
