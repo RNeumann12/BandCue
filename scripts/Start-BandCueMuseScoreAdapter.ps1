@@ -5,7 +5,11 @@ param(
   # (or any other pedal sending keystrokes) is plugged into. Without it the cue
   # only arrives while the host page has keyboard focus -- which MuseScore needs
   # for itself. Use on exactly one machine per room.
-  [string]$CueHotkey
+  [string]$CueHotkey,
+  # Opens the localhost bridge on this port so the BandCue MuseScore plugin can
+  # attach. Without it the plugin has nothing to connect to, and playback falls
+  # back to keystrokes -- which cannot reset the playhead to the start of a score.
+  [int]$BridgePort
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +70,9 @@ if ($Room) {
 if ($CueHotkey) {
   $npmArgs += @("--cue-hotkey", $CueHotkey)
 }
+if ($BridgePort -gt 0) {
+  $npmArgs += @("--bridge-port", "$BridgePort")
+}
 
 Write-Host ""
 if ($Room) {
@@ -76,6 +83,9 @@ if ($Room) {
 }
 if ($CueHotkey) {
   Write-Host "Claiming '$CueHotkey' system-wide as this room's cue, so it reaches BandCue whatever window has focus." -ForegroundColor Cyan
+}
+if ($BridgePort -gt 0) {
+  Write-Host "Bridge open on 127.0.0.1:$BridgePort - enable the 'BandCue Bridge' plugin in MuseScore and leave its window open." -ForegroundColor Cyan
 }
 Write-Host "This gives the BandCue room full control of MuseScore on this machine. Keep this window open during rehearsal. Press Ctrl+C to stop." -ForegroundColor Cyan
 Write-Host ""
