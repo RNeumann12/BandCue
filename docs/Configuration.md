@@ -32,6 +32,8 @@ Windows public-beta launchers:
 | --- | --- |
 | `BandCue Host.cmd` | Checks Node/deps, runs preflight, starts `npm run dev`, and opens the host URL. |
 | `BandCue Host - MuseScore Bridge.cmd` | Same startup flow, but starts `npm run dev:all:bridge`. |
+| `BandCue MuseScore Bridge - Connect.cmd` | Joins a room as this machine's MuseScore adapter. Extra arguments pass through to [`Start-BandCueMuseScoreAdapter.ps1`](../scripts/Start-BandCueMuseScoreAdapter.ps1) (`-Room`, `-Name`, `-CueHotkey`). |
+| `BandCue MuseScore Bridge - Helix Cue.cmd` | The same, plus `-CueHotkey "ctrl+alt+p"` — for the one machine the Helix is plugged into. See [External cue](#external-cue-helix-and-other-pedals). |
 
 ## Coordinator (`npm run dev`)
 
@@ -95,7 +97,20 @@ Parsed by `parseArgs` in [`musescore-windows.ts`](../src/adapters/musescore-wind
 | `--activation-retries <n>` | **5** | Retries to bring the MuseScore window to the foreground. |
 | `--activation-delay-ms <n>` | **90** | Delay between activation retries. |
 | `--command-gap-ms <n>` | **120** | Gap between chained keystrokes. |
-| `--dispatch-lead-ms <n>` | **1000** | Start Windows activation/reset this far before scheduled Play; the final Play key still waits for the downbeat. Use `0` to disable. This is only the starting value: if setup (spawn + activate + prefix keys) ever overruns it and the Play key fires late, the helper grows its effective lead time for the rest of the session (capped at 4000 ms) and logs a warning — see [Adapters.md](Adapters.md#musescore-on-windows). |
+| `--dispatch-lead-ms <n>` | **1000** | Lead time for the *fallback* path only (one shell per command), used when the resident trigger cannot run a command. The final Play key still waits for the downbeat. Use `0` to disable. This is only the starting value: if setup (spawn + activate + prefix keys) ever overruns it and the Play key fires late, the helper grows its effective lead time for the rest of the session (capped at 4000 ms) and logs a warning — see [Adapters.md](Adapters.md#musescore-on-windows). The resident trigger's own lead starts at **600 ms** and is capped at 1000 ms. |
+
+### External cue (Helix and other pedals)
+
+| Flag / Env var | Default | Purpose |
+| --- | --- | --- |
+| `--cue-hotkey <combo>` / `BANDCUE_CUE_HOTKEY` | unset (off) | Claim this combination system-wide on this machine and turn it into a Play request stamped with the instant the input happened, e.g. `ctrl+alt+p`. Needs at least one modifier (`ctrl`/`alt`/`shift`/`win`) plus a letter, digit, or `f1`–`f24`. |
+
+Use this on the one machine the pedal is plugged into. Without it, the cue only reaches BandCue
+while the **host page** holds the keyboard focus — and on a machine that also drives MuseScore,
+that is the same focus MuseScore needs to receive its keystrokes, so one of the two always loses.
+Registering the cue system-wide lets MuseScore keep the foreground all night while the cue still
+arrives. The room must still be armed; the coordinator rejects the Play otherwise, and rejects it
+from an adapter entirely when the control mode is host-only.
 
 ### Bridge mode
 

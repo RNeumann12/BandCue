@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { MuseScoreTrigger } from "./musescore-trigger.js";
+import { CueHotkeyListener, parseCueHotkey } from "./windows-cue-hotkey.js";
 import {
   createServer,
   type IncomingMessage,
@@ -7,7 +9,7 @@ import {
 } from "node:http";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import {
   matchMuseScoreSong,
   matchedCatalogEntry,
@@ -62,6 +64,7 @@ interface Args {
   discoveryPort: number;
   name: string;
   playKey: string;
+  playFromSelectionKey: string;
   resetKey: string;
   stopKey: string;
   playMode: "single-key" | "stop-then-play";
@@ -76,6 +79,7 @@ interface Args {
   scoreFolders: string[];
   scoreCatalogRecursive: boolean;
   closeOldInstances: boolean;
+  cueHotkey?: string;
 }
 
 // How long to wait for the freshly opened score's window before giving up on
@@ -107,7 +111,23 @@ const MAX_DISPATCH_LEAD_MS = 4000;
 // standby cache, so a real trigger spawn later in the same session tends to
 // load them from RAM instead of disk — the single biggest source of
 // inconsistent (sometimes ~1s) startup latency observed for the Play command.
+// Only needed while the resident trigger is down and commands fall back to a
+// shell per command; a running trigger has the assemblies loaded already.
 const ASSEMBLY_PRIME_INTERVAL_MS = 45_000;
+// Count-in a Play needs when the resident trigger is standing by. The process
+// launch and assembly load are already paid, the window scan happens when the
+// room arms, and keys are posted straight to MuseScore's window rather than typed
+// into the foreground -- so this only has to cover the stdin handover (2–7 ms
+// measured) and the stop/reset pair at --command-gap-ms apart (~245 ms). The rest
+// is headroom for a busy machine -- the first command of a session measured
+// 436 ms while later ones settled at ~250 ms, so the margin is not spare.
+const WARM_TRIGGER_LEAD_MS = 550;
+// Ceiling for the warm path's self-correction. Well below MAX_DISPATCH_LEAD_MS:
+// if a warm trigger ever needs this much, something is wrong that more count-in
+// will not fix, and the room should not be dragged off an external timeline for it.
+const MAX_WARM_TRIGGER_LEAD_MS = 1000;
+// How long a resolved MuseScore window stays good before it is looked up again.
+const TRIGGER_RESOLVE_TTL_MS = 10 * 60_000;
 
 // Shared by every script that activates MuseScore and sends it keystrokes.
 // Declared once so the priming spawn (below) loads exactly what a real
@@ -196,19 +216,59 @@ let catalogTimer: NodeJS.Timeout | undefined;
 let statusReportInFlight = false;
 let statusReportQueued = false;
 let bridgeServer: HttpServer | undefined;
+let bridgeSocketServer: WebSocketServer | undefined;
+// Attached MuseScore plugins. Normally one; a set so a stale socket during a
+// plugin reload cannot displace the live one.
+const bridgeSockets = new Set<WebSocket>();
 const samples: ClockSample[] = [];
 // Self-adjusting copy of --dispatch-lead-ms: grows when a command's setup
 // (spawn + activate + prefix keys) overruns the lead time and fires the Play
 // key late, so a slow first attempt doesn't keep repeating every song.
 let adaptiveDispatchLeadMs = args.dispatchLeadMs;
 let assemblyPrimeTimer: NodeJS.Timeout | undefined;
+// Same idea as adaptiveDispatchLeadMs, for the resident-trigger path: grows when
+// the handover plus window check eats into the downbeat instead of preceding it.
+let adaptiveWarmLeadMs = WARM_TRIGGER_LEAD_MS;
+// When the trigger last looked up the MuseScore window. Cleared when the score
+// changes, so a Play never aims at a window that has been replaced.
+let triggerResolvedAt: number | undefined;
+// Set when a command had to fall back from the resident trigger to a one-shot
+// shell, so the room is told the lead time the fallback really needs. Cleared by
+// the next command the trigger handles itself.
+let warmPathDegraded = false;
+let lastArmed = false;
+let cueHotkeyListener: CueHotkeyListener | undefined;
+const trigger = new MuseScoreTrigger(
+  {
+    processMatch: args.processMatch,
+    titleMatch: args.titleMatch,
+    activationRetries: args.activationRetries,
+    activationDelayMs: args.activationDelayMs,
+    commandGapMs: args.commandGapMs
+  },
+  (detail) => {
+    triggerResolvedAt = undefined;
+    console.warn(`MuseScore trigger stopped (${detail}); falling back to a shell per command.`);
+    // Commands are about to start paying the full cold-start cost again, so the
+    // room needs to hear that its count-in requirement just went back up.
+    void reportMuseScoreStatus();
+  }
+);
 
 if (args.bridgePort !== undefined) {
   startBridge(args.bridgePort);
 }
 refreshScoreCatalog();
+// Start the resident trigger now so its shell launch and assembly load (~1.8 s
+// together) are spent while nothing is waiting, rather than inside a count-in.
+trigger.start();
+startCueHotkeyListener();
 primeSendKeysAssemblies();
-assemblyPrimeTimer = setInterval(primeSendKeysAssemblies, ASSEMBLY_PRIME_INTERVAL_MS);
+assemblyPrimeTimer = setInterval(() => {
+  if (!trigger.running) {
+    primeSendKeysAssemblies();
+  }
+}, ASSEMBLY_PRIME_INTERVAL_MS);
 void connect();
 
 async function connect(): Promise<void> {
@@ -298,7 +358,7 @@ async function connect(): Promise<void> {
         createdAt: Date.now()
       });
       const dispatchLeadMs = message.action === "play" && !hasActiveBridge()
-        ? Math.min(adaptiveDispatchLeadMs, delayMs)
+        ? Math.min(museScoreDispatchLeadMs(), delayMs)
         : 0;
       setTimeout(() => {
         void triggerMuseScoreTransport(
@@ -325,7 +385,20 @@ async function connect(): Promise<void> {
       const songChanged = message.currentSong?.updatedAt !== currentSongUpdatedAt;
       currentSong = message.currentSong?.song;
       currentSongUpdatedAt = message.currentSong?.updatedAt;
+      // Arming is the room saying "a Play is coming", and it is the last moment
+      // before the cue when nothing is waiting on a beat. Look the MuseScore
+      // window up now, so the count-in does not pay for the process scan. This
+      // deliberately stops short of activating it: the cue is a keystroke, and
+      // taking the foreground here would take the cue away from the host page.
+      const armed = Boolean(message.safety?.armed);
+      if (armed && !lastArmed) {
+        void resolveTriggerTarget();
+      }
+      lastArmed = armed;
       if (songChanged) {
+        // A different score means a different window to aim at.
+        triggerResolvedAt = undefined;
+        broadcastBridgeSocket({ type: "song", currentSong });
         void reportMuseScoreStatus();
       }
       return;
@@ -568,8 +641,11 @@ async function reportMuseScoreStatus(): Promise<void> {
         ? match.detail
         : mismatch ?? status.detail,
       // A bridge helper drives real playback state and isn't subject to the
-      // keyboard fallback's setup latency, so it needs no extra count-in.
-      requiredLeadMs: hasActiveBridge() ? 0 : adaptiveDispatchLeadMs
+      // keyboard fallback's setup latency, so it needs no extra count-in. The
+      // resident trigger does its setup before the cue, so it asks for barely
+      // more; only the shell-per-command fallback needs a count-in big enough to
+      // launch PowerShell and prepare an app inside it.
+      requiredLeadMs: hasActiveBridge() ? 0 : museScoreDispatchLeadMs()
     });
   } finally {
     statusReportInFlight = false;
@@ -579,6 +655,21 @@ async function reportMuseScoreStatus(): Promise<void> {
     }
   }
 }
+
+// The resident helpers outlive a plain parent kill on Windows, and a stranded
+// listener keeps owning the cue combination system-wide -- which would then fail
+// to register on the next run. Release both on the way out.
+for (const signal of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) {
+  process.on(signal, () => {
+    cueHotkeyListener?.stop();
+    trigger.stop();
+    process.exit(0);
+  });
+}
+process.on("exit", () => {
+  cueHotkeyListener?.stop();
+  trigger.stop();
+});
 
 function stopIntervals(): void {
   if (clockTimer) {
@@ -682,6 +773,28 @@ async function triggerMuseScoreTransport(
   }
 
   const keys = keysForAction(action, resetBeforePlay);
+  // Preferred path: a process that is already warm only has to take the window,
+  // send the reset, and wait out the remaining count-in. It reports failure
+  // rather than throwing, so anything unexpected drops straight through to the
+  // shell-per-command path below.
+  if (await triggerTransportWithWarmProcess(action, sequenceId, dueLocalAt, keys, resetBeforePlay)) {
+    return;
+  }
+
+  if (!warmPathDegraded && trigger.running) {
+    // Loud, because the cost is hidden otherwise: the fallback needs seconds of
+    // lead where the trigger needed hundreds of milliseconds, and a room that is
+    // not told about it will keep scheduling starts the fallback cannot make.
+    warmPathDegraded = true;
+    console.warn(
+      "MuseScore trigger could not run this command (usually because Windows would not let a "
+        + "background process take the foreground); falling back to a shell per command and asking "
+        + `the room for ${adaptiveDispatchLeadMs} ms of count-in. Give this machine's cue a global `
+        + "hotkey (--cue-hotkey) so MuseScore can keep the foreground."
+    );
+    void reportMuseScoreStatus();
+  }
+
   const script = `
 ${SENDKEYS_ASSEMBLY_PREAMBLE}
 try { (Get-Process -Id $PID).PriorityClass = 'High' } catch {}
@@ -789,6 +902,259 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       at: Date.now()
     });
   }
+}
+
+/**
+ * The lead a Play needs right now, given which control path will actually run
+ * it. A trigger that is *running* but keeps failing to take the window is worse
+ * than one that is down: every command silently falls back to a shell that needs
+ * seconds, while the room is told it needs milliseconds. So the reported figure
+ * follows the last command's real outcome, not merely whether the process is up.
+ */
+function museScoreDispatchLeadMs(): number {
+  return trigger.running && !warmPathDegraded ? adaptiveWarmLeadMs : adaptiveDispatchLeadMs;
+}
+
+/**
+ * Claims the external cue system-wide, on the machine the pedal is plugged into.
+ *
+ * Without this the cue only reaches BandCue while the host page holds the
+ * keyboard focus -- which is the same focus MuseScore needs to be driven by
+ * keystrokes, so one of the two always loses. With it, MuseScore can keep the
+ * foreground all night and the cue still arrives.
+ */
+function startCueHotkeyListener(): void {
+  if (!args.cueHotkey) {
+    return;
+  }
+
+  const hotkey = parseCueHotkey(args.cueHotkey);
+  if (!hotkey) {
+    console.error(
+      `--cue-hotkey "${args.cueHotkey}" is not a combination this adapter can register. `
+        + 'Use at least one modifier and one key, e.g. "ctrl+alt+p".'
+    );
+    return;
+  }
+
+  cueHotkeyListener = new CueHotkeyListener(hotkey, {
+    onReady: (registered) => {
+      console.log(
+        `Listening for the ${registered.label} cue system-wide; MuseScore can keep the foreground.`
+      );
+    },
+    onCue: (cueAtLocalMs, ageMs) => forwardCue(cueAtLocalMs, ageMs),
+    onError: (detail) => {
+      console.warn(
+        `Cue hotkey ${hotkey.label} unavailable (${detail}). Another application may already own `
+          + "it; the host page's own hotkey still works while its window has focus."
+      );
+    }
+  });
+  cueHotkeyListener.start();
+}
+
+/**
+ * Forwards a captured cue to the room, stamped with the instant Windows generated
+ * the input so the count-in can be anchored to the pedal's beat -- the same
+ * anchoring the host page does with the keydown's `event.timeStamp`.
+ *
+ * Sent as an `externalCue`, not a play request: the coordinator relays it to the
+ * host, which issues its own Play. Claiming a hotkey must not promote this
+ * adapter into an authority that may start playback -- host-only mode has to keep
+ * meaning what it says.
+ */
+function forwardCue(cueAtLocalMs: number, ageMs: number): void {
+  if (ws?.readyState !== WebSocket.OPEN) {
+    console.warn("Cue ignored: not connected to a BandCue room.");
+    return;
+  }
+
+  send({
+    type: "externalCue",
+    cueAtServerTime: Math.round(cueAtLocalMs + serverOffsetMs),
+    source: `${args.cueHotkey ?? "cue"} on ${args.name}`
+  });
+  console.log(`Cue forwarded to the host (input was ${ageMs} ms old when it reached the adapter).`);
+}
+
+/**
+ * Looks up the MuseScore window ahead of the cue, without disturbing the
+ * foreground. Runs when the room arms. Failures are left for the command path to
+ * retry or fall back on -- an arm is a hint that a Play is coming, not a command.
+ */
+async function resolveTriggerTarget(): Promise<boolean> {
+  if (hasActiveBridge() || !trigger.start()) {
+    return false;
+  }
+
+  // The window lookup. Play and stop are posted straight into MuseScore's message
+  // queue and need no foreground window at all.
+  const result = await trigger.resolve();
+  triggerResolvedAt = result.ok ? Date.now() : undefined;
+  if (!result.ok) {
+    console.warn(`MuseScore trigger could not ready the window while arming: ${result.error ?? "unknown"}`);
+    return false;
+  }
+
+  // The reset does need it, though. Ctrl+Home is matched as an application
+  // shortcut rather than handled as a plain key event, and Qt only matches
+  // shortcuts for the *active* window -- so a posted reset into a background
+  // MuseScore is accepted and ignored, and playback resumes wherever it was left.
+  // Bringing the window forward while the room merely arms is only safe once the
+  // cue is claimed system-wide, since otherwise this would take the cue away from
+  // the host page.
+  if (cueHotkeyListener && result.processId) {
+    await activateMuseScoreWindow(result.processId);
+  }
+  return true;
+}
+
+/**
+ * Brings MuseScore forward from a *newly spawned* process.
+ *
+ * This cannot be done from the resident trigger: Windows grants the right to
+ * change the foreground window only to a process that is already the foreground
+ * one, was started by it, or received the last input event, and a long-lived
+ * helper is none of those -- its AppActivate is simply refused. A fresh process
+ * still gets the grant, which is why the old shell-per-command path could
+ * activate at all. Best-effort: if it fails, playback still starts, just without
+ * the rewind.
+ */
+async function activateMuseScoreWindow(processId: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    // WScript.Shell over COM, so this pays no Add-Type compilation.
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-Command", `(New-Object -ComObject WScript.Shell).AppActivate(${processId})`],
+      { windowsHide: true }
+    );
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve();
+    }, 4000);
+    child.on("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+/**
+ * Runs a transport command through the resident trigger. Returns false when the
+ * trigger could not take it, so the caller falls back to a one-shot shell.
+ */
+async function triggerTransportWithWarmProcess(
+  action: TransportAction,
+  sequenceId: number,
+  dueLocalAt: number,
+  keys: string[],
+  resetBeforePlay: boolean
+): Promise<boolean> {
+  if (!trigger.start()) {
+    return false;
+  }
+
+  // Stop has no downbeat to hit -- send it and be done.
+  if (action === "stop") {
+    const stopped = await trigger.sendKeys(keys);
+    if (!stopped.ok) {
+      return false;
+    }
+    applyWarmTriggerSuccess(action, sequenceId, keys, false, stopped, undefined);
+    return true;
+  }
+
+  // A window looked up long ago may be gone; the trigger re-resolves on its own
+  // when that happens, this just keeps the common case off the critical path.
+  if (triggerResolvedAt !== undefined && Date.now() - triggerResolvedAt > TRIGGER_RESOLVE_TTL_MS) {
+    triggerResolvedAt = undefined;
+  }
+
+  const handedOverAt = Date.now();
+  const fired = await trigger.fire(keys.slice(0, -1), keys.at(-1) ?? "", dueLocalAt);
+  if (!fired.ok || !Number.isFinite(fired.firedAtLocal)) {
+    return false;
+  }
+
+  if (warmPathDegraded) {
+    warmPathDegraded = false;
+    console.log("MuseScore trigger is handling commands again; count-in requirement back to normal.");
+  }
+  const lateDetail = adjustWarmLeadForSetup(dueLocalAt, handedOverAt, fired.readyAtLocal);
+  applyWarmTriggerSuccess(action, sequenceId, keys, resetBeforePlay, fired, lateDetail);
+  return true;
+}
+
+function applyWarmTriggerSuccess(
+  action: TransportAction,
+  sequenceId: number,
+  keys: string[],
+  resetBeforePlay: boolean,
+  result: { firedAtLocal?: number; processId?: number; processName?: string; windowTitle?: string },
+  lateDetail: string | undefined
+): void {
+  inferredPlayback = action === "play" ? "playing" : "stopped";
+  lastMuseScoreStatus = {
+    ready: true,
+    title: result.windowTitle,
+    processId: result.processId,
+    processName: result.processName,
+    windowTitle: result.windowTitle
+  };
+  reportCommandStatus({
+    ready: true,
+    action,
+    sequenceId,
+    status: "succeeded",
+    detail: lateDetail ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, undefined),
+    controlPath: `windows-trigger:${action === "play" ? "warm-play" : "stop-key"}`,
+    firedAtServerTime: Number.isFinite(result.firedAtLocal)
+      ? Math.round((result.firedAtLocal ?? Date.now()) + serverOffsetMs)
+      : undefined,
+    at: Date.now()
+  });
+}
+
+/**
+ * The handover, activation, and prefix keys are meant to finish before the
+ * downbeat, leaving only the timed wait. When they don't, the key fires late --
+ * so ask the room for a little more lead next time, the same way the shell path
+ * does, but from a much smaller base and with a much lower ceiling.
+ */
+function adjustWarmLeadForSetup(
+  dueLocalAt: number,
+  handedOverAt: number,
+  readyAtLocal: number | undefined
+): string | undefined {
+  if (!Number.isFinite(readyAtLocal)) {
+    return undefined;
+  }
+
+  const marginMs = dueLocalAt - (readyAtLocal as number);
+  if (marginMs >= 0) {
+    return undefined;
+  }
+
+  const overrunMs = -marginMs;
+  const neededMs = (readyAtLocal as number) - handedOverAt;
+  const grownLeadMs = Math.min(
+    MAX_WARM_TRIGGER_LEAD_MS,
+    Math.max(adaptiveWarmLeadMs + overrunMs + DISPATCH_LEAD_OVERRUN_CUSHION_MS, neededMs)
+  );
+  const detail = `MuseScore Play fired late (the trigger needed ${Math.round(neededMs)} ms to take the window `
+    + `and send the reset, but had ${adaptiveWarmLeadMs} ms of lead); `
+    + (grownLeadMs > adaptiveWarmLeadMs
+      ? `increasing lead time to ${Math.round(grownLeadMs)} ms for the rest of this session`
+      : `lead time is already at its ${MAX_WARM_TRIGGER_LEAD_MS} ms cap`);
+  console.warn(detail);
+  adaptiveWarmLeadMs = Math.round(grownLeadMs);
+  void reportMuseScoreStatus();
+  return detail;
 }
 
 // Setup (spawn + activate + prefix keys) is meant to finish well before
@@ -998,7 +1364,15 @@ function keysForAction(action: TransportAction, resetBeforePlay = false): string
     const prefixKeys = args.playMode === "stop-then-play"
       ? [args.stopKey, args.resetKey]
       : [args.resetKey];
-    return [...prefixKeys, args.playKey];
+    // MuseScore keeps the playback position separate from the selection: the
+    // reset key (Ctrl+Home / `first-element`) moves the cursor and the view to the
+    // top of the score, but plain Play still resumes from wherever the playhead
+    // was last put -- which is why a reset looked like it "almost" worked, the
+    // score scrolling back while playback carried on from the last click. The
+    // action that starts at the cursor is `play-from-selection` (Shift+Space), so
+    // a reset-before-play uses that instead. MuseScore's own `rewind` action
+    // would also do it, but ships with no shortcut bound at all.
+    return [...prefixKeys, args.playFromSelectionKey || args.playKey];
   }
 
   if (args.playMode === "single-key") {
@@ -1152,22 +1526,7 @@ function startBridge(port: number): void {
 
     if (req.method === "POST" && url.pathname === "/status") {
       readJsonBody(req, res, (update) => {
-        bridgeLastSeenAt = Date.now();
-        bridgeStatus = {
-          ready: Boolean(update.ready ?? true),
-          title: typeof update.title === "string" ? update.title : bridgeStatus.title,
-          detail: typeof update.detail === "string" ? update.detail : "MuseScore bridge status reported",
-          windowTitle: typeof update.windowTitle === "string"
-            ? update.windowTitle
-            : typeof update.title === "string"
-              ? update.title
-              : bridgeStatus.windowTitle,
-          playback: parsePlayback(update.playback) ?? bridgeStatus.playback
-        };
-        if (bridgeStatus.playback) {
-          inferredPlayback = bridgeStatus.playback;
-        }
-        void reportMuseScoreStatus();
+        applyBridgeStatus(update);
         res.writeHead(204);
         res.end();
       });
@@ -1193,7 +1552,12 @@ function startBridge(port: number): void {
     const address = bridgeServer?.address();
     const actualPort = typeof address === "object" && address ? address.port : port;
     console.log(`MuseScore bridge listening on http://127.0.0.1:${actualPort}`);
+    console.log(`MuseScore plugin socket on ws://127.0.0.1:${actualPort} (same port)`);
   });
+
+  if (bridgeServer) {
+    attachBridgeSocket(bridgeServer);
+  }
 }
 
 function hasActiveBridge(now = Date.now()): boolean {
@@ -1207,6 +1571,19 @@ function queueBridgeCommand(command: BridgeCommand): boolean {
 
   cleanupBridgeCommands();
   bridgeCommands.set(command.sequenceId, command);
+  // Pushed as well as queued. An HTTP poller only learns about a command on its
+  // next tick, which puts its whole poll interval between the count-in and the
+  // plugin -- a downbeat cannot afford that. Sockets that are attached get it now
+  // and do their own waiting against dueLocalAt.
+  broadcastBridgeSocket({
+    type: "command",
+    sequenceId: command.sequenceId,
+    action: command.action,
+    dueLocalAt: command.dueLocalAt,
+    scheduledServerTime: command.scheduledServerTime,
+    resetBeforePlay: Boolean(command.resetBeforePlay),
+    currentSong: command.currentSong
+  });
   reportCommandStatus({
     ready: true,
     action: command.action,
@@ -1221,28 +1598,166 @@ function queueBridgeCommand(command: BridgeCommand): boolean {
   return true;
 }
 
-function handleBridgeClaim(
-  sequenceId: number,
-  body: Record<string, unknown>,
-  res: ServerResponse
-): void {
-  bridgeLastSeenAt = Date.now();
-  const command = bridgeCommands.get(sequenceId);
-  if (!command) {
-    writeJson(res, 404, { ok: false, error: "Unknown command sequenceId" });
+/**
+ * The WebSocket half of the bridge, on the same `--bridge-port` as the HTTP API.
+ *
+ * MuseScore's plugin sandbox has no HTTP client, but it does expose a WebSocket
+ * client (`api.websocket.open`), so this is what a plugin can actually reach.
+ * Pushing commands also removes a poll interval from the critical path.
+ *
+ * Messages in: `claim`, `result`, `status` -- the same three operations as the
+ * HTTP endpoints, routed through the same handlers so the two transports cannot
+ * drift apart. Messages out: `hello`, `command`, `song`.
+ */
+function attachBridgeSocket(server: HttpServer): void {
+  // No `path` restriction: MuseScore's client API is `api.websocket.open(port, cb)`
+  // -- it takes a port, not a URL, so the plugin cannot choose a path. Sharing the
+  // port with the HTTP API is safe because only upgrade requests land here.
+  bridgeSocketServer = new WebSocketServer({ server });
+  bridgeSocketServer.on("connection", (socket) => {
+    bridgeSockets.add(socket);
+    bridgeLastSeenAt = Date.now();
+    console.log("MuseScore bridge plugin connected.");
+    void reportMuseScoreStatus();
+
+    sendBridgeSocket(socket, {
+      type: "hello",
+      fallbackMs: args.bridgeFallbackMs,
+      currentSong
+    });
+
+    socket.on("message", (raw) => {
+      bridgeLastSeenAt = Date.now();
+      let message: Record<string, unknown> | undefined;
+      try {
+        message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (!message || typeof message.type !== "string") {
+        return;
+      }
+      handleBridgeSocketMessage(message);
+    });
+
+    socket.on("close", () => {
+      bridgeSockets.delete(socket);
+      console.log("MuseScore bridge plugin disconnected; commands fall back to keyboard control.");
+      void reportMuseScoreStatus();
+    });
+    socket.on("error", () => bridgeSockets.delete(socket));
+  });
+}
+
+function handleBridgeSocketMessage(message: Record<string, unknown>): void {
+  const sequenceId = typeof message.sequenceId === "number" ? message.sequenceId : undefined;
+
+  if (message.type === "claim" && sequenceId !== undefined) {
+    applyBridgeClaim(sequenceId, message);
     return;
   }
 
-  if (command.status !== "queued" && command.status !== "claimed") {
-    writeJson(res, 409, { ok: false, error: `Command is already ${command.status}` });
+  if (message.type === "result" && sequenceId !== undefined) {
+    applyBridgeResult(sequenceId, message);
     return;
+  }
+
+  if (message.type === "status") {
+    applyBridgeStatus(message);
+  }
+}
+
+function sendBridgeSocket(socket: WebSocket, message: unknown): void {
+  if (socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(message));
+  }
+}
+
+function broadcastBridgeSocket(message: unknown): void {
+  for (const socket of bridgeSockets) {
+    sendBridgeSocket(socket, message);
+  }
+}
+
+/** Shared by both bridge transports; `undefined` means accepted. */
+interface BridgeRejection {
+  code: number;
+  error: string;
+}
+
+function applyBridgeClaim(
+  sequenceId: number,
+  body: Record<string, unknown>
+): BridgeRejection | undefined {
+  bridgeLastSeenAt = Date.now();
+  const command = bridgeCommands.get(sequenceId);
+  if (!command) {
+    return { code: 404, error: "Unknown command sequenceId" };
+  }
+
+  if (command.status !== "queued" && command.status !== "claimed") {
+    return { code: 409, error: `Command is already ${command.status}` };
   }
 
   command.status = "claimed";
   command.claimedAt = Date.now();
   command.controlPath = typeof body.controlPath === "string" ? body.controlPath : "musescore-bridge";
   command.detail = typeof body.detail === "string" ? trimSingleLine(body.detail) : "MuseScore bridge claimed the command";
-  writeJson(res, 200, { ok: true, command });
+  return undefined;
+}
+
+function handleBridgeClaim(
+  sequenceId: number,
+  body: Record<string, unknown>,
+  res: ServerResponse
+): void {
+  const rejection = applyBridgeClaim(sequenceId, body);
+  if (rejection) {
+    writeJson(res, rejection.code, { ok: false, error: rejection.error });
+    return;
+  }
+  writeJson(res, 200, { ok: true, command: bridgeCommands.get(sequenceId) });
+}
+
+function applyBridgeStatus(update: Record<string, unknown>): void {
+  bridgeLastSeenAt = Date.now();
+  bridgeStatus = {
+    ready: Boolean(update.ready ?? true),
+    title: typeof update.title === "string" ? update.title : bridgeStatus.title,
+    detail: typeof update.detail === "string" ? update.detail : "MuseScore bridge status reported",
+    windowTitle: typeof update.windowTitle === "string"
+      ? update.windowTitle
+      : typeof update.title === "string"
+        ? update.title
+        : bridgeStatus.windowTitle,
+    playback: parsePlayback(update.playback) ?? bridgeStatus.playback
+  };
+  if (bridgeStatus.playback) {
+    inferredPlayback = bridgeStatus.playback;
+  }
+  void reportMuseScoreStatus();
+}
+
+function applyBridgeResult(
+  sequenceId: number,
+  body: Record<string, unknown>
+): BridgeRejection | undefined {
+  bridgeLastSeenAt = Date.now();
+  const command = bridgeCommands.get(sequenceId);
+  if (!command) {
+    return { code: 404, error: "Unknown command sequenceId" };
+  }
+
+  if (command.status === "expired") {
+    return { code: 409, error: "Command already fell back to Windows keyboard control" };
+  }
+
+  if (command.status === "succeeded" || command.status === "failed") {
+    return { code: 409, error: `Command is already ${command.status}` };
+  }
+
+  applyBridgeResultBody(command, body);
+  return undefined;
 }
 
 function handleBridgeResult(
@@ -1250,23 +1765,15 @@ function handleBridgeResult(
   body: Record<string, unknown>,
   res: ServerResponse
 ): void {
-  bridgeLastSeenAt = Date.now();
-  const command = bridgeCommands.get(sequenceId);
-  if (!command) {
-    writeJson(res, 404, { ok: false, error: "Unknown command sequenceId" });
+  const rejection = applyBridgeResult(sequenceId, body);
+  if (rejection) {
+    writeJson(res, rejection.code, { ok: false, error: rejection.error });
     return;
   }
+  writeJson(res, 200, { ok: true, command: bridgeCommands.get(sequenceId) });
+}
 
-  if (command.status === "expired") {
-    writeJson(res, 409, { ok: false, error: "Command already fell back to Windows keyboard control" });
-    return;
-  }
-
-  if (command.status === "succeeded" || command.status === "failed") {
-    writeJson(res, 409, { ok: false, error: `Command is already ${command.status}` });
-    return;
-  }
-
+function applyBridgeResultBody(command: BridgeCommand, body: Record<string, unknown>): void {
   const status = body.status === "failed" ? "failed" : "succeeded";
   command.status = status;
   command.completedAt = Date.now();
@@ -1288,8 +1795,6 @@ function handleBridgeResult(
     bridgeStatus.playback = command.playback;
     inferredPlayback = command.playback;
   }
-
-  writeJson(res, 200, { ok: true, command });
 }
 
 interface OpenScoreResult {
@@ -1588,8 +2093,12 @@ function parseArgs(raw: string[]): Args {
     discoveryPort: parsePositiveInt(process.env.BANDCUE_DISCOVERY_PORT, 0),
     name: `${hostname()} MuseScore`,
     playKey: " ",
-    // Ctrl+Home moves the cursor to the start of the score; MuseScore then
-    // plays from that selection. Plain Home only jumps within the current row.
+    // Shift+Space is MuseScore's "play-from-selection". Plain Space resumes from
+    // the playback position, which the reset key does not move -- so it is the
+    // reset, not the play, that this key exists to make effective.
+    playFromSelectionKey: "+ ",
+    // Ctrl+Home ("first-element") moves the cursor and the view to the start of
+    // the score. Plain Home only jumps within the current row.
     resetKey: "^{HOME}",
     stopKey: "{ESC}",
     playMode: "stop-then-play",
@@ -1601,7 +2110,8 @@ function parseArgs(raw: string[]): Args {
     bridgeFallbackMs: 900,
     scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
     scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0",
-    closeOldInstances: process.env.BANDCUE_MUSESCORE_CLOSE_OLD !== "0"
+    closeOldInstances: process.env.BANDCUE_MUSESCORE_CLOSE_OLD !== "0",
+    cueHotkey: process.env.BANDCUE_CUE_HOTKEY
   };
 
   for (let index = 0; index < raw.length; index += 1) {
@@ -1613,6 +2123,9 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--name") parsed.name = raw[index + 1] ?? parsed.name;
     if (value === "--play-key") parsed.playKey = raw[index + 1] ?? parsed.playKey;
+    if (value === "--play-from-selection-key") {
+      parsed.playFromSelectionKey = raw[index + 1] ?? parsed.playFromSelectionKey;
+    }
     if (value === "--reset-key") parsed.resetKey = raw[index + 1] ?? parsed.resetKey;
     if (value === "--stop-key") parsed.stopKey = raw[index + 1] ?? parsed.stopKey;
     if (value === "--play-mode") parsed.playMode = parsePlayMode(raw[index + 1], parsed.playMode);
@@ -1629,6 +2142,9 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--dispatch-lead-ms") {
       parsed.dispatchLeadMs = parseNonNegativeInt(raw[index + 1], parsed.dispatchLeadMs);
+    }
+    if (value === "--cue-hotkey") {
+      parsed.cueHotkey = raw[index + 1];
     }
     if (value === "--bridge-port") {
       parsed.bridgePort = parseNonNegativeInt(raw[index + 1], 0);

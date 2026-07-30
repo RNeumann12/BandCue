@@ -307,6 +307,16 @@ setInterval(tickSetlistLoading, 250);
  * request reached it. Plays with no external cue (setlist auto-start) pass none.
  */
 function requestPlay(cueEvent) {
+  requestPlayAtCue(cueEvent ? cueServerTimeForEvent(cueEvent) : undefined);
+}
+
+/**
+ * @param {number | undefined} cueAtServerTime Room time of the external cue this
+ * play is anchored to, if any. Every play goes through here so the host's guards
+ * apply the same way whether the cue was typed into this window or relayed from
+ * an adapter that claimed the combination system-wide.
+ */
+function requestPlayAtCue(cueAtServerTime) {
   if (transportRequestPending) {
     return;
   }
@@ -321,7 +331,7 @@ function requestPlay(cueEvent) {
     type: "transportRequest",
     action: "play",
     requestedAt: Date.now(),
-    cueAtServerTime: cueEvent ? cueServerTimeForEvent(cueEvent) : undefined
+    cueAtServerTime
   });
 }
 
@@ -519,6 +529,15 @@ function connect() {
 
     if (message.type === "helixScheduleUpdate") {
       renderHelixScheduleDebug(message);
+    }
+
+    // A pedal cue that an adapter claimed system-wide, relayed here because the
+    // host is the authority on starting playback. Treated exactly like the Play
+    // hotkey arriving in this window, except that the cue's instant is already in
+    // room time and does not have to be derived from a local event.
+    if (message.type === "externalCue") {
+      setText(elements.subline, `Cue from ${message.source || "an adapter"}.`);
+      requestPlayAtCue(message.cueAtServerTime);
     }
   });
 

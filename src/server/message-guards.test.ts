@@ -59,6 +59,29 @@ describe("server message guards", () => {
     })).toBeUndefined();
 
     expect(sanitizeClientMessage({
+      type: "externalCue",
+      cueAtServerTime: 1950,
+      source: "ctrl+alt+p on MASTASURFACE"
+    })).toEqual({
+      type: "externalCue",
+      cueAtServerTime: 1950,
+      source: "ctrl+alt+p on MASTASURFACE"
+    });
+
+    // Without a usable instant there is nothing to anchor a count-in to.
+    expect(sanitizeClientMessage({ type: "externalCue" })).toBeUndefined();
+    expect(sanitizeClientMessage({
+      type: "externalCue",
+      cueAtServerTime: "soon"
+    })).toBeUndefined();
+
+    expect(sanitizeClientMessage({
+      type: "externalCue",
+      cueAtServerTime: 1950,
+      source: "x".repeat(400)
+    })).toMatchObject({ source: "x".repeat(120) });
+
+    expect(sanitizeClientMessage({
       type: "adapterStatus",
       ready: true,
       app: "songsterr",

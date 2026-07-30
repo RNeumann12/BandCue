@@ -154,12 +154,36 @@ an `error`, on acceptance everyone receives a `transportCommand` + new `roomStat
 }
 ```
 
+### `externalCue`
+
+A pedal cue captured by an adapter that claimed the combination system-wide (`--cue-hotkey`, see
+[Configuration.md](Configuration.md#external-cue-helix-and-other-pedals)) rather than by the host
+page's own keydown handler.
+
+```jsonc
+{
+  "type": "externalCue",
+  "cueAtServerTime": 1718899999955,      // room time of the cue itself
+  "source": "ctrl+alt+p on MASTASURFACE" // optional; defaults to the sender's device name
+}
+```
+
+Deliberately **not** a `transportRequest`. Who may start playback is a room policy — in
+`host-only` mode nobody but the host may — and an adapter that owns a hotkey has gained no
+authority it did not already have. The coordinator relays the cue to every host client, and a host
+then issues its ordinary `transportRequest` carrying the same `cueAtServerTime`, so the pedal
+behaves exactly like the host's own Play hotkey and every safety rule applies unchanged.
+
+Answered with an `error` when the stamp is in the future or older than `HELIX_MAX_CUE_AGE_MS`
+(3 s) — it could no longer anchor a count-in — or when no host is connected to act on it.
+
 ---
 
 ## Server → Client messages
 
 A `ServerMessage` is one of: `serverHello`, `clockSyncResult`, `transportCommand`,
-`openSongCommand`, `roomState`, `error`.
+`openSongCommand`, `roomState`, `error`, `helixScheduleUpdate`, `externalCue` (relayed to hosts,
+same shape as above).
 
 ### `serverHello`
 Sent once, right after `clientHello`. Gives the client its id, the room code, the server clock,

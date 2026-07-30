@@ -1,6 +1,11 @@
 param(
   [string]$Room,
-  [string]$Name = "MuseScore ($env:COMPUTERNAME)"
+  [string]$Name = "MuseScore ($env:COMPUTERNAME)",
+  # Claims the cue combination system-wide on this machine, for the PC the Helix
+  # (or any other pedal sending keystrokes) is plugged into. Without it the cue
+  # only arrives while the host page has keyboard focus -- which MuseScore needs
+  # for itself. Use on exactly one machine per room.
+  [string]$CueHotkey
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +63,9 @@ $npmArgs = @("run", "dev:musescore", "--", "--name", $Name)
 if ($Room) {
   $npmArgs += @("--room", $Room)
 }
+if ($CueHotkey) {
+  $npmArgs += @("--cue-hotkey", $CueHotkey)
+}
 
 Write-Host ""
 if ($Room) {
@@ -65,6 +73,9 @@ if ($Room) {
 } else {
   Write-Host "Searching this network for a running BandCue room, connecting as '$Name'..." -ForegroundColor Cyan
   Write-Host "(Pass -Room <code|host:port|URL> to skip discovery and target a specific host.)" -ForegroundColor DarkGray
+}
+if ($CueHotkey) {
+  Write-Host "Claiming '$CueHotkey' system-wide as this room's cue, so it reaches BandCue whatever window has focus." -ForegroundColor Cyan
 }
 Write-Host "This gives the BandCue room full control of MuseScore on this machine. Keep this window open during rehearsal. Press Ctrl+C to stop." -ForegroundColor Cyan
 Write-Host ""
