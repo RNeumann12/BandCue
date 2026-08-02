@@ -164,6 +164,11 @@ function loadContentScript({
   media = [],
   sourceControl = null,
   ipad = false,
+  // Orion's content-script sandbox on iPadOS presents no AudioContext, while the
+  // page it is injected into gates audio behind a gesture exactly as assumed.
+  webAudio = true,
+  // WebKit without touch: the feature is right to stay off, but must say so.
+  desktopSafari = false,
   // "spa" mimics Songsterr's real router: a popstate retitles the document once
   // the new song has loaded. "none" is a router that ignores the route change.
   router = "none"
@@ -172,6 +177,8 @@ function loadContentScript({
   media?: FakeMediaElement[];
   sourceControl?: FakeSourceControl | null;
   ipad?: boolean;
+  webAudio?: boolean;
+  desktopSafari?: boolean;
   router?: "spa" | "none";
 } = {}) {
   const messages: unknown[] = [];
@@ -318,8 +325,13 @@ function loadContentScript({
   };
   if (ipad) {
     FakeAudioContext.created = 0;
-    context.navigator = { userAgent: IPAD_USER_AGENT, maxTouchPoints: 5 };
-    context.AudioContext = FakeAudioContext;
+    context.navigator = {
+      userAgent: IPAD_USER_AGENT,
+      maxTouchPoints: desktopSafari ? 0 : 5
+    };
+    if (webAudio) {
+      context.AudioContext = FakeAudioContext;
+    }
   }
 
   vm.createContext(context);
@@ -808,6 +820,54 @@ describe("Songsterr audio arming on iPadOS", () => {
 
     expect(documentListeners.pointerdown).toBeUndefined();
     expect(overlay()).toBeUndefined();
+  });
+
+  // Measured on the real device: Orion's content-script sandbox on iPadOS
+  // presents no AudioContext, and requiring one there switched the entire
+  // feature off -- no banner, no arming, and no priming -- on the one platform
+  // it exists for, while the page went on gating audio behind a gesture.
+  it("still runs on a WebKit touch device whose sandbox has no Web Audio", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture, messages, overlay } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      webAudio: false
+    });
+    vi.runOnlyPendingTimers();
+
+    // The banner still asks, because Songsterr's own engine still has to be
+    // started from a real touch.
+    expect(evaluate("audioArmingInstalled")).toBe(true);
+    expect(evaluate("audioArmSupported")).toBe(false);
+    expect(overlay()?.textContent).toMatch(/tap to enable/i);
+
+    fireGesture("touchend");
+    expect(toggle.clicks).toBe(1);
+    vi.advanceTimersByTime(200);
+
+    expect(evaluate("songsterrPrimed")).toBe(true);
+    expect(overlay()?.isConnected).toBe(false);
+    // An arm we can never observe must not keep reporting the device as dead.
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/priming only/i) })
+    );
+  });
+
+  it("says why the audio handling is off when a WebKit device skips it", () => {
+    const { messages } = loadContentScript({
+      ipad: true,
+      webAudio: false,
+      // A WebKit UA with no touch: desktop Safari, where the feature is right to
+      // stay off -- but the reason should still be visible.
+      desktopSafari: true
+    });
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        detail: expect.stringMatching(/gesture-gated audio handling is off here/i)
+      })
+    );
   });
 });
 

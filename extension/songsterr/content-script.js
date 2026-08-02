@@ -33,6 +33,10 @@ let audioArmContext;
 // startAudioArmKeepAlive.
 let audioArmKeepAlive;
 let audioArmed = false;
+// Whether *this* world can build an AudioContext at all. False in Orion's
+// content-script sandbox on iPadOS, where the priming half still works and is
+// the half that matters; the arm then simply never gates readiness.
+let audioArmSupported = false;
 // Whether Songsterr's *own* audio engine has been started once on this page.
 // Separate from audioArmed on purpose: our context being unlocked says nothing
 // about the player's, which is the whole reason a member had to press Play/Stop
@@ -1086,14 +1090,22 @@ function waitForTitleChange(previousTitle) {
 // file, because the bootstrap block reads it before this point.
 
 /**
- * True only on the browsers that gate Web Audio behind a live user gesture per
+ * True only on the browsers that gate audio behind a live user gesture per
  * document: WebKit on a touch device. Orion on iPadOS reports the desktop Safari
  * user agent, so the touch-point count -- not an "iPad" string match -- is what
  * identifies it. Chromium and desktop Safari never pay for any of this.
+ *
+ * Deliberately says nothing about Web Audio. This used to require an
+ * AudioContext in *our* world, which switched the whole feature off on the one
+ * platform it exists for: Orion's content-script sandbox does not present the
+ * constructor, so on a real iPad neither the banner nor the arming nor the
+ * priming ever ran -- while the page itself gates audio exactly as assumed.
+ * Priming is pure DOM and needs no Web Audio at all; only the arming half does,
+ * and that half now switches itself off on its own (see audioArmSupported).
  */
-function needsAudioArming() {
+function usesGestureGatedAudio() {
   const runtimeNavigator = globalThis.navigator;
-  if (!runtimeNavigator || typeof audioContextConstructor() !== "function") {
+  if (!runtimeNavigator) {
     return false;
   }
 
@@ -1109,11 +1121,20 @@ function audioContextConstructor() {
 }
 
 function installAudioArming() {
-  if (audioArmingInstalled || typeof document.addEventListener !== "function" || !needsAudioArming()) {
+  if (audioArmingInstalled || typeof document.addEventListener !== "function") {
+    return;
+  }
+
+  if (!usesGestureGatedAudio()) {
+    // Nothing to install -- but say so once, because "the feature never ran" is
+    // otherwise indistinguishable from "the feature ran and found nothing to do",
+    // and telling those apart took a whole rehearsal once.
+    lastControlDetail = describeSkippedAudioHandling();
     return;
   }
 
   audioArmingInstalled = true;
+  audioArmSupported = typeof audioContextConstructor() === "function";
   for (const type of AUDIO_ARM_EVENTS) {
     // Passive so the listeners can never delay a scroll or a tap, and capture so
     // they see the gesture even if Songsterr stops it from bubbling.
@@ -1123,6 +1144,22 @@ function installAudioArming() {
   setAudioArmed(false);
 }
 
+/**
+ * Why the gesture-gated audio handling is off, for the WebKit-family browsers
+ * where that is a surprise. Silent on Chromium, which never wants it.
+ */
+function describeSkippedAudioHandling() {
+  const runtimeNavigator = globalThis.navigator;
+  const userAgent = runtimeNavigator?.userAgent || "";
+  if (!/AppleWebKit/.test(userAgent) || /Chrome|Chromium|Edg\//.test(userAgent)) {
+    return lastControlDetail;
+  }
+
+  const touchPoints = runtimeNavigator?.maxTouchPoints || 0;
+  const hasAudioContext = typeof audioContextConstructor() === "function";
+  return `Songsterr content script ready; gesture-gated audio handling is off here (touchPoints=${touchPoints}, audioContext=${hasAudioContext})`;
+}
+
 function handleArmingGesture(event) {
   // Our own Space/Backspace shortcuts and priming clicks dispatch untrusted
   // events; those unlock nothing, so they must never be mistaken for a gesture.
@@ -1130,7 +1167,7 @@ function handleArmingGesture(event) {
     return;
   }
 
-  if (!audioArmed) {
+  if (audioArmSupported && !audioArmed) {
     armAudio();
   }
 
@@ -1229,9 +1266,11 @@ function setAudioArmed(next) {
   }
 
   audioArmed = next;
-  if (!next) {
+  if (!next && audioArmSupported) {
     // The session went away, so whatever we did to Songsterr's engine went with
-    // it: the next tap has to prime again.
+    // it: the next tap has to prime again. Only meaningful where we hold a
+    // context of our own; without one, `false` is simply what it always is and
+    // must not keep re-arming the banner.
     songsterrPrimed = false;
   }
   publishAudioReadiness();
@@ -1255,15 +1294,16 @@ function publishAudioReadiness() {
 
 /** What the host is told about this device's audio, most blocking issue first. */
 function audioReadinessDetail() {
-  if (!audioArmed) {
+  if (audioArmSupported && !audioArmed) {
     return AUDIO_NOT_ARMED_DETAIL;
   }
 
-  return songsterrPrimed ? AUDIO_READY_DETAIL : AUDIO_NOT_PRIMED_DETAIL;
+  const detail = songsterrPrimed ? AUDIO_READY_DETAIL : AUDIO_NOT_PRIMED_DETAIL;
+  return audioArmSupported ? detail : `${detail} (priming only; no Web Audio in this context)`;
 }
 
 function isAudioReady() {
-  return audioArmed && songsterrPrimed;
+  return (audioArmed || !audioArmSupported) && songsterrPrimed;
 }
 
 /**
@@ -1318,7 +1358,7 @@ function audioArmWarning(action) {
     return "";
   }
 
-  return audioArmed ? AUDIO_NOT_PRIMED_DETAIL : AUDIO_NOT_ARMED_DETAIL;
+  return audioArmSupported && !audioArmed ? AUDIO_NOT_ARMED_DETAIL : AUDIO_NOT_PRIMED_DETAIL;
 }
 
 // --- Priming Songsterr's own audio engine (iPadOS/iOS) ----------------------

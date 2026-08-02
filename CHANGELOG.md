@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.4.2 - 2026-08-02
+
+### Fixed
+
+- **The iPad audio handling had never actually run on an iPad.** Measured against a real device
+  (Orion on iPadOS): the extension decided whether a device gates audio behind a user gesture by
+  asking, among other things, whether it could construct an `AudioContext` — and Orion's
+  *content-script sandbox* presents no such constructor, even though the page it is injected into
+  gates audio exactly as assumed. One missing constructor in the wrong world therefore switched off
+  the entire feature: no "tap to enable" banner, no arming, and — since 1.4.1 — no priming either,
+  on the one platform all of it exists for. It has been inert since it shipped in 1.3.2, which is
+  why a member still had to press Play and Stop by hand after every load.
+
+  The gesture-gated decision is now made from the browser alone (WebKit + touch), and the two
+  halves are independent: priming Songsterr's own engine is pure DOM and runs everywhere the
+  decision holds, while the arming of BandCue's own context switches itself off where no
+  `AudioContext` exists. A device in that state reports **"priming only; no Web Audio in this
+  context"** and is no longer counted as un-armed forever — an arm that can never be observed must
+  not permanently mark a working device as dead.
+- A device that skips the gesture-gated handling now says so on its first status when it is a
+  WebKit-family browser (`gesture-gated audio handling is off here (touchPoints=…,
+  audioContext=…)`). "The feature never ran" and "the feature ran and found nothing to do" used to
+  look identical from the host, which is what hid the bug above through two releases.
+
 ## 1.4.1 - 2026-08-02
 
 ### Fixed
