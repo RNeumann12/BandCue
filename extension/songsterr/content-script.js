@@ -1109,11 +1109,28 @@ function usesGestureGatedAudio() {
     return false;
   }
 
-  const userAgent = runtimeNavigator.userAgent || "";
-  const isWebKit = /AppleWebKit/.test(userAgent) && !/Chrome|Chromium|Edg\//.test(userAgent);
-  const isTouch =
-    (runtimeNavigator.maxTouchPoints || 0) > 1 || /iPad|iPhone|iPod/.test(userAgent);
-  return isWebKit && isTouch;
+  return isApplePlatform(runtimeNavigator) && isTouchDevice(runtimeNavigator);
+}
+
+/**
+ * Apple hardware, whatever the browser claims to *be*. The classic WebKit sniff
+ * -- "AppleWebKit and not Chrome" -- is precisely wrong here: Orion hosts Chrome
+ * extensions and presents a Chrome-flavoured user agent to them, so the one
+ * browser this code exists for was the one it excluded. The Apple platform token
+ * survives in those user agents, and together with a touch screen it identifies
+ * an iPad/iPhone without asking which engine is drawing it. A desktop OS token
+ * (Windows/Android/CrOS/Linux) is therefore not merely "not Apple" -- it is a
+ * device with its own adapter, and stays out.
+ */
+function isApplePlatform(runtimeNavigator) {
+  const signature = `${runtimeNavigator.userAgent || ""} ${
+    runtimeNavigator.userAgentData?.platform || runtimeNavigator.platform || ""
+  }`;
+  return /iPad|iPhone|iPod|Macintosh|Mac OS X|macOS/i.test(signature);
+}
+
+function isTouchDevice(runtimeNavigator) {
+  return (runtimeNavigator.maxTouchPoints || 0) > 0 || "ontouchstart" in globalThis;
 }
 
 function audioContextConstructor() {
@@ -1145,19 +1162,26 @@ function installAudioArming() {
 }
 
 /**
- * Why the gesture-gated audio handling is off, for the WebKit-family browsers
- * where that is a surprise. Silent on Chromium, which never wants it.
+ * Why the gesture-gated audio handling is off, including the user agent that
+ * decided it. Reported unconditionally and from the content script's own world,
+ * because every wrong guess about this device so far was made from somewhere
+ * else -- and "it never ran" was indistinguishable from "it ran and was happy"
+ * for two releases.
  */
 function describeSkippedAudioHandling() {
   const runtimeNavigator = globalThis.navigator;
-  const userAgent = runtimeNavigator?.userAgent || "";
-  if (!/AppleWebKit/.test(userAgent) || /Chrome|Chromium|Edg\//.test(userAgent)) {
-    return lastControlDetail;
+  if (!runtimeNavigator) {
+    return `${lastControlDetail}; gesture-gated audio handling off (no navigator)`;
   }
 
-  const touchPoints = runtimeNavigator?.maxTouchPoints || 0;
-  const hasAudioContext = typeof audioContextConstructor() === "function";
-  return `Songsterr content script ready; gesture-gated audio handling is off here (touchPoints=${touchPoints}, audioContext=${hasAudioContext})`;
+  const flags = [
+    `apple=${isApplePlatform(runtimeNavigator) ? 1 : 0}`,
+    `touch=${isTouchDevice(runtimeNavigator) ? 1 : 0}`,
+    `touchPoints=${runtimeNavigator.maxTouchPoints || 0}`,
+    `audioContext=${typeof audioContextConstructor() === "function" ? 1 : 0}`
+  ].join(" ");
+  const userAgent = String(runtimeNavigator.userAgent || "").slice(0, 90);
+  return `${lastControlDetail}; gesture-gated audio handling off (${flags}) ua="${userAgent}"`;
 }
 
 function handleArmingGesture(event) {

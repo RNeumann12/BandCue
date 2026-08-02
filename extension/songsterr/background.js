@@ -678,10 +678,12 @@ function adjustDispatchLeadForTiming(timing) {
   }
 
   const overrunMs = Math.max(0, -timing.preparedAheadMs);
-  const grown = Math.min(
+  // Rounded: the overrun is derived from a fractional clock offset, and an
+  // un-rounded lead reached the host as "extended to 556.5126953125 ms".
+  const grown = Math.round(Math.min(
     MAX_DISPATCH_LEAD_MS,
     adaptiveDispatchLeadMs + overrunMs + DISPATCH_LEAD_OVERRUN_CUSHION_MS
-  );
+  ));
   if (grown <= adaptiveDispatchLeadMs) {
     return "";
   }

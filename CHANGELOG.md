@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.3 - 2026-08-02
+
+### Fixed
+
+- **Orion for iPadOS tells extensions it is Chrome**, and BandCue believed it. The gesture-gated
+  audio handling identified WebKit the classic way — `AppleWebKit` present, `Chrome` absent — which
+  is precisely backwards for the one browser the feature exists for: Orion hosts *Chrome*
+  extensions, so the user agent an extension sees on an iPad claims Chrome. Together with the
+  `AudioContext` requirement removed in 1.4.2, that is the second reason nothing ever ran on a real
+  iPad. Verified against the device: the extension reported the untouched `Songsterr content script
+  ready` and never a word about audio, through three releases.
+
+  The device is now identified by what it *is* rather than what its browser claims to be: an Apple
+  platform token plus a touch screen. A desktop OS token (Windows/Android/CrOS/Linux) still stays
+  out — those devices have their own adapters and do not gate audio this way.
+- The reason a device skips the handling is now reported unconditionally, with the user agent that
+  decided it (`gesture-gated audio handling off (apple=0 touch=1 …) ua="…"`). Every wrong guess
+  about this device was made from somewhere other than the content script's own world; now it says
+  so itself.
+- The room was told the count-in had been extended to `556.5126953125 ms`. The self-adjusting lead
+  is derived from a fractional clock offset and is now rounded.
+
 ## 1.4.2 - 2026-08-02
 
 ### Fixed

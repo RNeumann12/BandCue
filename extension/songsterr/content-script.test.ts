@@ -105,6 +105,11 @@ class FakeKeyboardEvent {
 // content script identifies it by touch points rather than an "iPad" match.
 const IPAD_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+// What Orion actually hands its extensions: it hosts *Chrome* extensions, so the
+// user agent an extension sees claims Chrome -- on an iPad. Sniffing for
+// "AppleWebKit and not Chrome" excluded the one browser this code exists for.
+const ORION_EXTENSION_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 class FakeAudioContext {
   static created = 0;
@@ -169,6 +174,11 @@ function loadContentScript({
   webAudio = true,
   // WebKit without touch: the feature is right to stay off, but must say so.
   desktopSafari = false,
+  // The Chrome-flavoured user agent Orion hands its extensions on iPadOS.
+  orion = false,
+  // A touch device that is not Apple: Android Chrome, which has its own adapter
+  // and does not gate audio the way WebKit does.
+  android = false,
   // "spa" mimics Songsterr's real router: a popstate retitles the document once
   // the new song has loaded. "none" is a router that ignores the route change.
   router = "none"
@@ -179,6 +189,8 @@ function loadContentScript({
   ipad?: boolean;
   webAudio?: boolean;
   desktopSafari?: boolean;
+  orion?: boolean;
+  android?: boolean;
   router?: "spa" | "none";
 } = {}) {
   const messages: unknown[] = [];
@@ -326,12 +338,20 @@ function loadContentScript({
   if (ipad) {
     FakeAudioContext.created = 0;
     context.navigator = {
-      userAgent: IPAD_USER_AGENT,
+      userAgent: orion ? ORION_EXTENSION_USER_AGENT : IPAD_USER_AGENT,
       maxTouchPoints: desktopSafari ? 0 : 5
     };
     if (webAudio) {
       context.AudioContext = FakeAudioContext;
     }
+  }
+  if (android) {
+    context.navigator = {
+      userAgent:
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+      maxTouchPoints: 5
+    };
+    context.AudioContext = FakeAudioContext;
   }
 
   vm.createContext(context);
@@ -854,20 +874,53 @@ describe("Songsterr audio arming on iPadOS", () => {
     );
   });
 
-  it("says why the audio handling is off when a WebKit device skips it", () => {
+  // The device this whole feature exists for, as it really reports itself:
+  // an iPad, with no AudioContext in the sandbox, claiming to be Chrome.
+  it("runs on Orion for iPadOS, which tells extensions it is Chrome", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture, overlay } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      orion: true,
+      webAudio: false
+    });
+    vi.runOnlyPendingTimers();
+
+    expect(evaluate("audioArmingInstalled")).toBe(true);
+    expect(overlay()?.textContent).toMatch(/tap to enable/i);
+
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+
+    expect(toggle.clicks).toBe(2);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("says why the audio handling is off, and what decided it", () => {
     const { messages } = loadContentScript({
       ipad: true,
       webAudio: false,
-      // A WebKit UA with no touch: desktop Safari, where the feature is right to
-      // stay off -- but the reason should still be visible.
+      // Apple, but no touch: desktop Safari, where the feature is right to stay
+      // off -- the reason and the user agent behind it must still be visible.
       desktopSafari: true
     });
 
     expect(messages).toContainEqual(
       expect.objectContaining({
-        detail: expect.stringMatching(/gesture-gated audio handling is off here/i)
+        detail: expect.stringMatching(/gesture-gated audio handling off \(apple=1 touch=0/i)
       })
     );
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringContaining('ua="Mozilla/5.0 (Macintosh') })
+    );
+  });
+
+  it("leaves a touch device that is not Apple to its own adapter", () => {
+    const { documentListeners, overlay } = loadContentScript({ android: true });
+
+    expect(documentListeners.pointerdown).toBeUndefined();
+    expect(overlay()).toBeUndefined();
   });
 });
 
