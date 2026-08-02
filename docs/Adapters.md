@@ -73,6 +73,9 @@ Build a distributable zip with `npm run package:extension`.
 - **Stop** is no-op when playback already appears stopped, and **never** uses a Space-key
   fallback (which on Songsterr is a toggle and could restart play). It only pauses active media
   elements or clicks a confidently-labelled pause/stop control.
+- **Per-song tempo** is applied through Songsterr's visible playback-speed control while loading
+  and verified before Play. Paywalls or changed layouts are reported instead of starting at the
+  wrong speed.
 - **Start timing** — everything a Play needs is worked out during the count-in, so the downbeat
   itself is a single click or key dispatch:
   - The background forwards the command `adaptiveDispatchLeadMs` (400 ms by default) ahead of the
@@ -187,6 +190,9 @@ The host page shows the active MuseScore window title, whether playback is infer
 stopped from the last successful command, and a visible failure if Windows could not activate the
 MuseScore window.
 
+The resident MuseScore Bridge also applies the current song's playback multiplier without editing
+score tempo markings. Non-100% songs are blocked when only the keyboard fallback is active.
+
 **Local score catalog & auto-open**
 
 Pass one or more score folders to publish a privacy-safe catalog and auto-open scores:
@@ -204,10 +210,11 @@ npm run dev:musescore -- --score-folder "C:\Users\you\Documents\MuseScore4\Score
 - Auto-open requires **exactly one** match; ambiguous or missing matches are reported, not opened.
 - MuseScore 4 opens each score in a **new instance**, and keystroke control gets unreliable when
   several instances are running. After an auto-open, the helper waits for the new window to
-  appear (up to 15 s), then closes the previous MuseScore instances gracefully (WM_CLOSE — an
-  unsaved-changes prompt keeps the old instance alive and is reported instead of force-killed).
-  Disable with `--close-old-instances 0`. Status polling and keystroke commands also prefer the
-  **newest** MuseScore window, so a lingering old instance no longer receives play/stop keys.
+  appear (up to 15 s), starts BandCue Bridge from its Plug-Ins menu, then closes the previous
+  MuseScore instances gracefully (WM_CLOSE — an unsaved-changes prompt keeps the old instance
+  alive and is reported instead of force-killed). Before switching, attached bridge dialogs are
+  retired so a lingering old instance cannot receive play/stop. Disable closing old windows with
+  `--close-old-instances 0`.
 
 ### MuseScore plugin (bridge) — the only way to reset the playhead
 
@@ -235,7 +242,8 @@ That selects a **note**, not a frame, so playback starts at bar 1 every time.
 **Install.** Copy the folder into MuseScore's Plugins directory (Preferences → Folders shows the
 path; usually `%USERPROFILE%\Documents\MuseScore4\Plugins`), enable **BandCue Bridge** under
 Home → Plugins, and leave its window open while playing — `pluginType: "dialog"` is what keeps the
-plugin resident, since a plain plugin exits after `onRun` and could never wait for a cue.
+plugin resident, since a plain plugin exits after `onRun` and could never wait for a cue. BandCue
+minimizes that dialog automatically after startup; restoring it is optional and only shows status.
 
 **Transport.** The plugin talks to the adapter's `--bridge-port` over a WebSocket on the same port
 as the HTTP API. MuseScore's plugin sandbox has no HTTP client, but it does expose
@@ -248,6 +256,7 @@ interval sits between the count-in and the plugin.
 | → plugin | `hello` | `{ fallbackMs, currentSong }` on connect |
 | → plugin | `command` | `{ sequenceId, action, dueLocalAt, resetBeforePlay, currentSong }` |
 | → plugin | `song` | the current song changed |
+| → plugin | `retire` | disconnect before the helper opens a score in a new MuseScore process |
 | → adapter | `claim` | stops the keyboard fallback from also firing |
 | → adapter | `result` | `{ sequenceId, status, playback, detail }` |
 | → adapter | `status` | `{ ready, title, playback }`; also the keep-alive, every 2 s |
@@ -292,10 +301,9 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4731/commands/12/result `
 `--bridge-fallback-ms` (default **900 ms**) after the scheduled time, the Windows keyboard path
 runs. A command still unclaimed at the downbeat falls back immediately. Without an active bridge
 helper, Windows activation/reset begins during the count-in and only the final Play key waits for
-`dueLocalAt` (`--dispatch-lead-ms`, default **1000 ms**). The bridge queue carries `open-song`
-commands too, completed through the same claim/result
-endpoints; if no helper handles `open-song`, the Windows helper opens the single matched local
-score itself.
+`dueLocalAt` (`--dispatch-lead-ms`, default **1000 ms**). `open-song` is process-aware instead of
+using the transport queue: the Windows helper opens the single matched local score, retires old
+bridge dialogs, and launches BandCue Bridge in the new MuseScore process.
 
 **Resident trigger (the normal path).** Spawning `powershell.exe` and loading the
 `System.Windows.Forms`/`Microsoft.VisualBasic` assemblies costs ~1.8 s, and doing that per command

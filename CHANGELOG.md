@@ -1,5 +1,170 @@
 # Changelog
 
+## 1.5.4 - 2026-08-02
+
+### Fixed
+
+- BandCue Bridge now minimizes its own MuseScore plugin window after startup.
+  The dialog stays resident and connected but no longer covers the score or
+  other rehearsal windows, including after automatic song-change handoffs.
+
+## 1.5.3 - 2026-08-02
+
+### Fixed
+
+- Recovery after an unpacked Songsterr extension reload now reloads the tab and
+  retries once. It no longer executes the content script twice in one document,
+  which caused `Identifier 'lastControlDetail' has already been declared` and
+  left the adapter unable to control tempo or transport.
+- MuseScore song changes now start BandCue Bridge automatically in the newly
+  opened MuseScore process. MuseScore 4 creates a new process even when its QML
+  `readScore(path)` API is used, so keeping the old plugin alive only kept it
+  attached to the old score; the helper now performs the process handoff for the
+  user instead. Existing bridge dialogs retire before the switch, preventing an
+  unsaved old score window from continuing to receive transport commands.
+
+## 1.5.2 - 2026-08-02
+
+### Fixed
+
+- The Songsterr extension now injects and retries automatically when an
+  already-open tab has no content script after an unpacked-extension reload.
+
+## 1.5.1 - 2026-08-02
+
+### Fixed
+
+- The Songsterr browser extension now waits for the lazy-loaded speed panel and
+  drives Songsterr's custom desktop slider or compact fine-tuning buttons instead
+  of looking only for a native range input.
+- The MuseScore plugin no longer treats `open-song` as Stop and falsely reports
+  `open-song fired`; it delegates opening to the Windows helper's local score
+  catalog.
+
+## 1.5.0 - 2026-08-02
+
+### Added
+
+- Per-song playback tempo from 15% to 175%, shared by the Songsterr browser
+  extension, the MuseScore desktop bridge, and the Songsterr Android adapter.
+- Tempo editing in the setlist UI and preservation through JSON import/export.
+- Tempo readiness reporting and Play blocking when an applicable adapter cannot
+  confirm the requested non-default tempo.
+- Tempo-aware automatic song duration while keeping stored durations normalized
+  to 100% speed.
+
+## 1.4.4 - 2026-08-02
+
+### Fixed
+
+- **A Songsterr device's Stop was holding the whole band's downbeat.** Found while verifying the
+  iPad audio fix against a real device: after a few songs the iPad was asking the room for a
+  2500 ms count-in — the hard cap — and the coordinator raises the floor under *every* Play to
+  match (`scheduleDelayForClients`), so one device that stops perfectly well was delaying everyone
+  by two and a half seconds.
+
+  The cause is that a Stop is scheduled for *now* (`scheduledServerTime: now`), so it always
+  reports reaching its deadline with no lead left — the IPC hop alone guarantees it. That fed the
+  self-correcting dispatch lead, which only ever grows, so every Stop ratcheted it upwards until it
+  pegged. Only a Play adjusts the lead now: a Stop has no downbeat to hit and nothing to prepare.
+
+  Observed on the device: with the lead pegged at 2500 ms the first Play still landed 630 ms late,
+  while the following three landed within 15 ms of the downbeat.
+
+## 1.4.3 - 2026-08-02
+
+### Fixed
+
+- **Orion for iPadOS tells extensions it is Chrome**, and BandCue believed it. The gesture-gated
+  audio handling identified WebKit the classic way — `AppleWebKit` present, `Chrome` absent — which
+  is precisely backwards for the one browser the feature exists for: Orion hosts *Chrome*
+  extensions, so the user agent an extension sees on an iPad claims Chrome. Together with the
+  `AudioContext` requirement removed in 1.4.2, that is the second reason nothing ever ran on a real
+  iPad. Verified against the device: the extension reported the untouched `Songsterr content script
+  ready` and never a word about audio, through three releases.
+
+  The device is now identified by what it *is* rather than what its browser claims to be: an Apple
+  platform token plus a touch screen. A desktop OS token (Windows/Android/CrOS/Linux) still stays
+  out — those devices have their own adapters and do not gate audio this way.
+- The reason a device skips the handling is now reported unconditionally, with the user agent that
+  decided it (`gesture-gated audio handling off (apple=0 touch=1 …) ua="…"`). Every wrong guess
+  about this device was made from somewhere other than the content script's own world; now it says
+  so itself.
+- The room was told the count-in had been extended to `556.5126953125 ms`. The self-adjusting lead
+  is derived from a fractional clock offset and is now rounded.
+
+## 1.4.2 - 2026-08-02
+
+### Fixed
+
+- **The iPad audio handling had never actually run on an iPad.** Measured against a real device
+  (Orion on iPadOS): the extension decided whether a device gates audio behind a user gesture by
+  asking, among other things, whether it could construct an `AudioContext` — and Orion's
+  *content-script sandbox* presents no such constructor, even though the page it is injected into
+  gates audio exactly as assumed. One missing constructor in the wrong world therefore switched off
+  the entire feature: no "tap to enable" banner, no arming, and — since 1.4.1 — no priming either,
+  on the one platform all of it exists for. It has been inert since it shipped in 1.3.2, which is
+  why a member still had to press Play and Stop by hand after every load.
+
+  The gesture-gated decision is now made from the browser alone (WebKit + touch), and the two
+  halves are independent: priming Songsterr's own engine is pure DOM and runs everywhere the
+  decision holds, while the arming of BandCue's own context switches itself off where no
+  `AudioContext` exists. A device in that state reports **"priming only; no Web Audio in this
+  context"** and is no longer counted as un-armed forever — an arm that can never be observed must
+  not permanently mark a working device as dead.
+- A device that skips the gesture-gated handling now says so on its first status when it is a
+  WebKit-family browser (`gesture-gated audio handling is off here (touchPoints=…,
+  audioContext=…)`). "The feature never ran" and "the feature ran and found nothing to do" used to
+  look identical from the host, which is what hid the bug above through two releases.
+
+## 1.4.1 - 2026-08-02
+
+### Fixed
+
+- Songsterr on iPad/iPhone (Orion) stayed silent unless a member pressed Play and Stop by hand
+  after every load. 1.3.2 unlocked the extension's *own* AudioContext from a real touch, which is
+  necessary but not sufficient: WebKit carries the "must start from a user gesture" restriction on
+  each AudioContext, and Songsterr's is a different object from ours. Unlocking ours only proved a
+  touch had happened — nothing had reached the engine that actually renders the Synth source, so
+  the device could report itself armed and still play nothing. Pressing Play by hand worked because
+  that gesture *did* reach Songsterr's engine, which is why the ritual had to be repeated per load
+  rather than once per session.
+
+  The extension now performs that ritual itself. On the touch that arms the device it also starts
+  Songsterr through the player's own transport and stops it again 140 ms later, synchronously
+  inside the gesture — the start runs while the document's user activation is still live, which is
+  what lets Songsterr's context begin — then sends the score back to the top. Afterwards our
+  synthetic clicks drive a running engine. It costs a blip of sound rather than a silent set.
+
+  The same cycle re-runs by itself ~700 ms after each in-page song switch, so a member who tapped
+  once at the start of the night does not have to tap again for every song BandCue loads for them.
+
+  Priming never goes near the downbeat: it is refused while a transport command is pending or a
+  BandCue play is running, it is cancelled the instant a command arrives (leaving playback
+  stopped), a switch made inside a count-in is told not to prime at all, and a tap on Songsterr's
+  own transport is left alone rather than clicked over. Playback that ends by itself — which is
+  never followed by a Stop command — is noticed on the status tick, so priming does not stay
+  blocked after the first song.
+- A play that WebKit swallowed silently used to be reported as a clean start: the click lands and
+  Songsterr's button flips to Pause whether or not any sound follows. The device now looks at
+  whether the player's position actually moved a second into the song, and when it did not, tells
+  the host **"the player never moved (silent start)"** and puts the "tap once" banner back instead
+  of leaving the member to discover it by ear. Devices that expose no position are left alone
+  rather than guessed at.
+- An armed iPad could go quiet again after sitting through a song, because iPadOS reclaims an
+  *idle* audio session when the tab is backgrounded or the screen locks. The arming context now
+  holds one silent looping source (through a gain of zero) for as long as the page lives, so the
+  session is not idle to begin with.
+- A Songsterr transport command that threw left the content script believing a command was still
+  pending, which blocked audio priming for the rest of the session and closed the reply channel
+  with no reason attached. The failure is now reported to the host like any other.
+
+### Changed
+
+- The host now distinguishes the two halves of the iPad audio state: *not armed* (no touch yet),
+  *engine is not started* (touched, but Songsterr's own audio has not run), and armed **and**
+  primed. Previously both dead states read the same, and the second was invisible.
+
 ## 1.4.0 - 2026-07-30
 
 ### Changed

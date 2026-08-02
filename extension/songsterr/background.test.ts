@@ -36,7 +36,10 @@ function loadBackground(
   // navigation fallback.
   // true/false: the content script replies. "hang": the reply channel is
   // dropped, as Safari-derived browsers do for a slow async sendResponse.
-  { inPageNav = false }: { inPageNav?: boolean | "hang" } = {}
+  { inPageNav = false, missingContentOnce = false }: {
+    inPageNav?: boolean | "hang";
+    missingContentOnce?: boolean;
+  } = {}
 ) {
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
@@ -44,6 +47,11 @@ function loadBackground(
   // Request ids the background stamped on each in-page switch, so a test can
   // answer a specific one the way the content script does.
   const inPageNavRequestIds: number[] = [];
+  // Whether each switch let the content script re-prime the iPad's audio, which
+  // is only safe when no downbeat is already on its way.
+  const inPageNavAudioPrimes: Array<boolean | undefined> = [];
+  const reloadedTabs: number[] = [];
+  let shouldRejectMissingContent = missingContentOnce;
   let nextId = 1000;
   const onUpdatedListeners = new Set<(id: number, info: any, tab: FakeTab) => void>();
 
@@ -69,10 +77,25 @@ function loadBackground(
       onRemoved: { addListener() {} },
       query: async () => initialTabs.map((tab) => ({ ...tab })),
       get: async (id: number) => initialTabs.find((tab) => tab.id === id),
-      sendMessage: async (id: number, message: { type?: string; url?: string; requestId?: number }) => {
+      reload: async (id: number) => {
+        const tab = initialTabs.find((candidate) => candidate.id === id);
+        if (tab) {
+          reloadedTabs.push(id);
+          fireComplete(tab);
+        }
+      },
+      sendMessage: async (
+        id: number,
+        message: { type?: string; url?: string; requestId?: number; allowAudioPrime?: boolean }
+      ) => {
+        if (shouldRejectMissingContent) {
+          shouldRejectMissingContent = false;
+          throw new Error("Could not establish connection. Receiving end does not exist.");
+        }
         if (message?.type === "bandcueNavigateInPage") {
           inPageNavs.push(message.url ?? "");
           inPageNavRequestIds.push(message.requestId ?? -1);
+          inPageNavAudioPrimes.push(message.allowAudioPrime);
           if (inPageNav === "hang") {
             return new Promise(() => {});
           }
@@ -204,12 +227,31 @@ function loadBackground(
     updated,
     inPageNavs,
     inPageNavRequestIds,
+    inPageNavAudioPrimes,
+    reloadedTabs,
     deliverServerMessage,
     sendRuntimeMessage,
     openConnection,
     evaluate
   };
 }
+
+describe("content script recovery", () => {
+  it("reloads and retries when an already-open Songsterr tab has no receiver", async () => {
+    const { context, reloadedTabs } = loadBackground(
+      [{ id: 7, url: SONG_A_TAB, windowId: 1, active: true }],
+      { missingContentOnce: true }
+    );
+
+    const result = await context.sendMessageToSongsterrTab(7, {
+      type: "bandcueSetTempo",
+      tempoPercent: 92
+    });
+
+    expect(reloadedTabs).toEqual([7]);
+    expect(result).toEqual({ ok: true });
+  });
+});
 
 describe("ensureSongsterrTabs tab reuse", () => {
   beforeEach(() => {
@@ -256,6 +298,20 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(0);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
     expect(tabs.map((t: FakeTab) => t.url)).toEqual([SONG_B]);
+  });
+
+  // The iPad's audio priming is a real play/stop through Songsterr's transport,
+  // so a switch made *inside* a count-in must not invite one.
+  it("lets an ordinary song switch re-prime the iPad's audio, but not the count-in's own", async () => {
+    const { context, inPageNavAudioPrimes } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A }, { imminentPlay: true });
+
+    expect(inPageNavAudioPrimes).toEqual([true, false]);
   });
 
   it("falls back to a full navigation when the router ignores the route change", async () => {
@@ -489,7 +545,7 @@ describe("dispatch lead self-correction", () => {
     const { context, evaluate } = loadBackground([]);
     const before = evaluate("adaptiveDispatchLeadMs");
 
-    expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: 320 })).toBe("");
+    expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: 320 }, "play")).toBe("");
     expect(evaluate("adaptiveDispatchLeadMs")).toBe(before);
   });
 
@@ -497,17 +553,32 @@ describe("dispatch lead self-correction", () => {
     const { context, evaluate } = loadBackground([]);
     const before = evaluate("adaptiveDispatchLeadMs");
 
-    const detail = context.adjustDispatchLeadForTiming({ preparedAheadMs: -180 });
+    const detail = context.adjustDispatchLeadForTiming({ preparedAheadMs: -180 }, "play");
 
     expect(evaluate("adaptiveDispatchLeadMs")).toBe(before + 180 + 150);
     expect(detail).toContain("count-in was extended");
+  });
+
+  // Measured on a real iPad: a Stop is scheduled for *now*, so it always reports
+  // arriving with no lead left -- the IPC hop alone guarantees it. Feeding those
+  // into the estimate ratcheted it to the 2500 ms cap over a rehearsal, and that
+  // figure becomes a floor under every Play for the whole band.
+  it("never lets a Stop grow the count-in every Play has to sit through", () => {
+    const { context, evaluate } = loadBackground([]);
+    const before = evaluate("adaptiveDispatchLeadMs");
+
+    for (let i = 0; i < 20; i += 1) {
+      expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: -400 }, "stop")).toBe("");
+    }
+
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(before);
   });
 
   it("never grows the lead past the cap", () => {
     const { context, evaluate } = loadBackground([]);
 
     for (let i = 0; i < 20; i += 1) {
-      context.adjustDispatchLeadForTiming({ preparedAheadMs: -900 });
+      context.adjustDispatchLeadForTiming({ preparedAheadMs: -900 }, "play");
     }
 
     expect(evaluate("adaptiveDispatchLeadMs")).toBe(evaluate("MAX_DISPATCH_LEAD_MS"));
@@ -515,7 +586,7 @@ describe("dispatch lead self-correction", () => {
 
   it("reports the lead it needs so the room's count-in can cover it", () => {
     const { context, evaluate } = loadBackground([]);
-    context.adjustDispatchLeadForTiming({ preparedAheadMs: -200 });
+    context.adjustDispatchLeadForTiming({ preparedAheadMs: -200 }, "play");
 
     const status = context.normalizeAdapterStatus({ ready: true });
 

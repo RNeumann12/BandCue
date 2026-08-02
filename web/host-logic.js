@@ -27,6 +27,19 @@ export const HELIX_MAX_BPM = 400;
 export const HELIX_MAX_BEATS_PER_MEASURE = 16;
 export const HELIX_MAX_TARGET_MEASURE = 128;
 export const HELIX_OFFSET_LIMIT_MS = 60_000;
+export const TEMPO_MIN_PERCENT = 15;
+export const TEMPO_MAX_PERCENT = 175;
+
+export function sanitizeTempoPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 100;
+  return Math.max(TEMPO_MIN_PERCENT, Math.min(TEMPO_MAX_PERCENT, Math.round(number)));
+}
+
+export function effectiveDurationMs(durationMs, tempoPercent) {
+  const duration = sanitizeDurationMs(durationMs);
+  return duration === undefined ? undefined : Math.round(duration * 100 / sanitizeTempoPercent(tempoPercent));
+}
 
 // Trim a setlist song for publishing/persisting: drop empty optional fields and
 // only keep a duration source when there is a usable duration.
@@ -44,6 +57,7 @@ export function normalizeSong(song) {
     songsterrBassUrl: song.songsterrBassUrl || undefined,
     songsterrDrumUrl: song.songsterrDrumUrl || undefined,
     museScoreSource: song.museScoreSource || undefined,
+    tempoPercent: sanitizeTempoPercent(song.tempoPercent),
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
     helixSyncEnabled: Boolean(song.helixSyncEnabled),
@@ -75,6 +89,7 @@ export function normalizeStoredSong(song) {
     songsterrBassUrl: typeof song.songsterrBassUrl === "string" ? song.songsterrBassUrl.trim() : "",
     songsterrDrumUrl: typeof song.songsterrDrumUrl === "string" ? song.songsterrDrumUrl.trim() : "",
     museScoreSource: typeof song.museScoreSource === "string" ? song.museScoreSource.trim() : "",
+    tempoPercent: sanitizeTempoPercent(song.tempoPercent),
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
     helixSyncEnabled: Boolean(song.helixSyncEnabled),
@@ -499,7 +514,8 @@ export function canHostPlay(state) {
     state &&
       state.safety?.armed &&
       state.transport.status === "stopped" &&
-      getReadyAdapters(state).length > 0
+      getReadyAdapters(state).length > 0 &&
+      !tempoBlockedReason(state)
   );
 }
 
@@ -507,10 +523,31 @@ export function playBlockedReason(state) {
   if (!state) return "Room state is not ready yet.";
   if (state.transport.status !== "stopped") return "Transport is already active.";
   if (!state.safety?.armed) return "Arm playback before pressing Play.";
+  const tempoReason = tempoBlockedReason(state);
+  if (tempoReason) return tempoReason;
   if (!getReadyAdapters(state).length) {
     return "No ready desktop adapter yet. Connect MuseScore or Songsterr before starting.";
   }
   return "Play is not available yet.";
+}
+
+export function tempoBlockedReason(state) {
+  const song = state?.currentSong?.song;
+  const requested = sanitizeTempoPercent(song?.tempoPercent);
+  if (!song || requested === 100) return undefined;
+  for (const device of state.clients ?? []) {
+    if (device.role !== "desktop-adapter") continue;
+    const app = device.status?.app ?? (device.capabilities ?? []).find((capability) => capability.canPlay && capability.canStop)?.app;
+    const applies = app === "songsterr" ? appliesToSongsterr(song) : app === "musescore" ? appliesToMuseScore(song) : false;
+    if (!applies) continue;
+    const transportCapability = (device.capabilities ?? []).find((capability) => capability.canPlay && capability.canStop);
+    if (!transportCapability?.canSetTempo) return `${device.deviceName} needs an update to set ${requested}% tempo.`;
+    const tempo = device.status?.tempo;
+    if (tempo?.state !== "applied" || tempo.requestedPercent !== requested || tempo.appliedPercent !== requested) {
+      return `${device.deviceName} has not applied ${requested}% tempo${tempo?.detail ? `: ${tempo.detail}` : "."}`;
+    }
+  }
+  return undefined;
 }
 
 // --- Setlist automation settings ------------------------------------------
@@ -645,6 +682,10 @@ export function collectWarnings(state, readyAdapters, desktopAdapters) {
     if (device.status?.lastCommand?.status === "failed") {
       warnings.push(`${device.deviceName}: ${device.status.lastCommand.detail || "last command failed"}`);
     }
+
+    if (device.status?.tempo && ["failed", "unsupported"].includes(device.status.tempo.state)) {
+      warnings.push(`${device.deviceName}: ${device.status.tempo.detail || "tempo could not be applied"}`);
+    }
   }
 
   return [...new Set(warnings)];
@@ -733,10 +774,11 @@ export function formatSongMeta(song, index, total) {
   if (song.museScoreSource) references.push(`MuseScore: ${song.museScoreSource}`);
   const reference = references.length ? ` - ${references.join(" | ")}` : "";
   const duration = song.durationMs
-    ? ` - ${formatElapsed(song.durationMs)} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
+    ? ` - ${formatElapsed(song.durationMs)}${sanitizeTempoPercent(song.tempoPercent) === 100 ? "" : ` base / ${formatElapsed(effectiveDurationMs(song.durationMs, song.tempoPercent))} effective`} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
     : "";
+  const tempo = ` - ${sanitizeTempoPercent(song.tempoPercent)}% tempo`;
   const helix = formatHelixMeta(song);
-  return `${position} - ${source}${duration}${helix}${reference}`;
+  return `${position} - ${source}${tempo}${duration}${helix}${reference}`;
 }
 
 export function formatHelixMeta(song) {

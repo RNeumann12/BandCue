@@ -36,6 +36,10 @@ class FakeElement {
     return { width: 100, height: 20, top: 10 };
   }
 
+  getClientRects() {
+    return [this.getBoundingClientRect()];
+  }
+
   addEventListener(type: string, listener: () => void) {
     (this.listeners[type] ??= []).push(listener);
   }
@@ -44,6 +48,7 @@ class FakeElement {
 
   dispatchEvent(event: { type?: string }) {
     this.dispatched.push(event?.type ?? "");
+    this.emit(event?.type ?? "");
     return true;
   }
 
@@ -53,8 +58,11 @@ class FakeElement {
     }
   }
 
+  // Set by a test that needs a gesture target to resolve to a control.
+  closestTarget: FakeElement | null = null;
+
   closest() {
-    return null;
+    return this.closestTarget;
   }
 
   clicks = 0;
@@ -68,11 +76,31 @@ class FakeElement {
   isConnected = true;
 
   children: FakeElement[] = [];
+  parentElement: FakeElement | null = null;
 
   appendChild(child: FakeElement) {
     this.children.push(child);
+    child.parentElement = this;
     child.isConnected = true;
     return child;
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    const descendants = this.children.flatMap((child) => [child, ...child.querySelectorAll("*")]);
+    if (selector === "*") return descendants;
+    if (/role=['"]slider['"]/.test(selector)) {
+      return descendants.filter((element) =>
+        element.getAttribute("role") === "slider" && element.getAttribute("aria-valuenow") !== null
+      );
+    }
+    if (/button/.test(selector)) {
+      return descendants.filter((element) => element.getAttribute("data-kind") === "button");
+    }
+    return [];
   }
 
   remove() {
@@ -102,6 +130,11 @@ class FakeKeyboardEvent {
 // content script identifies it by touch points rather than an "iPad" match.
 const IPAD_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+// What Orion actually hands its extensions: it hosts *Chrome* extensions, so the
+// user agent an extension sees claims Chrome -- on an iPad. Sniffing for
+// "AppleWebKit and not Chrome" excluded the one browser this code exists for.
+const ORION_EXTENSION_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 class FakeAudioContext {
   static created = 0;
@@ -118,18 +151,31 @@ class FakeAudioContext {
     FakeAudioContext.created += 1;
   }
 
+  // Sources still running when the test looks -- the silent keep-alive that
+  // stops iPadOS reclaiming an idle session.
+  looping = 0;
+
   createBuffer() {
     return {};
   }
 
+  createGain() {
+    return { gain: { value: 1 }, connect: () => {} };
+  }
+
   createBufferSource() {
-    return {
+    const source = {
       buffer: null,
+      loop: false,
       connect: () => {},
       start: () => {
         this.sounded += 1;
+        if (source.loop) {
+          this.looping += 1;
+        }
       }
     };
+    return source;
   }
 
   resume() {
@@ -148,6 +194,16 @@ function loadContentScript({
   media = [],
   sourceControl = null,
   ipad = false,
+  // Orion's content-script sandbox on iPadOS presents no AudioContext, while the
+  // page it is injected into gates audio behind a gesture exactly as assumed.
+  webAudio = true,
+  // WebKit without touch: the feature is right to stay off, but must say so.
+  desktopSafari = false,
+  // The Chrome-flavoured user agent Orion hands its extensions on iPadOS.
+  orion = false,
+  // A touch device that is not Apple: Android Chrome, which has its own adapter
+  // and does not gate audio the way WebKit does.
+  android = false,
   // "spa" mimics Songsterr's real router: a popstate retitles the document once
   // the new song has loaded. "none" is a router that ignores the route change.
   router = "none"
@@ -156,6 +212,10 @@ function loadContentScript({
   media?: FakeMediaElement[];
   sourceControl?: FakeSourceControl | null;
   ipad?: boolean;
+  webAudio?: boolean;
+  desktopSafari?: boolean;
+  orion?: boolean;
+  android?: boolean;
   router?: "spa" | "none";
 } = {}) {
   const messages: unknown[] = [];
@@ -180,6 +240,15 @@ function loadContentScript({
     querySelector(selector: string) {
       if (sourceControl && /control-source/.test(selector)) {
         return sourceControl;
+      }
+      if (/#c-speed button|#control-speed/.test(selector)) {
+        return elements.find((element) => element.getAttribute("data-speed-control") === "true") ?? null;
+      }
+      if (/role=['"]slider['"]/.test(selector)) {
+        return elements.find((element) => element.getAttribute("role") === "slider") ?? null;
+      }
+      if (/data-tab-control=['"]speed['"]/.test(selector)) {
+        return elements.find((element) => element.getAttribute("data-tab-control") === "speed") ?? null;
       }
       return null;
     },
@@ -232,11 +301,20 @@ function loadContentScript({
   }
 
   const keyEvents: string[] = [];
+  // Which keys were actually sent, so a test can tell a Space transport from the
+  // Backspace that puts the cursor back at the start.
+  const keysPressed: string[] = [];
+  const recordKey = (event: { type?: string; key?: unknown }) => {
+    if (event?.type === "keydown" && typeof event.key === "string") {
+      keysPressed.push(event.key);
+    }
+  };
   let routedTitles = 0;
   const window = {
     innerHeight: 900,
-    dispatchEvent(event: { type?: string }) {
+    dispatchEvent(event: { type?: string; key?: unknown }) {
       keyEvents.push(event?.type ?? "");
+      recordKey(event);
       if (event?.type === "popstate" && router === "spa") {
         routedTitles += 1;
         document.title = `Routed Song ${routedTitles} Tab by Artist`;
@@ -244,8 +322,9 @@ function loadContentScript({
       return true;
     }
   };
-  (document as unknown as { dispatchEvent: (e: { type?: string }) => boolean }).dispatchEvent = (event) => {
+  (document as unknown as { dispatchEvent: (e: { type?: string; key?: unknown }) => boolean }).dispatchEvent = (event) => {
     keyEvents.push(event?.type ?? "");
+    recordKey(event);
     return true;
   };
 
@@ -282,6 +361,7 @@ function loadContentScript({
     setTimeout,
     clearTimeout,
     KeyboardEvent: FakeKeyboardEvent,
+    MouseEvent: FakeMouseEvent,
     HTMLElement: FakeElement,
     Number,
     Date,
@@ -292,7 +372,20 @@ function loadContentScript({
   };
   if (ipad) {
     FakeAudioContext.created = 0;
-    context.navigator = { userAgent: IPAD_USER_AGENT, maxTouchPoints: 5 };
+    context.navigator = {
+      userAgent: orion ? ORION_EXTENSION_USER_AGENT : IPAD_USER_AGENT,
+      maxTouchPoints: desktopSafari ? 0 : 5
+    };
+    if (webAudio) {
+      context.AudioContext = FakeAudioContext;
+    }
+  }
+  if (android) {
+    context.navigator = {
+      userAgent:
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+      maxTouchPoints: 5
+    };
     context.AudioContext = FakeAudioContext;
   }
 
@@ -316,9 +409,54 @@ function loadContentScript({
     evaluate,
     documentListeners,
     fireGesture,
+    keysPressed,
     overlay
   };
 }
+
+class FakeMouseEvent {
+  constructor(public type: string, init: Record<string, unknown> = {}) {
+    Object.assign(this, init);
+  }
+}
+
+describe("Songsterr tempo control", () => {
+  it("confirms an exact arbitrary percentage already shown by the player", async () => {
+    const speed = new FakeElement("92%", { "aria-label": "Playback speed 92%" });
+    const { context } = loadContentScript({ elements: [speed] });
+    const result = await new Promise<any>((resolve) => {
+      context.chrome.runtime.onMessage.listener(
+        { type: "bandcueSetTempo", tempoPercent: 92 },
+        {},
+        resolve
+      );
+    });
+    expect(result).toMatchObject({ ok: true, requestedPercent: 92, appliedPercent: 92 });
+  });
+
+  it("sets 92% through Songsterr's custom desktop speed ruler", async () => {
+    const speedButton = new FakeElement("100%", { "data-speed-control": "true", "data-kind": "button" });
+    const dialog = new FakeElement("", { "data-tab-control": "speed", role: "dialog" });
+    const ruler = new FakeElement();
+    const slider = new FakeElement("", { role: "slider", "aria-valuenow": "100" });
+    ruler.appendChild(slider);
+    dialog.appendChild(ruler);
+    ruler.addEventListener("mousedown", () => slider.setAttribute("aria-valuenow", "92"));
+
+    const { context } = loadContentScript({ elements: [speedButton, dialog, slider] });
+    const result = await new Promise<any>((resolve) => {
+      context.chrome.runtime.onMessage.listener(
+        { type: "bandcueSetTempo", tempoPercent: 92 },
+        {},
+        resolve
+      );
+    });
+
+    expect(speedButton.clicks).toBe(1);
+    expect(ruler.dispatched).toContain("mousedown");
+    expect(result).toMatchObject({ ok: true, requestedPercent: 92, appliedPercent: 92 });
+  });
+});
 
 describe("Songsterr content duration discovery", () => {
   afterEach(() => {
@@ -680,15 +818,45 @@ describe("Songsterr audio arming on iPadOS", () => {
     const { messages, evaluate, fireGesture, overlay } = loadContentScript({ ipad: true });
 
     fireGesture("pointerdown");
-    vi.runOnlyPendingTimers();
+    fireGesture("pointerup");
+    vi.advanceTimersByTime(500);
 
     expect(evaluate("audioArmed")).toBe(true);
     // Sounding a silent frame is what clears the restriction; resume() alone can
     // leave it in place.
-    expect(evaluate("audioArmContext").sounded).toBe(1);
+    expect(evaluate("audioArmContext").sounded).toBeGreaterThanOrEqual(1);
     expect(overlay()?.isConnected).toBe(false);
     expect(messages).toContainEqual(
       expect.objectContaining({ detail: expect.stringMatching(/audio is armed/i) })
+    );
+  });
+
+  it("holds a silent looping source so an idle session is not reclaimed", () => {
+    vi.useFakeTimers();
+    const { evaluate, fireGesture } = loadContentScript({ ipad: true });
+
+    fireGesture("pointerdown");
+    fireGesture("pointerdown");
+    vi.advanceTimersByTime(500);
+
+    // One keep-alive, however many gestures arrive.
+    expect(evaluate("audioArmContext").looping).toBe(1);
+  });
+
+  it("keeps the banner up until Songsterr's own engine has been started too", () => {
+    vi.useFakeTimers();
+    const { messages, evaluate, fireGesture, overlay } = loadContentScript({ ipad: true });
+
+    // pointerdown arms our context, but nothing has reached Songsterr's yet --
+    // the state members used to be stuck in, armed and still silent.
+    fireGesture("pointerdown");
+    vi.runOnlyPendingTimers();
+
+    expect(evaluate("audioArmed")).toBe(true);
+    expect(evaluate("songsterrPrimed")).toBe(false);
+    expect(overlay()?.isConnected).toBe(true);
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/engine is not started/i) })
     );
   });
 
@@ -751,6 +919,288 @@ describe("Songsterr audio arming on iPadOS", () => {
 
     expect(documentListeners.pointerdown).toBeUndefined();
     expect(overlay()).toBeUndefined();
+  });
+
+  // Measured on the real device: Orion's content-script sandbox on iPadOS
+  // presents no AudioContext, and requiring one there switched the entire
+  // feature off -- no banner, no arming, and no priming -- on the one platform
+  // it exists for, while the page went on gating audio behind a gesture.
+  it("still runs on a WebKit touch device whose sandbox has no Web Audio", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture, messages, overlay } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      webAudio: false
+    });
+    vi.runOnlyPendingTimers();
+
+    // The banner still asks, because Songsterr's own engine still has to be
+    // started from a real touch.
+    expect(evaluate("audioArmingInstalled")).toBe(true);
+    expect(evaluate("audioArmSupported")).toBe(false);
+    expect(overlay()?.textContent).toMatch(/tap to enable/i);
+
+    fireGesture("touchend");
+    expect(toggle.clicks).toBe(1);
+    vi.advanceTimersByTime(200);
+
+    expect(evaluate("songsterrPrimed")).toBe(true);
+    expect(overlay()?.isConnected).toBe(false);
+    // An arm we can never observe must not keep reporting the device as dead.
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/priming only/i) })
+    );
+  });
+
+  // The device this whole feature exists for, as it really reports itself:
+  // an iPad, with no AudioContext in the sandbox, claiming to be Chrome.
+  it("runs on Orion for iPadOS, which tells extensions it is Chrome", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture, overlay } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      orion: true,
+      webAudio: false
+    });
+    vi.runOnlyPendingTimers();
+
+    expect(evaluate("audioArmingInstalled")).toBe(true);
+    expect(overlay()?.textContent).toMatch(/tap to enable/i);
+
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+
+    expect(toggle.clicks).toBe(2);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("says why the audio handling is off, and what decided it", () => {
+    const { messages } = loadContentScript({
+      ipad: true,
+      webAudio: false,
+      // Apple, but no touch: desktop Safari, where the feature is right to stay
+      // off -- the reason and the user agent behind it must still be visible.
+      desktopSafari: true
+    });
+
+    expect(messages).toContainEqual(
+      expect.objectContaining({
+        detail: expect.stringMatching(/gesture-gated audio handling off \(apple=1 touch=0/i)
+      })
+    );
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringContaining('ua="Mozilla/5.0 (Macintosh') })
+    );
+  });
+
+  it("leaves a touch device that is not Apple to its own adapter", () => {
+    const { documentListeners, overlay } = loadContentScript({ android: true });
+
+    expect(documentListeners.pointerdown).toBeUndefined();
+    expect(overlay()).toBeUndefined();
+  });
+});
+
+// Songsterr's player transport as it really is on a localized UI: a single
+// toggle identified by its CSS-module class, with no English label to read.
+function transportToggle() {
+  return new FakeElement("", { class: "_8e144G_button _8e144G_play" });
+}
+
+describe("Songsterr audio priming on iPadOS", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("presses Play and Stop for the member, inside their own tap", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture, keysPressed, overlay } = loadContentScript({
+      elements: [toggle],
+      ipad: true
+    });
+
+    fireGesture("touchend");
+
+    // Synchronously, still inside the gesture: the document's live user
+    // activation is what lets Songsterr's own context start, and it is gone by
+    // the next task.
+    expect(toggle.clicks).toBe(1);
+
+    vi.advanceTimersByTime(200);
+    expect(toggle.clicks).toBe(2);
+    expect(keysPressed).toContain("Backspace");
+    expect(evaluate("songsterrPrimed")).toBe(true);
+    expect(overlay()?.isConnected).toBe(false);
+  });
+
+  it("primes only once, however many events one tap produces", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+
+    fireGesture("pointerdown");
+    fireGesture("touchend");
+    fireGesture("pointerup");
+    fireGesture("click");
+    vi.advanceTimersByTime(500);
+
+    // One play, one stop -- not a cycle per event.
+    expect(toggle.clicks).toBe(2);
+  });
+
+  it("leaves the member's own press of the player control alone", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const target = new FakeElement();
+    target.closestTarget = toggle;
+    const { evaluate, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+
+    fireGesture("touchend", { target });
+    vi.advanceTimersByTime(500);
+
+    // Their gesture already reaches Songsterr; a click of ours would only undo it.
+    expect(toggle.clicks).toBe(0);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("never touches the transport while a scheduled command is pending", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+    evaluate("transportCommandPending = true");
+
+    fireGesture("touchend");
+    vi.advanceTimersByTime(500);
+
+    expect(toggle.clicks).toBe(0);
+    expect(evaluate("songsterrPrimed")).toBe(false);
+  });
+
+  it("never touches the transport while BandCue playback is running", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+    evaluate("bandcuePlaybackActive = true");
+
+    fireGesture("touchend");
+    vi.advanceTimersByTime(500);
+
+    expect(toggle.clicks).toBe(0);
+  });
+
+  it("ends a priming cycle at once when a real command arrives", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { context, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+    fireGesture("touchend");
+    expect(toggle.clicks).toBe(1);
+
+    const transport = context.chrome.runtime.onMessage.listener(
+      { type: "bandcueTransport", action: "play", dueLocalAt: 0 },
+      {},
+      () => {}
+    );
+
+    // The priming stop has already run by the time the command is being
+    // prepared, so it can never land inside the real play.
+    expect(toggle.clicks).toBe(2);
+    vi.advanceTimersByTime(500);
+    await Promise.resolve();
+    expect(transport).toBe(true);
+  });
+
+  it("re-primes after an in-page song switch", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { context, evaluate, fireGesture } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      router: "spa"
+    });
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+    expect(toggle.clicks).toBe(2);
+
+    const switched = context.navigateInPage("https://www.songsterr.com/a/wsa/song-b-tab-s200", {
+      allowAudioPrime: true
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await switched;
+    // The document -- and our arm -- survived, but Songsterr rebuilt its player.
+    expect(evaluate("songsterrPrimed")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(toggle.clicks).toBe(4);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("does not re-prime a switch that a downbeat is already following", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { context, evaluate, fireGesture } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      router: "spa"
+    });
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+
+    const switched = context.navigateInPage("https://www.songsterr.com/a/wsa/song-b-tab-s200", {
+      allowAudioPrime: false
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await switched;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Still the one play/stop from the tap: nothing of ours goes near the
+    // transport once the count-in has started.
+    expect(toggle.clicks).toBe(2);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("tells the host when a start left the player standing still", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const clock = new FakeElement("0:00 / 3:45", { class: "player-time" });
+    const { context, evaluate, fireGesture, messages } = loadContentScript({
+      elements: [toggle, clock],
+      ipad: true
+    });
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+
+    const played = context.runScheduledTransport({ action: "play", dueLocalAt: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    await played;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // The click landed and Songsterr flipped its button, but the position never
+    // moved: the silent WebKit start that used to be reported as a clean start.
+    expect(evaluate("songsterrPrimed")).toBe(false);
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/never moved/i) })
+    );
+  });
+
+  it("says nothing when the player is moving", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const clock = new FakeElement("0:00 / 3:45", { class: "player-time" });
+    const { context, messages } = loadContentScript({ elements: [toggle, clock], ipad: true });
+
+    const played = context.runScheduledTransport({ action: "play", dueLocalAt: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    await played;
+    clock.textContent = "0:01 / 3:45";
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/never moved/i) })
+    );
   });
 });
 

@@ -31,6 +31,17 @@ export interface AdapterCapability {
   app: AppType;
   canPlay: boolean;
   canStop: boolean;
+  /** Whether this adapter can apply and verify a per-song playback tempo. */
+  canSetTempo?: boolean;
+}
+
+export type AdapterTempoState = "pending" | "applied" | "failed" | "unsupported";
+
+export interface AdapterTempoStatus {
+  requestedPercent: number;
+  appliedPercent?: number;
+  state: AdapterTempoState;
+  detail?: string;
 }
 
 export type CatalogMatchStatus = "matched" | "ambiguous" | "missing" | "not-applicable";
@@ -120,6 +131,7 @@ export interface AdapterStatus {
    * see scheduleDelayForClients in shared/transport.ts.
    */
   requiredLeadMs?: number;
+  tempo?: AdapterTempoStatus;
   lastCommand?: {
     action: AdapterCommandAction;
     sequenceId?: number;
@@ -225,6 +237,8 @@ export interface SetlistSong {
    * MuseScore adapter falls back to `source` if `sourceType` is "musescore".
    */
   museScoreSource?: string;
+  /** Playback speed as an integer percentage. Missing legacy values mean 100%. */
+  tempoPercent?: number;
   durationMs?: number;
   durationSource?: SongDurationSource;
   helixSyncEnabled?: boolean;

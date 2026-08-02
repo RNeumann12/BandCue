@@ -4,7 +4,15 @@ let statusReportTimer;
 let durationObserver;
 let lastObservedDurationMs;
 let lastObservedSource = location.href;
+/** @type {{ requestedPercent: number, appliedPercent?: number, state: string, detail: string }} */
+let tempoStatus = { requestedPercent: 100, appliedPercent: 100, state: "applied", detail: "100% tempo" };
 const observedMediaElements = new WeakSet();
+// Songsterr's desktop speed ruler does not expose a native range input. These
+// are the exact stops produced by its current ruler implementation (the eight
+// labelled presets with two evenly spaced stops between each pair).
+const SONGSTERR_DESKTOP_SPEEDS = [
+  15, 18, 22, 25, 33, 42, 50, 58, 67, 75, 83, 92, 100, 108, 117, 125, 133, 142, 150, 158, 167, 175
+];
 
 // Audio arming (iPadOS/iOS) -- see the section at the end of this file for what
 // this is for. The state lives here because the bootstrap block below reads it.
@@ -17,14 +25,42 @@ const AUDIO_ARM_EVENTS = [
   "click",
   "keydown"
 ];
-const AUDIO_ARMED_DETAIL = "BandCue audio is armed on this device";
+// Gestures that *end* a tap. Both WebKit's audio unlock and Songsterr's own
+// transport are at their most reliable inside these, and every tap produces one,
+// so the priming cycle rides on them rather than on pointerdown.
+const AUDIO_PRIME_EVENTS = new Set(["pointerup", "touchend", "click", "keydown"]);
+const AUDIO_READY_DETAIL = "BandCue audio is armed and the Songsterr player is primed on this device";
 const AUDIO_NOT_ARMED_DETAIL =
   "Audio is not armed on this device -- tap the Songsterr page once so BandCue can start playback";
+const AUDIO_NOT_PRIMED_DETAIL =
+  "Songsterr's own audio engine is not started on this device -- tap the Songsterr page once so BandCue can start playback";
+const PLAYBACK_STALLED_DETAIL =
+  "Songsterr took the start but the player never moved (silent start) -- tap the Songsterr page once";
 let audioArmContext;
+// Silent looping source held open so the audio session never goes idle; see
+// startAudioArmKeepAlive.
+let audioArmKeepAlive;
 let audioArmed = false;
+// Whether *this* world can build an AudioContext at all. False in Orion's
+// content-script sandbox on iPadOS, where the priming half still works and is
+// the half that matters; the arm then simply never gates readiness.
+let audioArmSupported = false;
+// Whether Songsterr's *own* audio engine has been started once on this page.
+// Separate from audioArmed on purpose: our context being unlocked says nothing
+// about the player's, which is the whole reason a member had to press Play/Stop
+// by hand after every load. See the priming section at the end of this file.
+let songsterrPrimed = false;
+let primeStopTimer;
+let primeVerifyTimer;
+let postSwitchPrimeTimer;
+// True from the moment a scheduled transport command arrives until it has fired,
+// and (for play) until the matching stop. Priming must never touch the transport
+// inside that window.
+let transportCommandPending = false;
+let bandcuePlaybackActive = false;
 let audioArmOverlay;
 let audioArmingInstalled = false;
-// Forces the first setAudioArmed call through even though `false` is already the
+// Forces the first readiness publish through even though `false` is already the
 // current value, so the very first status report carries the arm state.
 let audioArmStateReported = false;
 
@@ -44,6 +80,13 @@ function reportStatus() {
   if (audioArmingInstalled) {
     // Songsterr re-renders can drop the banner out of the DOM; put it back.
     syncAudioArmOverlay();
+    // A song that ends by itself is never followed by a Stop command (the
+    // players have already stopped), so this is where a finished play is
+    // noticed. Without it, priming would stay blocked for the rest of the night
+    // after the first song.
+    if (bandcuePlaybackActive && inferPlaybackState() === "stopped") {
+      bandcuePlaybackActive = false;
+    }
   }
   const durationMs = readSongDurationMs();
   lastObservedDurationMs = durationMs;
@@ -58,6 +101,7 @@ function reportStatus() {
     title: document.title,
     source: location.href,
     durationMs,
+    tempo: tempoStatus,
     detail: lastControlDetail
   });
 }
@@ -90,16 +134,42 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
-  if (message.type === "bandcueTransport") {
-    runScheduledTransport(message).then((result) => {
+  if (message.type === "bandcueSetTempo") {
+    setSongsterrTempo(message.tempoPercent).then((result) => {
+      tempoStatus = result.ok
+        ? { requestedPercent: result.requestedPercent, appliedPercent: result.appliedPercent, state: "applied", detail: result.detail }
+        : { requestedPercent: result.requestedPercent, state: "failed", detail: result.detail };
+      lastControlDetail = result.detail;
       reportStatus();
       sendResponse(result);
     });
     return true;
   }
 
+  if (message.type === "bandcueTransport") {
+    // Synchronously, before any awaiting: a priming play/stop cycle must never
+    // still be running into a real downbeat.
+    transportCommandPending = true;
+    cancelAudioPrime();
+    runScheduledTransport(message)
+      // A command that throws must still clear the pending flag below -- leaving
+      // it set would block audio priming for the rest of the session -- and the
+      // background gets a reason instead of a channel that simply closes.
+      .catch((error) => ({
+        ok: false,
+        detail: `Songsterr transport failed: ${error?.message || error}`,
+        controlPath: "content-script"
+      }))
+      .then((result) => {
+        transportCommandPending = false;
+        reportStatus();
+        sendResponse(result);
+      });
+    return true;
+  }
+
   if (message.type === "bandcueNavigateInPage") {
-    navigateInPage(message.url).then((result) => {
+    navigateInPage(message.url, message).then((result) => {
       // Reported twice on purpose: Safari-derived browsers (Orion on iPadOS --
       // the platform this path exists for) do not reliably hold an async
       // sendResponse channel open for as long as the router takes, and losing
@@ -122,6 +192,182 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return false;
 });
+
+async function setSongsterrTempo(value) {
+  const requestedPercent = Math.max(15, Math.min(175, Math.round(Number(value) || 100)));
+  if (readVisibleTempoPercent() === requestedPercent) {
+    return { ok: true, requestedPercent, appliedPercent: requestedPercent, detail: `${requestedPercent}% tempo already selected` };
+  }
+
+  const speedControl = findSpeedControl();
+  if (!speedControl) {
+    return { ok: false, requestedPercent, detail: "Could not find Songsterr's playback speed control (Songsterr Plus may be required)." };
+  }
+  /** @type {HTMLElement} */ (speedControl).click();
+  const speedDialog = await waitForSpeedDialog();
+  if (!speedDialog) {
+    return { ok: false, requestedPercent, detail: "Songsterr opened speed settings but the controls did not finish loading." };
+  }
+
+  const exactOption = [...speedDialog.querySelectorAll("button, [role='button'], [role='option']")]
+    .find((element) => normalizedControlText(element) === `${requestedPercent}%`);
+  if (exactOption) {
+    /** @type {HTMLElement} */ (exactOption).click();
+  } else {
+    const slider = speedDialog.querySelector("[role='slider'][aria-valuenow]");
+    if (slider) {
+      const sliderResult = setSongsterrDesktopSlider(slider, requestedPercent);
+      if (!sliderResult.ok) {
+        return { ok: false, requestedPercent, detail: sliderResult.detail };
+      }
+    } else {
+      const input = [...speedDialog.querySelectorAll("input")].find((candidate) => {
+        const min = Number(candidate.min || 15);
+        const max = Number(candidate.max || 175);
+        return (candidate.type === "range" || candidate.type === "number") && min <= requestedPercent && max >= requestedPercent;
+      });
+      if (input) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        nativeSetter?.call(input, String(requestedPercent));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (!await setSongsterrCompactFineTempo(speedDialog, requestedPercent)) {
+        return { ok: false, requestedPercent, detail: `Songsterr opened speed settings but exposed no control for ${requestedPercent}%.` };
+      }
+    }
+  }
+
+  const appliedPercent = await waitForTempoPercent(requestedPercent);
+  return appliedPercent === requestedPercent
+    ? { ok: true, requestedPercent, appliedPercent, detail: `${requestedPercent}% tempo applied through Songsterr controls` }
+    : { ok: false, requestedPercent, detail: `Songsterr did not confirm ${requestedPercent}% tempo${appliedPercent ? ` (shows ${appliedPercent}%)` : ""}.` };
+}
+
+async function waitForSpeedDialog() {
+  const deadline = Date.now() + 2000;
+  while (Date.now() <= deadline) {
+    const dialog = document.querySelector("[data-tab-control='speed'], [role='dialog'] [role='slider'][aria-valuenow]")
+      ?.closest?.("[data-tab-control='speed'], [role='dialog']")
+      ?? document.querySelector("[data-tab-control='speed']");
+    if (dialog) return dialog;
+    await delay(40);
+  }
+  return undefined;
+}
+
+function setSongsterrDesktopSlider(slider, requestedPercent) {
+  const targetIndex = SONGSTERR_DESKTOP_SPEEDS.indexOf(requestedPercent);
+  if (targetIndex < 0) {
+    return {
+      ok: false,
+      detail: `${requestedPercent}% is not an exact Songsterr desktop speed stop. Use one of: ${SONGSTERR_DESKTOP_SPEEDS.join(", ")}%.`
+    };
+  }
+
+  const ruler = slider.parentElement;
+  const rect = ruler?.getBoundingClientRect?.();
+  if (!ruler || !rect || rect.width <= 0) {
+    return { ok: false, detail: "Songsterr's speed ruler is not visible." };
+  }
+
+  const ratio = targetIndex / (SONGSTERR_DESKTOP_SPEEDS.length - 1);
+  const clientX = rect.left + rect.width * ratio;
+  const clientY = rect.top + rect.height / 2;
+  const usesPointerEvents = typeof PointerEvent === "function";
+  const mouseInit = { bubbles: true, cancelable: true, buttons: 1, clientX, clientY };
+  if (usesPointerEvents) {
+    ruler.dispatchEvent(new PointerEvent("pointerdown", { ...mouseInit, pointerId: 1, pointerType: "mouse" }));
+    document.dispatchEvent(new PointerEvent("pointerup", { ...mouseInit, buttons: 0, pointerId: 1, pointerType: "mouse" }));
+  } else {
+    ruler.dispatchEvent(new MouseEvent("mousedown", mouseInit));
+    document.dispatchEvent(new MouseEvent("mouseup", { ...mouseInit, buttons: 0 }));
+  }
+  return { ok: true };
+}
+
+async function setSongsterrCompactFineTempo(speedDialog, requestedPercent) {
+  let current = readTempoPercentFrom(speedDialog);
+  if (current === requestedPercent) return true;
+
+  const fineTuning = [...speedDialog.querySelectorAll("button")]
+    .find((button) => /fine tuning/i.test(button.getAttribute("aria-label") || "") || normalizedControlText(button) === "- | +");
+  if (fineTuning) {
+    /** @type {HTMLElement} */ (fineTuning).click();
+    await delay(60);
+  }
+
+  current = readTempoPercentFrom(speedDialog);
+  if (current === undefined) return false;
+  const valueElement = [...speedDialog.querySelectorAll("*")]
+    .find((element) => normalizedControlText(element) === `${current}%`);
+  const fineSection = valueElement?.closest?.("section");
+  const buttons = fineSection ? [...fineSection.querySelectorAll("button")] : [];
+  if (buttons.length < 2) return false;
+
+  const directionButton = requestedPercent < current ? buttons[0] : buttons[buttons.length - 1];
+  const clickCount = Math.abs(requestedPercent - current);
+  for (let click = 0; click < clickCount; click += 1) {
+    /** @type {HTMLElement} */ (directionButton).click();
+    // React must commit each one-percent state update before the next click;
+    // otherwise batched synthetic clicks can all calculate from one stale value.
+    await delay(12);
+  }
+  return true;
+}
+
+async function waitForTempoPercent(requestedPercent) {
+  const deadline = Date.now() + 1500;
+  let visible;
+  while (Date.now() <= deadline) {
+    visible = readVisibleTempoPercent();
+    if (visible === requestedPercent) return visible;
+    await delay(40);
+  }
+  return visible;
+}
+
+function findSpeedControl() {
+  return document.querySelector("#c-speed button, #control-speed")
+    ?? [...document.querySelectorAll("button, [role='button']")].find((element) => {
+    const label = normalizedControlText(element);
+    return /(?:playback\s*)?speed|tempo|\b\d{1,3}%/i.test(label);
+  });
+}
+
+function readVisibleTempoPercent() {
+  const slider = document.querySelector("[data-tab-control='speed'] [role='slider'][aria-valuenow]");
+  if (slider && slider.getClientRects().length) {
+    const value = Number(slider.getAttribute("aria-valuenow"));
+    if (Number.isFinite(value)) return Math.round(value);
+  }
+  for (const element of document.querySelectorAll("button, [role='button'], output, [aria-label]")) {
+    const match = normalizedControlText(element).match(/\b(\d{1,3})%/);
+    if (match && element.getClientRects().length) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function readTempoPercentFrom(root) {
+  const slider = root.querySelector?.("[role='slider'][aria-valuenow]");
+  if (slider) {
+    const value = Number(slider.getAttribute("aria-valuenow"));
+    if (Number.isFinite(value)) return Math.round(value);
+  }
+  for (const element of root.querySelectorAll?.("*") ?? []) {
+    const match = normalizedControlText(element).match(/^(\d{1,3})%$/);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function normalizedControlText(element) {
+  return `${element.getAttribute?.("aria-label") || ""} ${element.getAttribute?.("title") || ""} ${element.textContent || ""}`
+    .replace(/\s+/g, " ").trim();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 installAudioArming();
 reportStatus();
@@ -165,6 +411,12 @@ function handleRuntimeMessageError(error) {
 // ~5 ms apiece on a real Songsterr page and scaling with DOM size and CPU --
 // i.e. a per-device head start that no clock sync can compensate for.
 async function runScheduledTransport(message) {
+  if (message.action === "play") {
+    const requestedTempo = Math.max(15, Math.min(175, Math.round(Number(message.tempoPercent) || 100)));
+    if (tempoStatus.state !== "applied" || tempoStatus.appliedPercent !== requestedTempo) {
+      return { ok: false, detail: `${requestedTempo}% tempo is not applied; open/load the song before Play.`, controlPath: "tempo-preflight" };
+    }
+  }
   const action = message.action;
   const resetBeforePlay = Boolean(message.resetBeforePlay);
   const dueLocalAt = Number(message.dueLocalAt) || 0;
@@ -192,6 +444,16 @@ async function runScheduledTransport(message) {
   result.firedAtLocal = Date.now();
   if (prepared) {
     recordActionCost(result.firedAtLocal - (dueLocalAt - aimMs + wakeLatenessMs));
+  }
+  if (action === "play") {
+    bandcuePlaybackActive = result.ok;
+    if (result.ok) {
+      // Deliberately not awaited: the answer to the background must not wait on
+      // a check that runs a second into the song.
+      void verifyPlaybackProgress();
+    }
+  } else {
+    bandcuePlaybackActive = false;
   }
   result.timing = {
     deviationMs: dueLocalAt ? result.firedAtLocal - dueLocalAt : 0,
@@ -903,7 +1165,7 @@ function joinControlDetails(...details) {
 const IN_PAGE_NAV_TIMEOUT_MS = 2500;
 const IN_PAGE_NAV_POLL_MS = 50;
 
-async function navigateInPage(rawUrl) {
+async function navigateInPage(rawUrl, options = {}) {
   let target;
   try {
     target = new URL(rawUrl, location.href);
@@ -921,6 +1183,10 @@ async function navigateInPage(rawUrl) {
 
   const previousHref = location.href;
   const previousTitle = document.title;
+  // Only once the switch is really going ahead: a redundant request for the song
+  // we are already on must not throw away a re-prime scheduled by the switch
+  // that put us here.
+  cancelAudioPrime();
   try {
     history.pushState({}, "", `${target.pathname}${target.search}`);
     window.dispatchEvent(new PopStateEvent("popstate", { state: {} }));
@@ -945,6 +1211,12 @@ async function navigateInPage(rawUrl) {
   lastObservedDurationMs = undefined;
   startDurationObservation();
   enforceSynthOnLoad();
+  // The arm survives the switch, but Songsterr rebuilt its player -- and with it
+  // possibly the audio graph that has to be started once. Re-prime unless a
+  // downbeat is already on its way (the background says so).
+  if (options.allowAudioPrime !== false) {
+    schedulePostSwitchAudioPrime();
+  }
   scheduleStatusReport(0);
   return { ok: true, detail: "Switched Songsterr song without reloading the page" };
 }
@@ -1006,29 +1278,62 @@ function waitForTitleChange(previousTitle) {
 // while it is still missing, and the arm state is reported to the host so a dark
 // iPad is visible *before* the count-in rather than after.
 //
-// None of this touches the downbeat path: arming runs on the user's tap, and the
-// transport code only reads a boolean.
+// Arming our own context is necessary but *not sufficient*, which is why members
+// still had to press Play and Stop by hand after every load before it worked:
+// WebKit's start restriction is carried by each AudioContext, and Songsterr's is
+// a different object from ours. Unlocking ours proves the gesture happened; only
+// something that reaches Songsterr's own graph unlocks that. So the same gesture
+// now also runs one play/stop cycle through Songsterr's own transport -- exactly
+// the by-hand ritual, done for the member -- see the priming section below.
+//
+// None of this touches the downbeat path: arming and priming run on the user's
+// tap or between songs, and the transport code only reads a boolean.
 
 // State for this section lives with the other module state at the top of the
 // file, because the bootstrap block reads it before this point.
 
 /**
- * True only on the browsers that gate Web Audio behind a live user gesture per
+ * True only on the browsers that gate audio behind a live user gesture per
  * document: WebKit on a touch device. Orion on iPadOS reports the desktop Safari
  * user agent, so the touch-point count -- not an "iPad" string match -- is what
  * identifies it. Chromium and desktop Safari never pay for any of this.
+ *
+ * Deliberately says nothing about Web Audio. This used to require an
+ * AudioContext in *our* world, which switched the whole feature off on the one
+ * platform it exists for: Orion's content-script sandbox does not present the
+ * constructor, so on a real iPad neither the banner nor the arming nor the
+ * priming ever ran -- while the page itself gates audio exactly as assumed.
+ * Priming is pure DOM and needs no Web Audio at all; only the arming half does,
+ * and that half now switches itself off on its own (see audioArmSupported).
  */
-function needsAudioArming() {
+function usesGestureGatedAudio() {
   const runtimeNavigator = globalThis.navigator;
-  if (!runtimeNavigator || typeof audioContextConstructor() !== "function") {
+  if (!runtimeNavigator) {
     return false;
   }
 
-  const userAgent = runtimeNavigator.userAgent || "";
-  const isWebKit = /AppleWebKit/.test(userAgent) && !/Chrome|Chromium|Edg\//.test(userAgent);
-  const isTouch =
-    (runtimeNavigator.maxTouchPoints || 0) > 1 || /iPad|iPhone|iPod/.test(userAgent);
-  return isWebKit && isTouch;
+  return isApplePlatform(runtimeNavigator) && isTouchDevice(runtimeNavigator);
+}
+
+/**
+ * Apple hardware, whatever the browser claims to *be*. The classic WebKit sniff
+ * -- "AppleWebKit and not Chrome" -- is precisely wrong here: Orion hosts Chrome
+ * extensions and presents a Chrome-flavoured user agent to them, so the one
+ * browser this code exists for was the one it excluded. The Apple platform token
+ * survives in those user agents, and together with a touch screen it identifies
+ * an iPad/iPhone without asking which engine is drawing it. A desktop OS token
+ * (Windows/Android/CrOS/Linux) is therefore not merely "not Apple" -- it is a
+ * device with its own adapter, and stays out.
+ */
+function isApplePlatform(runtimeNavigator) {
+  const signature = `${runtimeNavigator.userAgent || ""} ${
+    runtimeNavigator.userAgentData?.platform || runtimeNavigator.platform || ""
+  }`;
+  return /iPad|iPhone|iPod|Macintosh|Mac OS X|macOS/i.test(signature);
+}
+
+function isTouchDevice(runtimeNavigator) {
+  return (runtimeNavigator.maxTouchPoints || 0) > 0 || "ontouchstart" in globalThis;
 }
 
 function audioContextConstructor() {
@@ -1036,11 +1341,20 @@ function audioContextConstructor() {
 }
 
 function installAudioArming() {
-  if (audioArmingInstalled || typeof document.addEventListener !== "function" || !needsAudioArming()) {
+  if (audioArmingInstalled || typeof document.addEventListener !== "function") {
+    return;
+  }
+
+  if (!usesGestureGatedAudio()) {
+    // Nothing to install -- but say so once, because "the feature never ran" is
+    // otherwise indistinguishable from "the feature ran and found nothing to do",
+    // and telling those apart took a whole rehearsal once.
+    lastControlDetail = describeSkippedAudioHandling();
     return;
   }
 
   audioArmingInstalled = true;
+  audioArmSupported = typeof audioContextConstructor() === "function";
   for (const type of AUDIO_ARM_EVENTS) {
     // Passive so the listeners can never delay a scroll or a tap, and capture so
     // they see the gesture even if Songsterr stops it from bubbling.
@@ -1050,14 +1364,47 @@ function installAudioArming() {
   setAudioArmed(false);
 }
 
+/**
+ * Why the gesture-gated audio handling is off, including the user agent that
+ * decided it. Reported unconditionally and from the content script's own world,
+ * because every wrong guess about this device so far was made from somewhere
+ * else -- and "it never ran" was indistinguishable from "it ran and was happy"
+ * for two releases.
+ */
+function describeSkippedAudioHandling() {
+  const runtimeNavigator = globalThis.navigator;
+  if (!runtimeNavigator) {
+    return `${lastControlDetail}; gesture-gated audio handling off (no navigator)`;
+  }
+
+  const flags = [
+    `apple=${isApplePlatform(runtimeNavigator) ? 1 : 0}`,
+    `touch=${isTouchDevice(runtimeNavigator) ? 1 : 0}`,
+    `touchPoints=${runtimeNavigator.maxTouchPoints || 0}`,
+    `audioContext=${typeof audioContextConstructor() === "function" ? 1 : 0}`
+  ].join(" ");
+  const userAgent = String(runtimeNavigator.userAgent || "").slice(0, 90);
+  return `${lastControlDetail}; gesture-gated audio handling off (${flags}) ua="${userAgent}"`;
+}
+
 function handleArmingGesture(event) {
-  // Our own Space/Backspace shortcuts dispatch untrusted KeyboardEvents; those
-  // do not unlock anything, so they must not be mistaken for a real gesture.
-  if (audioArmed || event?.isTrusted === false) {
+  // Our own Space/Backspace shortcuts and priming clicks dispatch untrusted
+  // events; those unlock nothing, so they must never be mistaken for a gesture.
+  if (event?.isTrusted === false) {
     return;
   }
 
-  armAudio();
+  if (audioArmSupported && !audioArmed) {
+    armAudio();
+  }
+
+  // Priming has to happen *synchronously* inside this handler: it is the
+  // document's live user activation that lets Songsterr's own context start, and
+  // that is gone by the next task. Only on the events that end a tap, where
+  // WebKit is most permissive -- a tap always produces one of them.
+  if (AUDIO_PRIME_EVENTS.has(event?.type)) {
+    primeSongsterrAudio(event);
+  }
 }
 
 function armAudio() {
@@ -1077,6 +1424,7 @@ function armAudio() {
     source.buffer = audioArmContext.createBuffer(1, 1, audioArmContext.sampleRate);
     source.connect(audioArmContext.destination);
     source.start(0);
+    startAudioArmKeepAlive();
     const resumed = audioArmContext.resume();
     if (resumed?.then) {
       resumed.then(refreshAudioArmState, refreshAudioArmState);
@@ -1087,6 +1435,35 @@ function armAudio() {
   }
 
   refreshAudioArmState();
+}
+
+/**
+ * iPadOS takes an *idle* audio session away when the tab goes to the background
+ * or the screen locks, and getting it back needs another gesture -- which is why
+ * an iPad that sat through one song could be dark for the next. A session with a
+ * source still running is far less likely to be reclaimed, so hold one open for
+ * as long as the page lives: one second of silence, looped, through a gain of
+ * zero. Inaudible, and cheap enough to leave running all night.
+ */
+function startAudioArmKeepAlive() {
+  if (audioArmKeepAlive || typeof audioArmContext?.createGain !== "function") {
+    return;
+  }
+
+  try {
+    const gain = audioArmContext.createGain();
+    gain.gain.value = 0;
+    gain.connect(audioArmContext.destination);
+    const source = audioArmContext.createBufferSource();
+    const frames = Math.max(1, Math.round(audioArmContext.sampleRate) || 1);
+    source.buffer = audioArmContext.createBuffer(1, frames, audioArmContext.sampleRate);
+    source.loop = true;
+    source.connect(gain);
+    source.start(0);
+    audioArmKeepAlive = source;
+  } catch {
+    // Without a keep-alive the arm simply behaves as it did before.
+  }
 }
 
 function refreshAudioArmState() {
@@ -1116,10 +1493,44 @@ function setAudioArmed(next) {
   }
 
   audioArmed = next;
+  if (!next && audioArmSupported) {
+    // The session went away, so whatever we did to Songsterr's engine went with
+    // it: the next tap has to prime again. Only meaningful where we hold a
+    // context of our own; without one, `false` is simply what it always is and
+    // must not keep re-arming the banner.
+    songsterrPrimed = false;
+  }
+  publishAudioReadiness();
+}
+
+function setSongsterrPrimed(next) {
+  if (songsterrPrimed === next && audioArmStateReported) {
+    return;
+  }
+
+  songsterrPrimed = next;
+  publishAudioReadiness();
+}
+
+function publishAudioReadiness() {
   audioArmStateReported = true;
-  lastControlDetail = next ? AUDIO_ARMED_DETAIL : AUDIO_NOT_ARMED_DETAIL;
+  lastControlDetail = audioReadinessDetail();
   syncAudioArmOverlay();
   scheduleStatusReport(0);
+}
+
+/** What the host is told about this device's audio, most blocking issue first. */
+function audioReadinessDetail() {
+  if (audioArmSupported && !audioArmed) {
+    return AUDIO_NOT_ARMED_DETAIL;
+  }
+
+  const detail = songsterrPrimed ? AUDIO_READY_DETAIL : AUDIO_NOT_PRIMED_DETAIL;
+  return audioArmSupported ? detail : `${detail} (priming only; no Web Audio in this context)`;
+}
+
+function isAudioReady() {
+  return (audioArmed || !audioArmSupported) && songsterrPrimed;
 }
 
 /**
@@ -1128,7 +1539,7 @@ function setAudioArmed(next) {
  * back. Never called from the transport path.
  */
 function syncAudioArmOverlay() {
-  if (audioArmed) {
+  if (isAudioReady()) {
     audioArmOverlay?.remove();
     audioArmOverlay = undefined;
     return;
@@ -1170,5 +1581,288 @@ function syncAudioArmOverlay() {
  * Two boolean reads, so it costs the downbeat nothing.
  */
 function audioArmWarning(action) {
-  return action === "play" && audioArmingInstalled && !audioArmed ? AUDIO_NOT_ARMED_DETAIL : "";
+  if (action !== "play" || !audioArmingInstalled || isAudioReady()) {
+    return "";
+  }
+
+  return audioArmSupported && !audioArmed ? AUDIO_NOT_ARMED_DETAIL : AUDIO_NOT_PRIMED_DETAIL;
+}
+
+// --- Priming Songsterr's own audio engine (iPadOS/iOS) ----------------------
+// The arming above unlocks *our* AudioContext. WebKit's start restriction is
+// carried per context, though, and Songsterr's is not ours: a member could be
+// armed and still dead silent, which is exactly the state where pressing Play
+// and Stop once by hand -- after every load -- was the only thing that worked.
+//
+// So do that for them. Inside the same trusted gesture that arms us, start
+// Songsterr through its own transport and stop it again a blink later: the start
+// runs while the document's user activation is live, which is what lets
+// Songsterr's context begin, and from then on our synthetic clicks drive a
+// running engine. It is the member's own ritual, automated, and it costs one
+// short blip of sound at the top of the song rather than a silent set.
+//
+// The rules this must never break:
+//   * it never runs while a scheduled command is pending or a BandCue play is
+//     under way (a stray tap must not stop the band);
+//   * it never runs on the downbeat path -- only on a tap, or shortly after a
+//     song switch when no play is on its way;
+//   * it always leaves playback stopped and the cursor back at the start.
+
+// How long the priming play is allowed to run. Long enough that Songsterr has
+// really begun (and its context has really started), short enough to be a blip.
+const AUDIO_PRIME_PLAY_MS = 140;
+// Our own click is the only reason playback is running, so a stop that did not
+// take has to be caught -- otherwise the blip becomes a song.
+const AUDIO_PRIME_STOP_VERIFY_MS = 250;
+// Time given to Songsterr's router to mount the new song before re-priming it.
+const AUDIO_PRIME_AFTER_SWITCH_MS = 700;
+
+/** Whether it is safe to touch the transport for reasons of our own right now. */
+function canPrimeSongsterrAudio() {
+  return audioArmingInstalled && !transportCommandPending && !bandcuePlaybackActive;
+}
+
+function primeSongsterrAudio(event) {
+  if (songsterrPrimed || primeStopTimer || postSwitchPrimeTimer) {
+    return;
+  }
+
+  // The member is pressing the player's own control: their gesture reaches
+  // Songsterr directly, which is all priming was ever trying to arrange. Adding
+  // a click of ours would only fight them.
+  if (isTransportGestureTarget(event?.target)) {
+    setSongsterrPrimed(true);
+    return;
+  }
+
+  if (!canPrimeSongsterrAudio()) {
+    return;
+  }
+
+  runAudioPrimeCycle();
+}
+
+function runAudioPrimeCycle() {
+  const mediaElements = queryMediaElements();
+  const playbackState = inferPlaybackState(mediaElements);
+  if (playbackState === "playing") {
+    // Sound is already coming out of this device; there is nothing left to
+    // unlock, and stopping it is not ours to do.
+    setSongsterrPrimed(true);
+    return;
+  }
+
+  // Prime through the source the downbeat will play from -- that is the graph
+  // that has to be started -- and while a gesture is still in force.
+  ensureSynthPlaybackMode();
+  if (!fireAudioPrimeControl(resolveTransportControl("play", mediaElements, playbackState))) {
+    return;
+  }
+
+  primeStopTimer = setTimeout(() => finishAudioPrimeCycle(), AUDIO_PRIME_PLAY_MS);
+}
+
+/**
+ * Starts playback the same way the downbeat would, but synchronously and without
+ * touching any of the transport path's reporting state.
+ */
+function fireAudioPrimeControl(control) {
+  if (control.kind === "media") {
+    for (const media of control.mediaElements) {
+      try {
+        const started = media.play();
+        started?.catch?.(() => undefined);
+      } catch {
+        // Fall through: the button/Space paths below are resolved separately.
+      }
+    }
+    return true;
+  }
+
+  if (control.kind === "button" && control.element.isConnected !== false) {
+    /** @type {HTMLElement} */ (control.element).click();
+    return true;
+  }
+
+  if (control.kind === "space") {
+    return dispatchSpaceFallback();
+  }
+
+  return false;
+}
+
+function finishAudioPrimeCycle(verify = true) {
+  if (primeStopTimer) {
+    clearTimeout(primeStopTimer);
+    primeStopTimer = undefined;
+  }
+
+  stopPrimedPlayback();
+  resetSongsterrPosition();
+  setSongsterrPrimed(true);
+  if (!verify) {
+    return;
+  }
+
+  primeVerifyTimer = setTimeout(() => {
+    primeVerifyTimer = undefined;
+    if (inferPlaybackState() !== "playing") {
+      return;
+    }
+    stopPrimedPlayback();
+    resetSongsterrPosition();
+  }, AUDIO_PRIME_STOP_VERIFY_MS);
+}
+
+function stopPrimedPlayback() {
+  const mediaElements = queryMediaElements();
+  // We started this playback ourselves a moment ago, so the usual "never toggle
+  // blind on Stop" rule does not apply: an unconfirmed state is treated as
+  // playing here, and only a *confirmed* stop is left alone.
+  const state = inferPlaybackState(mediaElements) === "stopped" ? "stopped" : "playing";
+  const control = resolveTransportControl("stop", mediaElements, state);
+  if (control.kind === "media") {
+    for (const media of control.mediaElements) {
+      media.pause();
+    }
+    return;
+  }
+
+  if (control.kind === "button" && control.element.isConnected !== false) {
+    /** @type {HTMLElement} */ (control.element).click();
+  }
+}
+
+/**
+ * Ends any priming in progress *now*, leaving playback stopped. Called the
+ * moment a real command arrives, so a priming stop can never land inside it.
+ */
+function cancelAudioPrime() {
+  if (postSwitchPrimeTimer) {
+    clearTimeout(postSwitchPrimeTimer);
+    postSwitchPrimeTimer = undefined;
+  }
+  if (primeVerifyTimer) {
+    clearTimeout(primeVerifyTimer);
+    primeVerifyTimer = undefined;
+  }
+  if (primeStopTimer) {
+    finishAudioPrimeCycle(false);
+  }
+}
+
+/**
+ * An in-page song switch keeps the document -- and our arm -- but hands
+ * Songsterr a rebuilt player, whose audio graph may be suspended again. Re-run
+ * the cycle once the new song has mounted: where the document's unlock still
+ * holds, this restores sound with no tap at all; where WebKit wants a fresh
+ * gesture, the cycle is silent, the banner goes back up, and the host is told.
+ */
+function schedulePostSwitchAudioPrime() {
+  if (!audioArmingInstalled) {
+    return;
+  }
+
+  cancelAudioPrime();
+  // Deliberately not published yet: the retry below normally restores it within
+  // the second, and a banner that flashes between every song is its own problem.
+  songsterrPrimed = false;
+  postSwitchPrimeTimer = setTimeout(() => {
+    postSwitchPrimeTimer = undefined;
+    if (canPrimeSongsterrAudio()) {
+      runAudioPrimeCycle();
+      return;
+    }
+    publishAudioReadiness();
+  }, AUDIO_PRIME_AFTER_SWITCH_MS);
+}
+
+function isTransportGestureTarget(target) {
+  const element = typeof target?.closest === "function"
+    ? target.closest("button, [role='button']")
+    : undefined;
+  if (!element) {
+    return false;
+  }
+
+  return (
+    classTokens(element).some((token) => TRANSPORT_TOGGLE_CLASS.test(token)) ||
+    /\b(play|pause|stop|resume|start)\b/i.test(getControlLabel(element))
+  );
+}
+
+// --- Did the start actually produce playback? -------------------------------
+// A silent WebKit start looks like a success from every angle the transport path
+// can see: the click lands, Songsterr's button flips to Pause, and the command
+// is reported as succeeded. The only honest witness is whether the player
+// actually moved, so look a second into the song and say so if it did not --
+// which also puts the banner back and re-arms priming for the next tap.
+
+const PLAYBACK_PROGRESS_CHECK_MS = 900;
+// Narrow on purpose: this runs on a device already busy playing, so it must not
+// be the document-wide scan the duration reader can afford at idle.
+const PLAYBACK_PROGRESS_SELECTOR =
+  "[aria-valuetext], [aria-valuenow], [role='slider'], time, [class*='time'], [class*='Time']";
+
+async function verifyPlaybackProgress() {
+  if (!audioArmingInstalled) {
+    return;
+  }
+
+  const before = readPlaybackProgressSample();
+  if (before === undefined) {
+    // Nothing on this page reports a position, so there is no evidence either
+    // way -- and a guess would be worse than silence.
+    return;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, PLAYBACK_PROGRESS_CHECK_MS));
+  if (!bandcuePlaybackActive) {
+    return;
+  }
+
+  const after = readPlaybackProgressSample();
+  if (after === undefined || after !== before) {
+    return;
+  }
+
+  setSongsterrPrimed(false);
+  lastControlDetail = PLAYBACK_STALLED_DETAIL;
+  scheduleStatusReport(0);
+}
+
+/**
+ * A string that changes while playback is running, or undefined when this page
+ * offers no such evidence.
+ */
+function readPlaybackProgressSample() {
+  const running = queryMediaElements().filter((media) => !media.paused && !media.ended);
+  if (running.length) {
+    return running.map((media) => Math.round((Number(media.currentTime) || 0) * 100)).join("|");
+  }
+
+  const positions = [...document.querySelectorAll(PLAYBACK_PROGRESS_SELECTOR)]
+    .filter(isVisible)
+    .map(readProgressFromElement)
+    .filter(Boolean);
+  return positions.length ? positions.join("|") : undefined;
+}
+
+function readProgressFromElement(element) {
+  const value = element.getAttribute("aria-valuenow");
+  if (value && Number.isFinite(Number(value))) {
+    return `v${value}`;
+  }
+
+  const text = [element.getAttribute("aria-valuetext"), element.textContent]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length > 120) {
+    return "";
+  }
+
+  const times = parseTimeValues(text);
+  return times.length ? `t${times.join(",")}` : "";
 }

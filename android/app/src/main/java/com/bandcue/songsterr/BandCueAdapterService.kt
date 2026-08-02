@@ -36,6 +36,8 @@ class BandCueAdapterService : Service() {
     private val commandTasks = Collections.synchronizedSet(mutableSetOf<ScheduledFuture<*>>())
     private var latestCommand: AdapterCommandStatus? = null
     private var currentSong: CurrentSong? = null
+    private var tempoStatus = AdapterTempoStatus(100, 100, "applied", "100% tempo")
+    private var tempoSongKey = ""
     // This adapter's id in the room (from serverHello); used to find our own
     // manual calibration offset inside roomState during reconciliation.
     private var myClientId: String? = null
@@ -284,6 +286,11 @@ class BandCueAdapterService : Service() {
             }
             "roomState" -> {
                 currentSong = ProtocolJson.parseCurrentSong(message)
+                val nextTempoKey = "${currentSong?.title.orEmpty()}:${currentSong?.tempoPercent ?: 100}"
+                if (nextTempoKey != tempoSongKey) {
+                    tempoSongKey = nextTempoKey
+                    applyCurrentTempo()
+                }
                 reconcileTransportFromRoomState(message)
                 publishAdapterStatus()
                 publishUiStatus()
@@ -332,6 +339,16 @@ class BandCueAdapterService : Service() {
     private fun handleTransportCommand(command: TransportCommand) {
         lastTransportSequenceId = command.sequenceId
         lastTransportAction = command.action
+        val requestedTempo = command.currentSong?.tempoPercent ?: currentSong?.tempoPercent ?: 100
+        if (command.action == "play" && (
+                tempoStatus.state != "applied" ||
+                    tempoStatus.requestedPercent != requestedTempo ||
+                    tempoStatus.appliedPercent != requestedTempo
+                )) {
+            latestCommand = AdapterCommandStatus(command.action, command.sequenceId, "failed", System.currentTimeMillis(), tempoStatus.detail, "tempo-preflight")
+            publishAdapterStatus(stateOverride = "last-command-failed")
+            return
+        }
         val scheduled = scheduleTransportCommand(
             action = command.action,
             sequenceId = command.sequenceId,
@@ -456,6 +473,9 @@ class BandCueAdapterService : Service() {
         }
 
         val opened = openSongsterrUrl(songUrl)
+        if (opened) {
+            scheduleCommandTask({ applyCurrentTempo() }, SONGSTERR_OPEN_SETTLE_MS, TimeUnit.MILLISECONDS)
+        }
         latestCommand = AdapterCommandStatus(
             action = "open-song",
             sequenceId = command.sequenceId,
@@ -659,9 +679,41 @@ class BandCueAdapterService : Service() {
                 playback = playback,
                 title = title,
                 detail = readiness.detail,
-                lastCommand = latestCommand
+                lastCommand = latestCommand,
+                tempo = tempoStatus
             )
         )
+    }
+
+    private fun applyCurrentTempo() {
+        val requested = (currentSong?.tempoPercent ?: 100).coerceIn(15, 175)
+        tempoStatus = AdapterTempoStatus(requested, state = "pending", detail = "Applying $requested% tempo")
+        publishAdapterStatus()
+        val controller = findSongsterrController()
+        val canSetFromSession = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            controller?.playbackState?.actions?.and(PlaybackState.ACTION_SET_PLAYBACK_SPEED) != 0L
+        if (canSetFromSession && controller != null) {
+            controller.transportControls.setPlaybackSpeed(requested / 100f)
+            scheduleCommandTask({
+                val applied = findSongsterrController()?.playbackState?.playbackSpeed
+                val appliedPercent = applied?.times(100)?.toInt()
+                tempoStatus = if (appliedPercent != null && kotlin.math.abs(appliedPercent - requested) <= 1) {
+                    AdapterTempoStatus(requested, requested, "applied", "$requested% tempo applied through Android media session")
+                } else {
+                    AdapterTempoStatus(requested, state = "failed", detail = "Songsterr media session did not confirm $requested% tempo")
+                }
+                publishAdapterStatus()
+            }, 250, TimeUnit.MILLISECONDS)
+            return
+        }
+        BandCueAccessibilityService.setTempo(requested) { result ->
+            tempoStatus = if (result.ok) {
+                AdapterTempoStatus(requested, requested, "applied", result.detail)
+            } else {
+                AdapterTempoStatus(requested, state = "failed", detail = result.detail)
+            }
+            publishAdapterStatus()
+        }
     }
 
     private fun findSongsterrController(): MediaController? {

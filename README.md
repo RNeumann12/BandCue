@@ -197,13 +197,17 @@ calibration are edited; its state lives in that browser's local storage.
 
 ### Setlist Flow
 
-Use the **Setlist** panel to add songs for the rehearsal. Each song can carry a title, a source
+Use the **Setlist** panel to add songs for the rehearsal. Each song can carry a title, a 15–175%
+playback tempo, a source
 type, a main Songsterr URL, optional bass/drum Songsterr override URLs, a MuseScore score
 reference, optional notes, and (once known) a duration.
 
 - **Make Current**, **Previous**, **Next** publish the current song to every companion.
 - **Export** / **Import** move setlists between host browsers (the setlist is stored locally).
   See [examples/setlist.example.json](examples/setlist.example.json) for the file format.
+- Tempo is applied and verified while the song loads. A non-100% song cannot start until every
+  applicable adapter confirms the exact value. Songsterr playback speed requires Songsterr Plus;
+  non-100% MuseScore playback requires the BandCue Bridge plugin.
 - **Open Current Song** asks connected adapters to open the current song's source. The Songsterr
   adapter also opens the current URL automatically before a transport command when no matching
   tab is present.
@@ -336,13 +340,18 @@ extensions, so the BandCue Songsterr extension works there. On iPad/iPhone, auto
 (room code, port, mDNS, LAN scan) does **not** work — you must connect with the full
 `host:port` (e.g. `192.168.1.23:4173`) or the full room URL.
 
-**Tap once per song.** WebKit only lets audio start from a real touch, and it forgets that
-permission every time the page loads — including when BandCue moves the tab to the next song. The
-extension shows a **"Tap to enable BandCue audio"** banner whenever that touch is missing: tap
-anywhere on the Songsterr page and it disappears. Until you do, a play command still flips
-Songsterr's button to Pause but stays silent, and the host shows the device as not armed. Keep the
-Songsterr tab in the foreground and set **Auto-Lock** to **Never**, or iOS suspends the audio and
-the banner comes back.
+**Tap once, when the banner asks.** WebKit only lets audio start from a real touch, and that
+permission belongs to the page's audio engine — not just to BandCue's. The extension shows a
+**"Tap to enable BandCue audio"** banner whenever it is missing: tap anywhere on the Songsterr
+page and the extension does the rest for you, including the short Play/Stop through Songsterr's
+own transport that starts its audio engine (you may hear a blip; playback goes straight back to
+the top). It repeats that by itself after each song BandCue loads for you, so one tap normally
+lasts the whole session.
+
+Until the banner is gone, a play command still flips Songsterr's button to Pause but stays silent,
+and the host says so. If a start ever does come out silent anyway, the device reports **"the
+player never moved"** and the banner comes back — tap once more. Keep the Songsterr tab in the
+foreground and set **Auto-Lock** to **Never**, or iOS takes the audio session away.
 
 ### Songsterr on Android
 

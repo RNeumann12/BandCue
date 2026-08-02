@@ -36,6 +36,8 @@ import {
   playBlockedReason,
   previousSongIndex,
   sanitizeDurationMs,
+  sanitizeTempoPercent,
+  effectiveDurationMs,
   sanitizeHelixBpm,
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
@@ -84,6 +86,18 @@ describe("setlist navigation", () => {
 });
 
 describe("song normalization", () => {
+  it("defaults and constrains per-song tempo", () => {
+    expect(sanitizeTempoPercent(undefined)).toBe(100);
+    expect(sanitizeTempoPercent(92.4)).toBe(92);
+    expect(sanitizeTempoPercent(5)).toBe(15);
+    expect(sanitizeTempoPercent(300)).toBe(175);
+    expect(normalizeStoredSong({ title: "Zombie", sourceType: "songsterr" })?.tempoPercent).toBe(100);
+  });
+
+  it("scales a base duration by tempo", () => {
+    expect(effectiveDurationMs(240_000, 80)).toBe(300_000);
+    expect(effectiveDurationMs(240_000, 120)).toBe(200_000);
+  });
   it("drops empty optional fields when normalizing for publish", () => {
     const result = normalizeSong({
       id: "s1",
@@ -710,10 +724,10 @@ describe("formatting", () => {
 
   it("builds song meta with position, source, duration, and references", () => {
     expect(formatSongMeta({ sourceType: "songsterr", source: "ref" }, 1, 3))
-      .toBe("1 / 3 - Songsterr - ref");
+      .toBe("1 / 3 - Songsterr - 100% tempo - ref");
     expect(formatSongMeta({ sourceType: "musescore", durationMs: 65_000, durationSource: "adapter" }, 2, 4))
-      .toBe("2 / 4 - MuseScore - 01:05 (adapter)");
-    expect(formatSongMeta({ sourceType: "other" }, 0, 0)).toBe("setlist - Other");
+      .toBe("2 / 4 - MuseScore - 100% tempo - 01:05 (adapter)");
+    expect(formatSongMeta({ sourceType: "other" }, 0, 0)).toBe("setlist - Other - 100% tempo");
   });
 
   it("includes Helix sync timing in song meta", () => {
@@ -724,6 +738,6 @@ describe("formatting", () => {
       helixBeatsPerMeasure: 4,
       helixTargetMeasure: 2,
       helixOffsetMs: -80
-    }, 1, 1)).toBe("1 / 1 - Other - Helix: 120 BPM, 4/4, 2-measure count-in, -80 ms");
+    }, 1, 1)).toBe("1 / 1 - Other - 100% tempo - Helix: 120 BPM, 4/4, 2-measure count-in, -80 ms");
   });
 });

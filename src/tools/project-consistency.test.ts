@@ -36,6 +36,23 @@ describe("cross-platform project metadata", () => {
     expect(extractStringList(android, /val LAN_SCAN_SUBNETS\s*=\s*listOf\(([\s\S]*?)\)/u, "Android subnets"))
       .toEqual(DEFAULT_LAN_SCAN_SUBNETS);
   });
+
+  it("delegates MuseScore song changes to the process-aware Windows helper", () => {
+    const plugin = read("extension/musescore/bandcue.qml");
+    const openSongBranch = plugin.indexOf('if (message.action === "open-song")');
+    const transportClaim = plugin.indexOf('root.send({ type: "claim"', openSongBranch);
+
+    expect(openSongBranch).toBeGreaterThan(-1);
+    expect(transportClaim).toBeGreaterThan(openSongBranch);
+    expect(plugin.slice(openSongBranch, transportClaim)).toContain(
+      'controlPath: "musescore-plugin-delegated"'
+    );
+    expect(plugin).not.toContain("root.readScore(");
+    expect(plugin).toContain('if (message.type === "retire")');
+    expect(plugin).toContain("Qt.quit()");
+    expect(plugin).toContain("root.parent.Window.window");
+    expect(plugin).toContain("pluginWindow.showMinimized()");
+  });
 });
 
 function read(relativePath: string): string {

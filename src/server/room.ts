@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type WebSocket from "ws";
 import type {
   AdapterStatus,
+  AdapterTempoStatus,
   AdapterCommandStatus,
   CalibrationUpdate,
   ClientHello,
@@ -367,6 +368,7 @@ export class RoomController {
       songMatch: sanitizeSongMatch(status.songMatch) ?? client.status?.songMatch,
       detail: sanitizeStatusText(status.detail, client.status?.detail, 500),
       requiredLeadMs: sanitizeRequiredLeadMs(status.requiredLeadMs) ?? client.status?.requiredLeadMs,
+      tempo: status.tempo ? sanitizeTempoStatus(status.tempo) : client.status?.tempo,
       lastCommand: status.lastCommand
         ? sanitizeLastCommand(status.lastCommand)
         : client.status?.lastCommand
@@ -504,6 +506,13 @@ export class RoomController {
     request: TransportRequest,
     now: number
   ): void {
+    if (request.action === "play") {
+      const tempoError = this.tempoReadinessError();
+      if (tempoError) {
+        this.send(client, { type: "error", message: tempoError });
+        return;
+      }
+    }
     const delayMs = request.action === "play"
       ? this.delayForPlayRequest(client, request, now)
       : this.scheduleDelayMs;
@@ -669,7 +678,8 @@ export class RoomController {
   private scheduleAutoStopForCurrentSong(): void {
     this.clearAutoStopTimer();
 
-    const durationMs = this.currentSong?.song?.durationMs;
+    const song = this.currentSong?.song;
+    const durationMs = effectiveDurationMs(song?.durationMs, song?.tempoPercent);
     const startedServerTime = this.transport.startedServerTime;
     if (
       this.transport.status !== "running" ||
@@ -697,6 +707,34 @@ export class RoomController {
         this.broadcastState();
       }
     }, delayMs);
+  }
+
+  private tempoReadinessError(): string | undefined {
+    const song = this.currentSong?.song;
+    const requestedPercent = sanitizeTempoPercent(song?.tempoPercent);
+    if (!song || requestedPercent === 100) {
+      return undefined;
+    }
+
+    for (const adapter of this.clients.values()) {
+      const app = adapter.status?.app ?? adapter.capabilities.find((capability) => capability.canPlay && capability.canStop)?.app;
+      const applies = app === "songsterr"
+        ? appliesToSongsterr(song)
+        : app === "musescore"
+          ? appliesToMuseScore(song)
+          : false;
+      if (!applies || !adapter.capabilities.some((capability) => capability.canPlay && capability.canStop)) {
+        continue;
+      }
+      if (!adapter.capabilities.some((capability) => capability.canSetTempo)) {
+        return `${adapter.deviceName} must be updated before it can set ${requestedPercent}% tempo.`;
+      }
+      const tempo = adapter.status?.tempo;
+      if (tempo?.state !== "applied" || tempo.requestedPercent !== requestedPercent || tempo.appliedPercent !== requestedPercent) {
+        return `${adapter.deviceName} has not applied ${requestedPercent}% tempo${tempo?.detail ? `: ${tempo.detail}` : "."}`;
+      }
+    }
+    return undefined;
   }
 
   private clearAutoStopTimer(): void {
@@ -1015,6 +1053,7 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     songsterrBassUrl: trimText(song.songsterrBassUrl ?? "", 500) || undefined,
     songsterrDrumUrl: trimText(song.songsterrDrumUrl ?? "", 500) || undefined,
     museScoreSource: trimText(song.museScoreSource ?? "", 500) || undefined,
+    tempoPercent: sanitizeTempoPercent(song.tempoPercent),
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationSource(song.durationSource),
     helixSyncEnabled: Boolean(song.helixSyncEnabled),
@@ -1024,6 +1063,27 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     helixOffsetMs: clampHelixOffsetMs(song.helixOffsetMs),
     notes: trimText(song.notes ?? "", 500) || undefined
   };
+}
+
+function sanitizeTempoPercent(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 100;
+  }
+  return Math.max(15, Math.min(175, Math.round(value)));
+}
+
+function sanitizeTempoStatus(value: AdapterTempoStatus): AdapterTempoStatus {
+  return {
+    requestedPercent: sanitizeTempoPercent(value.requestedPercent),
+    appliedPercent: value.appliedPercent === undefined ? undefined : sanitizeTempoPercent(value.appliedPercent),
+    state: ["pending", "applied", "failed", "unsupported"].includes(value.state) ? value.state : "failed",
+    detail: trimText(value.detail ?? "", 500) || undefined
+  };
+}
+
+function effectiveDurationMs(durationMs: number | undefined, tempoPercent: number | undefined): number | undefined {
+  const duration = sanitizeDurationMs(durationMs);
+  return duration === undefined ? undefined : Math.round(duration * 100 / sanitizeTempoPercent(tempoPercent));
 }
 
 function sanitizeDurationMs(value: number | undefined): number | undefined {

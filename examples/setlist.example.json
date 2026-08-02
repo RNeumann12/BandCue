@@ -9,6 +9,7 @@
       "songsterrUrl": "https://www.songsterr.com/a/wsa/artist-song-tab-s12345",
       "songsterrBassUrl": "https://www.songsterr.com/a/wsa/artist-song-bass-tab-s12345",
       "songsterrDrumUrl": "https://www.songsterr.com/a/wsa/artist-song-drum-tab-s12345",
+      "tempoPercent": 92,
       "notes": "Optional per-song notes shown on the host page."
     },
     {
@@ -16,6 +17,7 @@
       "title": "Example MuseScore Song",
       "sourceType": "musescore",
       "museScoreSource": "Scores/Example MuseScore Song.mscz",
+      "tempoPercent": 100,
       "durationMs": 215000,
       "notes": "museScoreSource matches a file from the adapter's scanned score folders."
     },
@@ -24,6 +26,7 @@
       "title": "Example Song With Helix Sync",
       "sourceType": "songsterr",
       "songsterrUrl": "https://www.songsterr.com/a/wsa/artist-other-song-tab-s67890",
+      "tempoPercent": 100,
       "helixSyncEnabled": true,
       "helixBpm": 120,
       "helixBeatsPerMeasure": 4,

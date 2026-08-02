@@ -17,6 +17,7 @@ android/keystore.properties
 .bandcue-room.e2e.json
 playwright-report/
 test-results/
+.tmp/
 bandcue-setlist-*.json
 
 # Windows shortcuts users drop next to the launchers.

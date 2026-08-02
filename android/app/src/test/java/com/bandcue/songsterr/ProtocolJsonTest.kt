@@ -17,6 +17,7 @@ class ProtocolJsonTest {
         assertEquals("songsterr", capability.getString("app"))
         assertEquals(true, capability.getBoolean("canPlay"))
         assertEquals(true, capability.getBoolean("canStop"))
+        assertEquals(true, capability.getBoolean("canSetTempo"))
     }
 
     @Test
@@ -36,6 +37,7 @@ class ProtocolJsonTest {
                         .put("title", "Song")
                         .put("sourceType", "songsterr")
                         .put("source", "https://www.songsterr.com/a/wsa/example-tab-s1")
+                        .put("tempoPercent", 92)
                 )
             )
 
@@ -47,6 +49,7 @@ class ProtocolJsonTest {
         assertEquals(-50L, command?.manualOffsetMs)
         assertEquals(true, command?.resetBeforePlay)
         assertEquals("songsterr", command?.currentSong?.sourceType)
+        assertEquals(92, command?.currentSong?.tempoPercent)
     }
 
     @Test

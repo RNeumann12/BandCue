@@ -115,6 +115,7 @@ const elements = {
   songSongsterrDrumUrlInput: $input("#songSongsterrDrumUrlInput"),
   songMuseScoreSourceInput: $input("#songMuseScoreSourceInput"),
   songDurationInput: $input("#songDurationInput"),
+  songTempoInput: $input("#songTempoInput"),
   songHelixSyncInput: $input("#songHelixSyncInput"),
   songHelixBpmInput: $input("#songHelixBpmInput"),
   songHelixBeatsInput: $input("#songHelixBeatsInput"),
@@ -695,6 +696,8 @@ function renderHostControls(state, readyAdapters) {
     setText(elements.hostWarning, "Play is waiting for a ready desktop adapter.");
   } else if (state.transport.status !== "stopped") {
     setText(elements.hostWarning, "Transport is active. Stop before scheduling another play.");
+  } else if (!playAvailable) {
+    setText(elements.hostWarning, playBlockedReason(state));
   } else {
     setText(elements.hostWarning, "Ready to control: " + readyAdapters.map((device) => device.status.app).join(", "));
   }
@@ -768,6 +771,7 @@ function createDeviceCard(key) {
     <span class="small" data-device-title></span>
     <span class="small" data-device-catalog></span>
     <span class="small" data-device-playback></span>
+    <span class="small" data-device-tempo></span>
     <span class="small" data-device-command></span>
     <span class="small" data-device-clock></span>
   `;
@@ -784,6 +788,7 @@ function updateDeviceCard(card, device) {
     ? `${status.playback}${status.playbackDetail ? ` - ${status.playbackDetail}` : ""}`
     : "playback not reported";
   const command = status?.lastCommand ? renderCommand(status.lastCommand) : "No command feedback yet";
+  const tempo = renderTempoStatus(status?.tempo);
   const clock = renderClock(device.clock);
   const self = device.id === clientId ? "you" : device.role;
 
@@ -794,6 +799,7 @@ function updateDeviceCard(card, device) {
   setText(card.querySelector("[data-device-title]"), title);
   setText(card.querySelector("[data-device-catalog]"), renderCatalogMatch(status));
   setText(card.querySelector("[data-device-playback]"), playback);
+  setText(card.querySelector("[data-device-tempo]"), tempo);
   setText(card.querySelector("[data-device-command]"), command);
   setText(card.querySelector("[data-device-clock]"), clock);
 
@@ -869,6 +875,7 @@ function renderDevice(device) {
       <span class="small">${escapeHtml(title)}</span>
       <span class="small">${escapeHtml(renderCatalogMatch(status))}</span>
       <span class="small">${escapeHtml(playback)}</span>
+      <span class="small">${escapeHtml(renderTempoStatus(status?.tempo))}</span>
       <span class="small">${escapeHtml(command)}</span>
       <span class="small">${escapeHtml(clock)}</span>
     </div>
@@ -1037,6 +1044,13 @@ function readSongForm() {
   }
 
   const durationMs = parseDurationInput(elements.songDurationInput.value);
+  const tempoPercent = Number(elements.songTempoInput.value);
+  if (!Number.isInteger(tempoPercent) || tempoPercent < 15 || tempoPercent > 175) {
+    elements.songTempoInput.setCustomValidity("Tempo must be a whole number from 15 to 175%.");
+    elements.songTempoInput.reportValidity();
+    return undefined;
+  }
+  elements.songTempoInput.setCustomValidity("");
   const helixSyncEnabled = elements.songHelixSyncInput.checked;
   return {
     title,
@@ -1047,6 +1061,7 @@ function readSongForm() {
     songsterrDrumUrl: elements.songSongsterrDrumUrlInput.value.trim(),
     museScoreSource: elements.songMuseScoreSourceInput.value.trim(),
     durationMs,
+    tempoPercent,
     durationSource: durationMs ? "manual" : undefined,
     helixSyncEnabled,
     helixBpm: elements.songHelixBpmInput.value ? Number(elements.songHelixBpmInput.value) : undefined,
@@ -1094,6 +1109,7 @@ function startEditSong(index) {
   elements.songSongsterrDrumUrlInput.value = song.songsterrDrumUrl || "";
   elements.songMuseScoreSourceInput.value = song.museScoreSource || "";
   elements.songDurationInput.value = song.durationMs ? formatElapsed(song.durationMs) : "";
+  elements.songTempoInput.value = String(song.tempoPercent ?? 100);
   elements.songHelixSyncInput.checked = Boolean(song.helixSyncEnabled);
   elements.songHelixBpmInput.value = song.helixBpm ? String(song.helixBpm) : "";
   elements.songHelixBeatsInput.value = String(song.helixBeatsPerMeasure || 4);
@@ -1145,6 +1161,7 @@ function resetEditState() {
 }
 
 function resetHelixFormDefaults() {
+  elements.songTempoInput.value = "100";
   elements.songHelixBeatsInput.value = "4";
   elements.songHelixTargetMeasureInput.value = "2";
   elements.songHelixOffsetInput.value = "0";
@@ -1556,7 +1573,7 @@ function getCurrentOpenableSong() {
 
 function exportSetlist() {
   const payload = {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     songs: setlist.map(normalizeSong)
   };
@@ -1581,6 +1598,15 @@ function importSetlist(file) {
       const songs = Array.isArray(parsed) ? parsed : parsed.songs;
       if (!Array.isArray(songs)) {
         throw new Error("No songs array found.");
+      }
+
+      const invalidTempoIndex = songs.findIndex((song) => (
+        song?.tempoPercent !== undefined &&
+        (!Number.isInteger(Number(song.tempoPercent)) || Number(song.tempoPercent) < 15 || Number(song.tempoPercent) > 175)
+      ));
+      if (invalidTempoIndex >= 0) {
+        const label = songs[invalidTempoIndex]?.title || `song ${invalidTempoIndex + 1}`;
+        throw new Error(`${label} has an invalid tempo; use a whole percentage from 15 to 175.`);
       }
 
       setlist = songs.map(normalizeStoredSong).filter(Boolean);
@@ -1690,6 +1716,13 @@ function renderCommand(command) {
   const fired = renderFiredDeviation(command);
   const detail = command.detail ? `: ${command.detail}` : "";
   return `${command.action} ${command.status}${path} at ${when}${fired}${detail}`;
+}
+
+function renderTempoStatus(tempo) {
+  if (!tempo) return "tempo not reported";
+  const applied = tempo.appliedPercent === undefined ? "" : `; applied ${tempo.appliedPercent}%`;
+  const detail = tempo.detail ? ` - ${tempo.detail}` : "";
+  return `tempo ${tempo.state}: requested ${tempo.requestedPercent}%${applied}${detail}`;
 }
 
 // Measured start deviation vs the scheduled downbeat (adapter-reported fire
