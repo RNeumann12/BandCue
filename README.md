@@ -197,13 +197,17 @@ calibration are edited; its state lives in that browser's local storage.
 
 ### Setlist Flow
 
-Use the **Setlist** panel to add songs for the rehearsal. Each song can carry a title, a source
+Use the **Setlist** panel to add songs for the rehearsal. Each song can carry a title, a 15–175%
+playback tempo, a source
 type, a main Songsterr URL, optional bass/drum Songsterr override URLs, a MuseScore score
 reference, optional notes, and (once known) a duration.
 
 - **Make Current**, **Previous**, **Next** publish the current song to every companion.
 - **Export** / **Import** move setlists between host browsers (the setlist is stored locally).
   See [examples/setlist.example.json](examples/setlist.example.json) for the file format.
+- Tempo is applied and verified while the song loads. A non-100% song cannot start until every
+  applicable adapter confirms the exact value. Songsterr playback speed requires Songsterr Plus;
+  non-100% MuseScore playback requires the BandCue Bridge plugin.
 - **Open Current Song** asks connected adapters to open the current song's source. The Songsterr
   adapter also opens the current URL automatically before a transport command when no matching
   tab is present.

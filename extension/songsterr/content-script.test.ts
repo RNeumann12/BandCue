@@ -36,6 +36,10 @@ class FakeElement {
     return { width: 100, height: 20, top: 10 };
   }
 
+  getClientRects() {
+    return [this.getBoundingClientRect()];
+  }
+
   addEventListener(type: string, listener: () => void) {
     (this.listeners[type] ??= []).push(listener);
   }
@@ -44,6 +48,7 @@ class FakeElement {
 
   dispatchEvent(event: { type?: string }) {
     this.dispatched.push(event?.type ?? "");
+    this.emit(event?.type ?? "");
     return true;
   }
 
@@ -71,11 +76,31 @@ class FakeElement {
   isConnected = true;
 
   children: FakeElement[] = [];
+  parentElement: FakeElement | null = null;
 
   appendChild(child: FakeElement) {
     this.children.push(child);
+    child.parentElement = this;
     child.isConnected = true;
     return child;
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    const descendants = this.children.flatMap((child) => [child, ...child.querySelectorAll("*")]);
+    if (selector === "*") return descendants;
+    if (/role=['"]slider['"]/.test(selector)) {
+      return descendants.filter((element) =>
+        element.getAttribute("role") === "slider" && element.getAttribute("aria-valuenow") !== null
+      );
+    }
+    if (/button/.test(selector)) {
+      return descendants.filter((element) => element.getAttribute("data-kind") === "button");
+    }
+    return [];
   }
 
   remove() {
@@ -216,6 +241,15 @@ function loadContentScript({
       if (sourceControl && /control-source/.test(selector)) {
         return sourceControl;
       }
+      if (/#c-speed button|#control-speed/.test(selector)) {
+        return elements.find((element) => element.getAttribute("data-speed-control") === "true") ?? null;
+      }
+      if (/role=['"]slider['"]/.test(selector)) {
+        return elements.find((element) => element.getAttribute("role") === "slider") ?? null;
+      }
+      if (/data-tab-control=['"]speed['"]/.test(selector)) {
+        return elements.find((element) => element.getAttribute("data-tab-control") === "speed") ?? null;
+      }
       return null;
     },
     getElementById() {
@@ -327,6 +361,7 @@ function loadContentScript({
     setTimeout,
     clearTimeout,
     KeyboardEvent: FakeKeyboardEvent,
+    MouseEvent: FakeMouseEvent,
     HTMLElement: FakeElement,
     Number,
     Date,
@@ -378,6 +413,50 @@ function loadContentScript({
     overlay
   };
 }
+
+class FakeMouseEvent {
+  constructor(public type: string, init: Record<string, unknown> = {}) {
+    Object.assign(this, init);
+  }
+}
+
+describe("Songsterr tempo control", () => {
+  it("confirms an exact arbitrary percentage already shown by the player", async () => {
+    const speed = new FakeElement("92%", { "aria-label": "Playback speed 92%" });
+    const { context } = loadContentScript({ elements: [speed] });
+    const result = await new Promise<any>((resolve) => {
+      context.chrome.runtime.onMessage.listener(
+        { type: "bandcueSetTempo", tempoPercent: 92 },
+        {},
+        resolve
+      );
+    });
+    expect(result).toMatchObject({ ok: true, requestedPercent: 92, appliedPercent: 92 });
+  });
+
+  it("sets 92% through Songsterr's custom desktop speed ruler", async () => {
+    const speedButton = new FakeElement("100%", { "data-speed-control": "true", "data-kind": "button" });
+    const dialog = new FakeElement("", { "data-tab-control": "speed", role: "dialog" });
+    const ruler = new FakeElement();
+    const slider = new FakeElement("", { role: "slider", "aria-valuenow": "100" });
+    ruler.appendChild(slider);
+    dialog.appendChild(ruler);
+    ruler.addEventListener("mousedown", () => slider.setAttribute("aria-valuenow", "92"));
+
+    const { context } = loadContentScript({ elements: [speedButton, dialog, slider] });
+    const result = await new Promise<any>((resolve) => {
+      context.chrome.runtime.onMessage.listener(
+        { type: "bandcueSetTempo", tempoPercent: 92 },
+        {},
+        resolve
+      );
+    });
+
+    expect(speedButton.clicks).toBe(1);
+    expect(ruler.dispatched).toContain("mousedown");
+    expect(result).toMatchObject({ ok: true, requestedPercent: 92, appliedPercent: 92 });
+  });
+});
 
 describe("Songsterr content duration discovery", () => {
   afterEach(() => {

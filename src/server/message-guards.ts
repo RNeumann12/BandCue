@@ -3,6 +3,7 @@ import type {
   AdapterCommandAction,
   AdapterCommandStatus,
   AdapterStatus,
+  AdapterTempoStatus,
   ClientHello,
   ClientMessage,
   ClientRole,
@@ -30,6 +31,7 @@ const PLAYBACK_STATES = new Set<NonNullable<AdapterStatus["playback"]>>([
 ]);
 const COMMAND_STATUSES = new Set(["pending", "succeeded", "failed"]);
 const COMMAND_ACTIONS = new Set(["play", "stop", "open-song"]);
+const TEMPO_STATES = new Set<AdapterTempoStatus["state"]>(["pending", "applied", "failed", "unsupported"]);
 
 export function parseClientHelloPayload(raw: string): ClientHello | undefined {
   if (byteLength(raw) > MAX_WS_MESSAGE_BYTES) {
@@ -177,8 +179,25 @@ function sanitizeAdapterStatus(value: Record<string, unknown>): ClientMessage | 
     songMatch: isRecord(value.songMatch) ? value.songMatch as never : undefined,
     detail: typeof value.detail === "string" ? value.detail : undefined,
     requiredLeadMs: isFiniteNumber(value.requiredLeadMs) ? value.requiredLeadMs : undefined,
+    tempo: sanitizeTempoStatus(value.tempo),
     lastCommand: sanitizeLastCommand(value.lastCommand)
   };
+}
+
+function sanitizeTempoStatus(value: unknown): AdapterTempoStatus | undefined {
+  if (!isRecord(value) || !isFiniteNumber(value.requestedPercent) || !TEMPO_STATES.has(value.state as AdapterTempoStatus["state"])) {
+    return undefined;
+  }
+  return {
+    requestedPercent: sanitizeTempoPercent(value.requestedPercent),
+    appliedPercent: isFiniteNumber(value.appliedPercent) ? sanitizeTempoPercent(value.appliedPercent) : undefined,
+    state: value.state as AdapterTempoStatus["state"],
+    detail: typeof value.detail === "string" ? value.detail.slice(0, 500) : undefined
+  };
+}
+
+function sanitizeTempoPercent(value: number): number {
+  return Math.max(15, Math.min(175, Math.round(value)));
 }
 
 function sanitizeLastCommand(value: unknown): AdapterStatus["lastCommand"] | undefined {
@@ -213,9 +232,10 @@ function sanitizeCapabilities(value: unknown): AdapterCapability[] {
   return value
     .filter(isRecord)
     .map((capability) => ({
-      app: capability.app,
-      canPlay: capability.canPlay,
-      canStop: capability.canStop
+      app: capability.app as AdapterCapability["app"],
+      canPlay: capability.canPlay as boolean,
+      canStop: capability.canStop as boolean,
+      ...(capability.canSetTempo === true ? { canSetTempo: true } : {})
     }))
     .filter((capability): capability is AdapterCapability => (
       APP_TYPES.has(capability.app as AdapterCapability["app"]) &&

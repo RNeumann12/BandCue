@@ -7,6 +7,7 @@ import android.graphics.PointF
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
@@ -496,6 +497,81 @@ class BandCueAccessibilityService : AccessibilityService() {
             (lower.contains("bpm") && visiblePercentOptions >= 3)
     }
 
+    private fun setSongsterrTempo(percent: Int, callback: (AccessibilityControlResult) -> Unit) {
+        val requested = percent.coerceIn(15, 175)
+        val root = rootInActiveWindow
+        if (root == null || root.packageName?.toString() != SONGSTERR_PACKAGE) {
+            callback(AccessibilityControlResult(false, "Bring Songsterr to the foreground to apply $requested% tempo."))
+            return
+        }
+        if (visibleTempo(root) == requested && !isSpeedSettingsOpen(root)) {
+            callback(AccessibilityControlResult(true, "$requested% tempo already selected", "android-accessibility-tempo"))
+            return
+        }
+        val speedNode = allNodes(root).firstOrNull { looksLikeSpeedControl(subtreeLabel(it)) }
+        val clickTarget = clickableSelfOrAncestor(speedNode)
+        if (clickTarget == null || !clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+            callback(AccessibilityControlResult(false, "Could not open Songsterr playback speed settings."))
+            return
+        }
+        mainHandler.postDelayed({ setTempoInOpenSheet(requested, callback) }, 180L)
+    }
+
+    private fun setTempoInOpenSheet(percent: Int, callback: (AccessibilityControlResult) -> Unit) {
+        val root = rootInActiveWindow
+        if (root == null || root.packageName?.toString() != SONGSTERR_PACKAGE) {
+            callback(AccessibilityControlResult(false, "Songsterr speed settings disappeared before tempo was applied."))
+            return
+        }
+        val nodes = allNodes(root)
+        val exact = nodes.firstOrNull { nodeLabel(it).trim() == "$percent%" }
+        val clicked = clickableSelfOrAncestor(exact)?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+        val ranged = if (!clicked) nodes.firstOrNull { node ->
+            node.rangeInfo?.let { range ->
+                val target = if (range.max <= 3f) percent / 100f else percent.toFloat()
+                target in range.min..range.max
+            } == true
+        } else null
+        val adjusted = if (ranged != null) {
+            val range = ranged.rangeInfo
+            val target = if (range.max <= 3f) percent / 100f else percent.toFloat()
+            ranged.performAction(
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.id,
+                Bundle().apply { putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE, target) }
+            )
+        } else clicked
+        if (!adjusted) {
+            callback(AccessibilityControlResult(false, "Songsterr speed settings exposed no exact control for $percent%."))
+            return
+        }
+        mainHandler.postDelayed({
+            val confirmed = rootInActiveWindow?.let { visibleTempo(it) } == percent
+            callback(if (confirmed) {
+                AccessibilityControlResult(true, "$percent% tempo applied through Songsterr accessibility controls", "android-accessibility-tempo")
+            } else {
+                AccessibilityControlResult(false, "Songsterr did not confirm $percent% tempo after adjustment.")
+            })
+        }, 220L)
+    }
+
+    private fun visibleTempo(root: AccessibilityNodeInfo): Int? {
+        return allNodes(root).asSequence()
+            .map { nodeLabel(it) }
+            .mapNotNull { Regex("(?:^|\\s)(\\d{1,3})%(?:\\s|$)").find(it)?.groupValues?.get(1)?.toIntOrNull() }
+            .firstOrNull()
+    }
+
+    private fun allNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        fun visit(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            result.add(node)
+            for (index in 0 until node.childCount) visit(node.getChild(index))
+        }
+        visit(root)
+        return result
+    }
+
     private fun tapCenterOf(bounds: Rect): Boolean {
         val point = PointF(bounds.centerX().toFloat(), bounds.centerY().toFloat())
         val path = Path().apply { moveTo(point.x, point.y) }
@@ -594,6 +670,15 @@ class BandCueAccessibilityService : AccessibilityService() {
                     detail = "Enable BandCue Songsterr in Android Accessibility settings."
                 )
             return service.controlSongsterr(action, resetBeforePlay)
+        }
+
+        fun setTempo(percent: Int, callback: (AccessibilityControlResult) -> Unit) {
+            val service = activeService
+            if (service == null) {
+                callback(AccessibilityControlResult(false, "Enable BandCue Songsterr in Android Accessibility settings."))
+                return
+            }
+            service.mainHandler.post { service.setSongsterrTempo(percent, callback) }
         }
     }
 }

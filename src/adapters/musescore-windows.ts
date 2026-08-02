@@ -53,6 +53,7 @@ import { discoverBandCueRooms } from "../shared/lan-discovery.js";
 import type {
   AdapterPlaybackState,
   AdapterStatus,
+  AdapterTempoStatus,
   SetlistSong,
   ServerMessage,
   TransportAction
@@ -169,6 +170,7 @@ interface MuseScoreStatus {
   processId?: number;
   processName?: string;
   windowTitle?: string;
+  tempo?: AdapterTempoStatus;
 }
 
 interface BridgeCommand {
@@ -298,7 +300,7 @@ async function connect(): Promise<void> {
       type: "clientHello",
       deviceName: args.name,
       role: "desktop-adapter",
-      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true, canSetTempo: true }]
     });
     startClockSync();
     pollMuseScore();
@@ -645,7 +647,8 @@ async function reportMuseScoreStatus(): Promise<void> {
       // resident trigger does its setup before the cue, so it asks for barely
       // more; only the shell-per-command fallback needs a count-in big enough to
       // launch PowerShell and prepare an app inside it.
-      requiredLeadMs: hasActiveBridge() ? 0 : museScoreDispatchLeadMs()
+      requiredLeadMs: hasActiveBridge() ? 0 : museScoreDispatchLeadMs(),
+      tempo: currentTempoStatus()
     });
   } finally {
     statusReportInFlight = false;
@@ -766,6 +769,20 @@ async function triggerMuseScoreTransport(
 
   if (bridgeResult?.status === "failed") {
     console.warn(`MuseScore bridge ${action} failed: ${bridgeResult.detail ?? "No detail reported"}`);
+  }
+
+  const requestedTempo = sanitizeTempoPercent(currentSong?.tempoPercent);
+  if (action === "play" && requestedTempo !== 100) {
+    reportCommandStatus({
+      ready: false,
+      action,
+      sequenceId,
+      status: "failed",
+      detail: bridgeResult?.detail ?? `MuseScore Bridge did not confirm ${requestedTempo}% tempo; keyboard fallback was not used.`,
+      controlPath: "tempo-preflight",
+      at: Date.now()
+    });
+    return;
   }
 
   if (queuedBridgeCommand && queuedBridgeCommand.status !== "failed") {
@@ -1203,42 +1220,6 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     at: Date.now()
   });
 
-  const queued = queueBridgeCommand({
-    action: "open-song",
-    sequenceId,
-    dueLocalAt: Date.now(),
-    currentSong,
-    status: "queued",
-    createdAt: Date.now()
-  });
-  const bridgeResult = queued && bridgeLastSeenAt
-    ? await waitForBridgeResult(sequenceId, args.bridgeFallbackMs)
-    : undefined;
-
-  if (bridgeResult?.status === "succeeded") {
-    bridgeStatus = {
-      ...bridgeStatus,
-      ready: true,
-      title: bridgeResult.title ?? currentSong?.title ?? bridgeStatus.title,
-      windowTitle: bridgeResult.windowTitle ?? bridgeResult.title ?? bridgeStatus.windowTitle,
-      detail: bridgeResult.detail ?? "MuseScore bridge opened the score"
-    };
-    reportCommandStatus({
-      ready: true,
-      action: "open-song",
-      sequenceId,
-      status: "succeeded",
-      detail: bridgeResult.detail ?? "MuseScore bridge opened the score",
-      controlPath: bridgeResult.controlPath ?? "musescore-bridge",
-      at: bridgeResult.completedAt ?? Date.now()
-    });
-    return;
-  }
-
-  if (bridgeResult?.status === "failed") {
-    console.warn(`MuseScore bridge open-song failed: ${bridgeResult.detail ?? "No detail reported"}`);
-  }
-
   const match = matchMuseScoreSong(currentSong, scoreCatalog.entries);
   const entry = matchedCatalogEntry(match, scoreCatalog.entries);
   if (!entry) {
@@ -1253,6 +1234,12 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     });
     return;
   }
+
+  // A score change creates a new MuseScore process. Retire every currently
+  // attached plugin first so an old window that refuses to close (for example
+  // because it has unsaved edits) can never keep receiving Play/Stop too.
+  broadcastBridgeSocket({ type: "retire", reason: "BandCue is opening another score" });
+  await sleep(250);
 
   const opened = await openLocalScore(entry.absolutePath, entry.relativePath);
   if (opened.opened && opened.windowTitle) {
@@ -1730,12 +1717,41 @@ function applyBridgeStatus(update: Record<string, unknown>): void {
       : typeof update.title === "string"
         ? update.title
         : bridgeStatus.windowTitle,
-    playback: parsePlayback(update.playback) ?? bridgeStatus.playback
+    playback: parsePlayback(update.playback) ?? bridgeStatus.playback,
+    tempo: parseBridgeTempo(update.tempo) ?? bridgeStatus.tempo
   };
   if (bridgeStatus.playback) {
     inferredPlayback = bridgeStatus.playback;
   }
   void reportMuseScoreStatus();
+}
+
+function currentTempoStatus(): AdapterTempoStatus {
+  const requestedPercent = sanitizeTempoPercent(currentSong?.tempoPercent);
+  if (requestedPercent === 100 && !hasActiveBridge()) {
+    return { requestedPercent, appliedPercent: 100, state: "applied", detail: "100% tempo uses normal MuseScore playback" };
+  }
+  if (!hasActiveBridge()) {
+    return { requestedPercent, state: "unsupported", detail: `MuseScore Bridge must be connected to set ${requestedPercent}% tempo.` };
+  }
+  return bridgeStatus.tempo ?? { requestedPercent, state: "pending", detail: `Waiting for MuseScore Bridge to apply ${requestedPercent}% tempo.` };
+}
+
+function parseBridgeTempo(value: unknown): AdapterTempoStatus | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const tempo = value as Record<string, unknown>;
+  if (typeof tempo.requestedPercent !== "number" || typeof tempo.state !== "string") return undefined;
+  return {
+    requestedPercent: sanitizeTempoPercent(tempo.requestedPercent),
+    appliedPercent: typeof tempo.appliedPercent === "number" ? sanitizeTempoPercent(tempo.appliedPercent) : undefined,
+    state: ["pending", "applied", "failed", "unsupported"].includes(tempo.state)
+      ? tempo.state as AdapterTempoStatus["state"] : "failed",
+    detail: typeof tempo.detail === "string" ? trimSingleLine(tempo.detail) : undefined
+  };
+}
+
+function sanitizeTempoPercent(value: number | undefined): number {
+  return Math.max(15, Math.min(175, Math.round(Number(value) || 100)));
 }
 
 function applyBridgeResult(
@@ -1859,10 +1875,29 @@ $active = if ($new) { $new } elseif ($reused) { $reused } else { $null }
 $outcome = if ($new) { 'new-instance' } elseif ($reused) { 'reused-instance' } else { 'no-window' }
 $activeId = $null
 $activeTitle = $null
+$pluginStarted = $false
 if ($active) {
   try { $active.Refresh() } catch {}
   $activeId = $active.Id
-  if (-not $active.HasExited) { $activeTitle = ($active.MainWindowTitle -replace '\\r|\\n', ' ') }
+  if (-not $active.HasExited) {
+    $activeTitle = ($active.MainWindowTitle -replace '\\r|\\n', ' ')
+    try {
+      Add-Type -AssemblyName System.Windows.Forms
+      $shell = New-Object -ComObject WScript.Shell
+      if ($shell.AppActivate([int]$active.Id)) {
+        try { $active.WaitForInputIdle(5000) | Out-Null } catch {}
+        # A freshly created MuseScore window reports its title before the menu
+        # bar is ready to accept keyboard input.
+        Start-Sleep -Milliseconds 1500
+        [System.Windows.Forms.SendKeys]::SendWait('%p')
+        Start-Sleep -Milliseconds 500
+        # Manage Plugins is first; BandCue Bridge is the first enabled command.
+        [System.Windows.Forms.SendKeys]::SendWait('{DOWN}{ENTER}')
+        $pluginStarted = $true
+        Start-Sleep -Milliseconds 1500
+      }
+    } catch {}
+  }
 }
 [PSCustomObject]@{
   outcome = $outcome
@@ -1870,6 +1905,7 @@ if ($active) {
   windowTitle = $activeTitle
   closedOld = $closed
   lingering = $lingering
+  pluginStarted = $pluginStarted
 } | ConvertTo-Json -Compress
 `;
   const result = await runPowerShell(script);
@@ -1893,6 +1929,7 @@ if ($active) {
     windowTitle?: string;
     closedOld?: number[];
     lingering?: number[];
+    pluginStarted?: boolean;
   }>(result.stdout);
   const windowTitle = outcome?.windowTitle?.trim() || undefined;
   const closedCount = outcome?.closedOld?.length ?? 0;
@@ -1903,11 +1940,14 @@ if ($active) {
       ? `${lingeringCount} previous instance${lingeringCount === 1 ? "" : "s"} did not close (unsaved changes?)`
       : ""
   ].filter(Boolean).join("; ");
+  const pluginSummary = outcome?.pluginStarted
+    ? "BandCue Bridge launch requested automatically in the opened score"
+    : "BandCue Bridge could not be started automatically";
 
   if (outcome?.outcome === "new-instance") {
     return {
       opened: true,
-      detail: `Opened MuseScore score ${relativePath} in a new window${closeSummary ? `; ${closeSummary}` : ""}`,
+      detail: `Opened MuseScore score ${relativePath} in a new window; ${pluginSummary}${closeSummary ? `; ${closeSummary}` : ""}`,
       windowTitle
     };
   }
@@ -1915,7 +1955,7 @@ if ($active) {
   if (outcome?.outcome === "reused-instance") {
     return {
       opened: true,
-      detail: `MuseScore loaded score ${relativePath} in an existing window`,
+      detail: `MuseScore loaded score ${relativePath} in an existing window; ${pluginSummary}`,
       windowTitle
     };
   }

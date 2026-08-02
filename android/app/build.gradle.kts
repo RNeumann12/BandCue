@@ -27,8 +27,8 @@ android {
         applicationId = "com.bandcue.songsterr"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.4.4"
+        versionCode = 29
+        versionName = "1.5.4"
     }
 
     signingConfigs {

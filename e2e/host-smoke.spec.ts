@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import WebSocket from "ws";
+import { readFile } from "node:fs/promises";
 
 // Matches playwright.config.ts webServer env.
 const PORT = 4599;
@@ -37,8 +38,18 @@ test("host connects, edits the setlist, and schedules a play", async ({ page }) 
 
   // Setlist round trip: form -> localStorage/room -> rendered list.
   await page.fill("#songTitleInput", "E2E Smoke Song");
+  await page.fill("#songTempoInput", "92");
   await page.click("#setlistSubmitButton");
   await expect(page.locator("#setlistItems")).toContainText("E2E Smoke Song");
+  await expect(page.locator("#setlistItems")).toContainText("92% tempo");
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.click("#exportSetlistButton");
+  const download = await downloadPromise;
+  const exportPath = await download.path();
+  expect(exportPath).toBeTruthy();
+  const exported = JSON.parse(await readFile(exportPath!, "utf8"));
+  expect(exported).toMatchObject({ version: 2, songs: [{ title: "E2E Smoke Song", tempoPercent: 92 }] });
 
   // A fake ready adapter joins; without one, Play stays blocked.
   const adapter = await joinFakeAdapter("E2E fake adapter");

@@ -10,7 +10,8 @@ data class CurrentSong(
     val source: String?,
     val songsterrUrl: String? = null,
     val songsterrBassUrl: String? = null,
-    val songsterrDrumUrl: String? = null
+    val songsterrDrumUrl: String? = null,
+    val tempoPercent: Int = 100
 ) {
     /**
      * Resolve the Songsterr URL for this song, mirroring
@@ -73,6 +74,13 @@ data class AdapterCommandStatus(
     val firedAtServerTime: Long? = null
 )
 
+data class AdapterTempoStatus(
+    val requestedPercent: Int,
+    val appliedPercent: Int? = null,
+    val state: String,
+    val detail: String
+)
+
 object ProtocolJson {
     fun clientHello(deviceName: String): String = JSONObject()
         .put("type", "clientHello")
@@ -85,6 +93,7 @@ object ProtocolJson {
                     .put("app", "songsterr")
                     .put("canPlay", true)
                     .put("canStop", true)
+                    .put("canSetTempo", true)
             )
         )
         .toString()
@@ -108,7 +117,8 @@ object ProtocolJson {
         playback: String,
         title: String?,
         detail: String,
-        lastCommand: AdapterCommandStatus? = null
+        lastCommand: AdapterCommandStatus? = null,
+        tempo: AdapterTempoStatus? = null
     ): String {
         val payload = JSONObject()
             .put("type", "adapterStatus")
@@ -136,6 +146,15 @@ object ProtocolJson {
                 command.put("firedAtServerTime", lastCommand.firedAtServerTime)
             }
             payload.put("lastCommand", command)
+        }
+        if (tempo != null) {
+            payload.put("tempo", JSONObject()
+                .put("requestedPercent", tempo.requestedPercent)
+                .put("state", tempo.state)
+                .put("detail", tempo.detail))
+            if (tempo.appliedPercent != null) {
+                payload.getJSONObject("tempo").put("appliedPercent", tempo.appliedPercent)
+            }
         }
 
         return payload.toString()
@@ -228,7 +247,8 @@ object ProtocolJson {
         source = song.optString("source").takeIf { it.isNotBlank() },
         songsterrUrl = song.optString("songsterrUrl").takeIf { it.isNotBlank() },
         songsterrBassUrl = song.optString("songsterrBassUrl").takeIf { it.isNotBlank() },
-        songsterrDrumUrl = song.optString("songsterrDrumUrl").takeIf { it.isNotBlank() }
+        songsterrDrumUrl = song.optString("songsterrDrumUrl").takeIf { it.isNotBlank() },
+        tempoPercent = song.optInt("tempoPercent", 100).coerceIn(15, 175)
     )
 }
 

@@ -4,7 +4,15 @@ let statusReportTimer;
 let durationObserver;
 let lastObservedDurationMs;
 let lastObservedSource = location.href;
+/** @type {{ requestedPercent: number, appliedPercent?: number, state: string, detail: string }} */
+let tempoStatus = { requestedPercent: 100, appliedPercent: 100, state: "applied", detail: "100% tempo" };
 const observedMediaElements = new WeakSet();
+// Songsterr's desktop speed ruler does not expose a native range input. These
+// are the exact stops produced by its current ruler implementation (the eight
+// labelled presets with two evenly spaced stops between each pair).
+const SONGSTERR_DESKTOP_SPEEDS = [
+  15, 18, 22, 25, 33, 42, 50, 58, 67, 75, 83, 92, 100, 108, 117, 125, 133, 142, 150, 158, 167, 175
+];
 
 // Audio arming (iPadOS/iOS) -- see the section at the end of this file for what
 // this is for. The state lives here because the bootstrap block below reads it.
@@ -93,6 +101,7 @@ function reportStatus() {
     title: document.title,
     source: location.href,
     durationMs,
+    tempo: tempoStatus,
     detail: lastControlDetail
   });
 }
@@ -123,6 +132,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     reportStatus();
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (message.type === "bandcueSetTempo") {
+    setSongsterrTempo(message.tempoPercent).then((result) => {
+      tempoStatus = result.ok
+        ? { requestedPercent: result.requestedPercent, appliedPercent: result.appliedPercent, state: "applied", detail: result.detail }
+        : { requestedPercent: result.requestedPercent, state: "failed", detail: result.detail };
+      lastControlDetail = result.detail;
+      reportStatus();
+      sendResponse(result);
+    });
+    return true;
   }
 
   if (message.type === "bandcueTransport") {
@@ -172,6 +193,182 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return false;
 });
 
+async function setSongsterrTempo(value) {
+  const requestedPercent = Math.max(15, Math.min(175, Math.round(Number(value) || 100)));
+  if (readVisibleTempoPercent() === requestedPercent) {
+    return { ok: true, requestedPercent, appliedPercent: requestedPercent, detail: `${requestedPercent}% tempo already selected` };
+  }
+
+  const speedControl = findSpeedControl();
+  if (!speedControl) {
+    return { ok: false, requestedPercent, detail: "Could not find Songsterr's playback speed control (Songsterr Plus may be required)." };
+  }
+  /** @type {HTMLElement} */ (speedControl).click();
+  const speedDialog = await waitForSpeedDialog();
+  if (!speedDialog) {
+    return { ok: false, requestedPercent, detail: "Songsterr opened speed settings but the controls did not finish loading." };
+  }
+
+  const exactOption = [...speedDialog.querySelectorAll("button, [role='button'], [role='option']")]
+    .find((element) => normalizedControlText(element) === `${requestedPercent}%`);
+  if (exactOption) {
+    /** @type {HTMLElement} */ (exactOption).click();
+  } else {
+    const slider = speedDialog.querySelector("[role='slider'][aria-valuenow]");
+    if (slider) {
+      const sliderResult = setSongsterrDesktopSlider(slider, requestedPercent);
+      if (!sliderResult.ok) {
+        return { ok: false, requestedPercent, detail: sliderResult.detail };
+      }
+    } else {
+      const input = [...speedDialog.querySelectorAll("input")].find((candidate) => {
+        const min = Number(candidate.min || 15);
+        const max = Number(candidate.max || 175);
+        return (candidate.type === "range" || candidate.type === "number") && min <= requestedPercent && max >= requestedPercent;
+      });
+      if (input) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        nativeSetter?.call(input, String(requestedPercent));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (!await setSongsterrCompactFineTempo(speedDialog, requestedPercent)) {
+        return { ok: false, requestedPercent, detail: `Songsterr opened speed settings but exposed no control for ${requestedPercent}%.` };
+      }
+    }
+  }
+
+  const appliedPercent = await waitForTempoPercent(requestedPercent);
+  return appliedPercent === requestedPercent
+    ? { ok: true, requestedPercent, appliedPercent, detail: `${requestedPercent}% tempo applied through Songsterr controls` }
+    : { ok: false, requestedPercent, detail: `Songsterr did not confirm ${requestedPercent}% tempo${appliedPercent ? ` (shows ${appliedPercent}%)` : ""}.` };
+}
+
+async function waitForSpeedDialog() {
+  const deadline = Date.now() + 2000;
+  while (Date.now() <= deadline) {
+    const dialog = document.querySelector("[data-tab-control='speed'], [role='dialog'] [role='slider'][aria-valuenow]")
+      ?.closest?.("[data-tab-control='speed'], [role='dialog']")
+      ?? document.querySelector("[data-tab-control='speed']");
+    if (dialog) return dialog;
+    await delay(40);
+  }
+  return undefined;
+}
+
+function setSongsterrDesktopSlider(slider, requestedPercent) {
+  const targetIndex = SONGSTERR_DESKTOP_SPEEDS.indexOf(requestedPercent);
+  if (targetIndex < 0) {
+    return {
+      ok: false,
+      detail: `${requestedPercent}% is not an exact Songsterr desktop speed stop. Use one of: ${SONGSTERR_DESKTOP_SPEEDS.join(", ")}%.`
+    };
+  }
+
+  const ruler = slider.parentElement;
+  const rect = ruler?.getBoundingClientRect?.();
+  if (!ruler || !rect || rect.width <= 0) {
+    return { ok: false, detail: "Songsterr's speed ruler is not visible." };
+  }
+
+  const ratio = targetIndex / (SONGSTERR_DESKTOP_SPEEDS.length - 1);
+  const clientX = rect.left + rect.width * ratio;
+  const clientY = rect.top + rect.height / 2;
+  const usesPointerEvents = typeof PointerEvent === "function";
+  const mouseInit = { bubbles: true, cancelable: true, buttons: 1, clientX, clientY };
+  if (usesPointerEvents) {
+    ruler.dispatchEvent(new PointerEvent("pointerdown", { ...mouseInit, pointerId: 1, pointerType: "mouse" }));
+    document.dispatchEvent(new PointerEvent("pointerup", { ...mouseInit, buttons: 0, pointerId: 1, pointerType: "mouse" }));
+  } else {
+    ruler.dispatchEvent(new MouseEvent("mousedown", mouseInit));
+    document.dispatchEvent(new MouseEvent("mouseup", { ...mouseInit, buttons: 0 }));
+  }
+  return { ok: true };
+}
+
+async function setSongsterrCompactFineTempo(speedDialog, requestedPercent) {
+  let current = readTempoPercentFrom(speedDialog);
+  if (current === requestedPercent) return true;
+
+  const fineTuning = [...speedDialog.querySelectorAll("button")]
+    .find((button) => /fine tuning/i.test(button.getAttribute("aria-label") || "") || normalizedControlText(button) === "- | +");
+  if (fineTuning) {
+    /** @type {HTMLElement} */ (fineTuning).click();
+    await delay(60);
+  }
+
+  current = readTempoPercentFrom(speedDialog);
+  if (current === undefined) return false;
+  const valueElement = [...speedDialog.querySelectorAll("*")]
+    .find((element) => normalizedControlText(element) === `${current}%`);
+  const fineSection = valueElement?.closest?.("section");
+  const buttons = fineSection ? [...fineSection.querySelectorAll("button")] : [];
+  if (buttons.length < 2) return false;
+
+  const directionButton = requestedPercent < current ? buttons[0] : buttons[buttons.length - 1];
+  const clickCount = Math.abs(requestedPercent - current);
+  for (let click = 0; click < clickCount; click += 1) {
+    /** @type {HTMLElement} */ (directionButton).click();
+    // React must commit each one-percent state update before the next click;
+    // otherwise batched synthetic clicks can all calculate from one stale value.
+    await delay(12);
+  }
+  return true;
+}
+
+async function waitForTempoPercent(requestedPercent) {
+  const deadline = Date.now() + 1500;
+  let visible;
+  while (Date.now() <= deadline) {
+    visible = readVisibleTempoPercent();
+    if (visible === requestedPercent) return visible;
+    await delay(40);
+  }
+  return visible;
+}
+
+function findSpeedControl() {
+  return document.querySelector("#c-speed button, #control-speed")
+    ?? [...document.querySelectorAll("button, [role='button']")].find((element) => {
+    const label = normalizedControlText(element);
+    return /(?:playback\s*)?speed|tempo|\b\d{1,3}%/i.test(label);
+  });
+}
+
+function readVisibleTempoPercent() {
+  const slider = document.querySelector("[data-tab-control='speed'] [role='slider'][aria-valuenow]");
+  if (slider && slider.getClientRects().length) {
+    const value = Number(slider.getAttribute("aria-valuenow"));
+    if (Number.isFinite(value)) return Math.round(value);
+  }
+  for (const element of document.querySelectorAll("button, [role='button'], output, [aria-label]")) {
+    const match = normalizedControlText(element).match(/\b(\d{1,3})%/);
+    if (match && element.getClientRects().length) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function readTempoPercentFrom(root) {
+  const slider = root.querySelector?.("[role='slider'][aria-valuenow]");
+  if (slider) {
+    const value = Number(slider.getAttribute("aria-valuenow"));
+    if (Number.isFinite(value)) return Math.round(value);
+  }
+  for (const element of root.querySelectorAll?.("*") ?? []) {
+    const match = normalizedControlText(element).match(/^(\d{1,3})%$/);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function normalizedControlText(element) {
+  return `${element.getAttribute?.("aria-label") || ""} ${element.getAttribute?.("title") || ""} ${element.textContent || ""}`
+    .replace(/\s+/g, " ").trim();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 installAudioArming();
 reportStatus();
 statusTimer = setInterval(reportStatus, 5000);
@@ -214,6 +411,12 @@ function handleRuntimeMessageError(error) {
 // ~5 ms apiece on a real Songsterr page and scaling with DOM size and CPU --
 // i.e. a per-device head start that no clock sync can compensate for.
 async function runScheduledTransport(message) {
+  if (message.action === "play") {
+    const requestedTempo = Math.max(15, Math.min(175, Math.round(Number(message.tempoPercent) || 100)));
+    if (tempoStatus.state !== "applied" || tempoStatus.appliedPercent !== requestedTempo) {
+      return { ok: false, detail: `${requestedTempo}% tempo is not applied; open/load the song before Play.`, controlPath: "tempo-preflight" };
+    }
+  }
   const action = message.action;
   const resetBeforePlay = Boolean(message.resetBeforePlay);
   const dueLocalAt = Number(message.dueLocalAt) || 0;

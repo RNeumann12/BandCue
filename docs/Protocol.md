@@ -267,6 +267,7 @@ A targeted failure reply (e.g. a rejected transport request or a non-host mutati
   "songsterrUrl": "https://…",      // optional, lets one entry also open in Songsterr
   "songsterrBassUrl": "https://…",  // optional bass override when it is a different Songsterr page
   "songsterrDrumUrl": "https://…",  // optional drums override when it is a different Songsterr page
+  "tempoPercent": 92,               // optional legacy default 100; integer 15..175
   "museScoreSource": "CCR/Bad Moon Rising",  // optional, relative path or title for MuseScore
   "durationMs": 138000,             // optional
   "durationSource": "adapter",      // adapter | manual

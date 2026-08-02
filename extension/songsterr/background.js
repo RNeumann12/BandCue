@@ -48,6 +48,10 @@ let lastSongsterrTabIdentity = "";
 // tried and refused, or never attempted at all.
 let lastSongOpenMethod = "";
 let lastContentScriptStatusAt = 0;
+let currentRoomSong;
+let lastTempoSongKey = "";
+/** @type {{ requestedPercent: number, appliedPercent?: number, state: string, detail: string }} */
+let tempoStatus = { requestedPercent: 100, appliedPercent: 100, state: "applied", detail: "100% tempo" };
 // When true, this machine never auto-opens a Songsterr tab. Use it on a host
 // that plays from MuseScore so transport/open commands don't pop Songsterr.
 let suppressAutoOpen = false;
@@ -259,7 +263,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       durationSource: message.durationMs ? "adapter" : undefined,
       state: message.ready ? "ready" : "not-ready",
       detail: message.detail,
-      lastCommand: latestCommand
+      lastCommand: latestCommand,
+      tempo: message.tempo || tempoStatus
     });
     return false;
   }
@@ -447,7 +452,7 @@ async function connect() {
       type: "clientHello",
       deviceName: resolveDeviceName(),
       role: "desktop-adapter",
-      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canSetTempo: true }]
     });
 
     // Warm up with a quick burst so the offset converges within ~2s, then settle
@@ -503,6 +508,12 @@ async function connect() {
     }
 
     if (message.type === "roomState") {
+      currentRoomSong = message.currentSong?.song;
+      const tempoKey = `${currentRoomSong?.id || ""}:${sanitizeTempoPercent(currentRoomSong?.tempoPercent)}`;
+      if (tempoKey !== lastTempoSongKey) {
+        lastTempoSongKey = tempoKey;
+        void applyTempoForSong(currentRoomSong);
+      }
       reconcileTransportFromRoomState(message);
       return;
     }
@@ -843,8 +854,13 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     tabs
       .filter((tab) => tab.id)
       .map((tab) =>
-        chrome.tabs
-          .sendMessage(tab.id, { type: "bandcueTransport", action, resetBeforePlay, dueLocalAt })
+        sendMessageToSongsterrTab(tab.id, {
+            type: "bandcueTransport",
+            action,
+            resetBeforePlay,
+            dueLocalAt,
+            tempoPercent: sanitizeTempoPercent(currentSong?.tempoPercent)
+          })
           .catch((error) => ({
             ok: false,
             detail: error?.message || "Songsterr content script did not respond",
@@ -930,6 +946,8 @@ async function openSongsterrFromRoom(currentSong, sequenceId) {
     return;
   }
 
+  await applyTempoForSong(currentSong, tabs);
+
   reportCommandStatus({
     action: "open-song",
     sequenceId,
@@ -973,7 +991,8 @@ async function reportActiveTabStatus() {
       detail: ready
         ? getStableReadyDetail()
         : "No Songsterr tab detected. Open a Songsterr song tab.",
-      lastCommand: latestCommand
+      lastCommand: latestCommand,
+      tempo: tempoStatus
     });
   } finally {
     tabStatusInFlight = false;
@@ -1005,7 +1024,8 @@ function reportCommandStatus(command) {
     ready: command.ready,
     state,
     detail: command.detail,
-    lastCommand: latestCommand
+    lastCommand: latestCommand,
+    tempo: tempoStatus
   });
 }
 
@@ -1040,6 +1060,7 @@ function normalizeAdapterStatus(status) {
     // (see scheduleDelayForClients in src/shared/transport.ts). Grows only when
     // a real command ran out of lead time.
     requiredLeadMs: adaptiveDispatchLeadMs,
+    tempo: status.tempo || tempoStatus,
     lastCommand: status.lastCommand
   };
 }
@@ -1054,8 +1075,37 @@ function getAdapterStatusSignature(status) {
     state: status.state || "",
     detail: status.detail || "",
     requiredLeadMs: status.requiredLeadMs || 0,
+    tempo: status.tempo || null,
     lastCommand: status.lastCommand || null
   });
+}
+
+function sanitizeTempoPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 100;
+  return Math.max(15, Math.min(175, Math.round(number)));
+}
+
+async function applyTempoForSong(song, knownTabs) {
+  const requestedPercent = sanitizeTempoPercent(song?.tempoPercent);
+  tempoStatus = { requestedPercent, state: "pending", detail: `Applying ${requestedPercent}% tempo` };
+  publishAdapterStatus({ ...lastStatus, tempo: tempoStatus });
+  const tabs = knownTabs || await findSongsterrTabs(song);
+  if (!tabs.length) {
+    tempoStatus = { requestedPercent, state: "pending", detail: "Open the current Songsterr song to apply tempo." };
+    publishAdapterStatus({ ...lastStatus, tempo: tempoStatus });
+    return false;
+  }
+  const results = await Promise.all(tabs.map((tab) => sendMessageToSongsterrTab(tab.id, {
+    type: "bandcueSetTempo",
+    tempoPercent: requestedPercent
+  }).catch((error) => ({ ok: false, detail: error?.message || String(error) }))));
+  const failed = results.find((result) => !result?.ok || result.appliedPercent !== requestedPercent);
+  tempoStatus = failed
+    ? { requestedPercent, state: "failed", detail: failed.detail || `Could not verify ${requestedPercent}% tempo` }
+    : { requestedPercent, appliedPercent: requestedPercent, state: "applied", detail: `${requestedPercent}% tempo applied` };
+  publishAdapterStatus({ ...lastStatus, ready: !failed, tempo: tempoStatus, detail: tempoStatus.detail });
+  return !failed;
 }
 
 function sanitizeDurationMs(value) {
@@ -1270,8 +1320,7 @@ async function navigateSongsterrTabInPage(tab, url, options = {}) {
     setTimeout(() => settleInPageNav(requestId, false), IN_PAGE_NAV_REPLY_TIMEOUT_MS);
   });
 
-  chrome.tabs
-    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url, requestId, allowAudioPrime })
+  sendMessageToSongsterrTab(tab.id, { type: "bandcueNavigateInPage", url, requestId, allowAudioPrime })
     .then((result) => {
       if (result) {
         settleInPageNav(requestId, Boolean(result.ok));
@@ -1329,9 +1378,30 @@ async function requestSongsterrStatusFromTabs(tabs) {
       continue;
     }
 
-    chrome.tabs
-      .sendMessage(tab.id, { type: "bandcueReportStatus" })
+    sendMessageToSongsterrTab(tab.id, { type: "bandcueReportStatus" })
       .catch(() => undefined);
+  }
+}
+
+/**
+ * An unpacked extension reload does not retroactively install its declared
+ * content script into Songsterr tabs that were already open. Reload the page
+ * once so Chrome installs the declared script in a fresh document. Executing
+ * content-script.js again in the existing document is unsafe because its
+ * top-level lexical bindings still exist and would throw a redeclaration error.
+ */
+async function sendMessageToSongsterrTab(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (error) {
+    const detail = error?.message || String(error);
+    if (!/receiving end does not exist|could not establish connection/i.test(detail)) {
+      throw error;
+    }
+    const ready = waitForTabReady(tabId, 7000);
+    await chrome.tabs.reload(tabId);
+    await ready;
+    return chrome.tabs.sendMessage(tabId, message);
   }
 }
 

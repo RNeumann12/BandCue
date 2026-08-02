@@ -3,6 +3,31 @@ import type WebSocket from "ws";
 import { MAX_SETLIST_SONGS, RoomController } from "./room.js";
 
 describe("RoomController", () => {
+  it("blocks non-100% play until every applicable adapter confirms tempo", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const hostMessages: string[] = [];
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello", deviceName: "Host", role: "host", capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello", deviceName: "Guitar", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canSetTempo: true }]
+    }, 1000);
+    room.handleMessage(host.id, { type: "currentSongUpdate", updatedAt: 1010, song: {
+      id: "zombie", title: "Zombie", sourceType: "songsterr", source: "https://www.songsterr.com/a/wsa/x-s1", tempoPercent: 92
+    } }, 1010);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1020 }, 1020);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1030 }, 1030);
+    expect(room.getState(1030).transport.status).toBe("stopped");
+    expect(hostMessages.some((raw) => JSON.parse(raw).type === "error" && JSON.parse(raw).message.includes("92%"))).toBe(true);
+
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus", app: "songsterr", ready: true,
+      tempo: { requestedPercent: 92, appliedPercent: 92, state: "applied" }
+    }, 1040);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1050 }, 1050);
+    expect(room.getState(1050).transport.status).toBe("scheduled");
+  });
   it("broadcast state reflects a scheduled mock transport command", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const client = room.addClient(undefined, {

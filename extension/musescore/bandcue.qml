@@ -24,14 +24,16 @@
  */
 
 import QtQuick 2.9
+import QtQuick.Window 2.3
 import MuseScore 3.0
+import MuseScore.Playback
 
 MuseScore {
   id: root
 
   title: "BandCue Bridge"
   description: "Starts and stops playback on BandCue's downbeat, from the top of the score."
-  version: "1.0"
+  version: "1.2"
   // A dialog stays open, which is what makes the plugin resident: a plain plugin
   // finishes after onRun and could not wait for a cue.
   pluginType: "dialog"
@@ -51,13 +53,25 @@ MuseScore {
   property string pendingAction: ""
   property bool pendingReset: false
   property double pendingDueLocalAt: 0
+  property int requestedTempoPercent: 100
+  property int appliedTempoPercent: 100
+  property string tempoState: "applied"
+  property string tempoDetail: "100% tempo"
+  property int minimizeAttempts: 0
+
+  PlaybackToolBarModel {
+    id: playbackModel
+  }
 
   // How far ahead of the downbeat to prepare the selection, so only the play
   // command itself is left for the beat.
   readonly property int prepareLeadMs: 250
 
   onRun: {
+    playbackModel.load()
     root.connect()
+    root.minimizeAttempts = 0
+    minimizeTimer.restart()
   }
 
   function log(message) {
@@ -94,7 +108,17 @@ MuseScore {
     } catch (error) {
       title = ""
     }
-    var payload = { type: "status", ready: true, title: title }
+    var payload = {
+      type: "status",
+      ready: true,
+      title: title,
+      tempo: {
+        requestedPercent: root.requestedTempoPercent,
+        appliedPercent: root.tempoState === "applied" ? root.appliedTempoPercent : undefined,
+        state: root.tempoState,
+        detail: root.tempoDetail
+      }
+    }
     // Omitted rather than guessed when unknown: the adapter keeps the last known
     // playback state instead of being told something wrong.
     if (playback !== undefined) {
@@ -114,6 +138,20 @@ MuseScore {
 
     if (message.type === "hello") {
       root.statusLine = "Connected to BandCue"
+      root.applyTempo(message.currentSong)
+      return
+    }
+
+    if (message.type === "song") {
+      root.applyTempo(message.currentSong)
+      return
+    }
+
+    if (message.type === "retire") {
+      root.connected = false
+      root.statusLine = "Switching to the next score..."
+      root.log("retiring bridge before score change")
+      Qt.quit()
       return
     }
 
@@ -123,6 +161,20 @@ MuseScore {
   }
 
   function onCommand(message) {
+    root.applyTempo(message.currentSong)
+
+    if (message.action === "open-song") {
+      root.lastCommandLine = "opening song through BandCue helper"
+      root.send({
+        type: "result",
+        sequenceId: message.sequenceId,
+        status: "failed",
+        controlPath: "musescore-plugin-delegated",
+        detail: "The Windows helper will open the score and restart BandCue Bridge in its MuseScore process"
+      })
+      return
+    }
+
     root.pendingSequenceId = message.sequenceId
     root.pendingAction = message.action
     root.pendingReset = message.resetBeforePlay === true
@@ -130,6 +182,19 @@ MuseScore {
 
     // Claim it so the adapter does not also fire its keyboard fallback.
     root.send({ type: "claim", sequenceId: message.sequenceId, controlPath: "musescore-plugin" })
+
+    if (message.action === "play" && root.tempoState !== "applied") {
+      root.send({
+        type: "result",
+        sequenceId: message.sequenceId,
+        status: "failed",
+        playback: "stopped",
+        controlPath: "musescore-plugin-tempo",
+        detail: root.tempoDetail
+      })
+      root.lastCommandLine = "play blocked: " + root.tempoDetail
+      return
+    }
 
     var remainingMs = message.dueLocalAt - Date.now()
     root.lastCommandLine = message.action + " in " + Math.round(remainingMs) + " ms"
@@ -153,6 +218,44 @@ MuseScore {
     }
     downbeatTimer.interval = waitMs
     downbeatTimer.restart()
+  }
+
+  // A dialog plugin must remain open to receive cues, but it should not cover
+  // the score. MuseScore exposes the native dialog through this attached Window
+  // property. Retry briefly because the wrapper is created just after onRun.
+  function minimizeBridgeWindow() {
+    root.minimizeAttempts += 1
+    try {
+      var pluginWindow = root.parent.Window.window
+      if (pluginWindow) {
+        pluginWindow.showMinimized()
+        return true
+      }
+    } catch (error) {
+      root.log("bridge window not ready to minimize: " + error)
+    }
+    return false
+  }
+
+  function applyTempo(song) {
+    var requested = song && song.tempoPercent !== undefined ? Math.round(song.tempoPercent) : 100
+    requested = Math.max(15, Math.min(175, requested))
+    root.requestedTempoPercent = requested
+    root.tempoState = "pending"
+    root.tempoDetail = "Applying " + requested + "% tempo"
+    try {
+      playbackModel.tempoMultiplier = requested / 100.0
+      var applied = Math.round(playbackModel.tempoMultiplier * 100)
+      root.appliedTempoPercent = applied
+      root.tempoState = applied === requested ? "applied" : "failed"
+      root.tempoDetail = applied === requested
+        ? requested + "% tempo applied through MuseScore Bridge"
+        : "MuseScore reported " + applied + "% after requesting " + requested + "%"
+    } catch (error) {
+      root.tempoState = "failed"
+      root.tempoDetail = "MuseScore Bridge could not set tempo: " + error
+    }
+    root.sendStatus(undefined)
   }
 
   /**
@@ -197,9 +300,12 @@ MuseScore {
         // wherever the playhead was last left.
         cmd(root.pendingReset ? "play-from-selection" : "play")
         playback = "playing"
-      } else {
+      } else if (root.pendingAction === "stop") {
         cmd("stop")
         playback = "stopped"
+      } else {
+        ok = false
+        root.log("unsupported command: " + root.pendingAction)
       }
     } catch (error) {
       ok = false
@@ -224,6 +330,17 @@ MuseScore {
     id: downbeatTimer
     repeat: false
     onTriggered: root.execute()
+  }
+
+  Timer {
+    id: minimizeTimer
+    interval: 250
+    repeat: true
+    onTriggered: {
+      if (root.minimizeBridgeWindow() || root.minimizeAttempts >= 12) {
+        minimizeTimer.stop()
+      }
+    }
   }
 
   // Keeps the adapter's "a bridge is attached" window open (it expires after 5 s)

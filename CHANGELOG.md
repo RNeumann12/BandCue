@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.5.4 - 2026-08-02
+
+### Fixed
+
+- BandCue Bridge now minimizes its own MuseScore plugin window after startup.
+  The dialog stays resident and connected but no longer covers the score or
+  other rehearsal windows, including after automatic song-change handoffs.
+
+## 1.5.3 - 2026-08-02
+
+### Fixed
+
+- Recovery after an unpacked Songsterr extension reload now reloads the tab and
+  retries once. It no longer executes the content script twice in one document,
+  which caused `Identifier 'lastControlDetail' has already been declared` and
+  left the adapter unable to control tempo or transport.
+- MuseScore song changes now start BandCue Bridge automatically in the newly
+  opened MuseScore process. MuseScore 4 creates a new process even when its QML
+  `readScore(path)` API is used, so keeping the old plugin alive only kept it
+  attached to the old score; the helper now performs the process handoff for the
+  user instead. Existing bridge dialogs retire before the switch, preventing an
+  unsaved old score window from continuing to receive transport commands.
+
+## 1.5.2 - 2026-08-02
+
+### Fixed
+
+- The Songsterr extension now injects and retries automatically when an
+  already-open tab has no content script after an unpacked-extension reload.
+
+## 1.5.1 - 2026-08-02
+
+### Fixed
+
+- The Songsterr browser extension now waits for the lazy-loaded speed panel and
+  drives Songsterr's custom desktop slider or compact fine-tuning buttons instead
+  of looking only for a native range input.
+- The MuseScore plugin no longer treats `open-song` as Stop and falsely reports
+  `open-song fired`; it delegates opening to the Windows helper's local score
+  catalog.
+
+## 1.5.0 - 2026-08-02
+
+### Added
+
+- Per-song playback tempo from 15% to 175%, shared by the Songsterr browser
+  extension, the MuseScore desktop bridge, and the Songsterr Android adapter.
+- Tempo editing in the setlist UI and preservation through JSON import/export.
+- Tempo readiness reporting and Play blocking when an applicable adapter cannot
+  confirm the requested non-default tempo.
+- Tempo-aware automatic song duration while keeping stored durations normalized
+  to 100% speed.
+
 ## 1.4.4 - 2026-08-02
 
 ### Fixed

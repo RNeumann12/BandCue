@@ -36,7 +36,10 @@ function loadBackground(
   // navigation fallback.
   // true/false: the content script replies. "hang": the reply channel is
   // dropped, as Safari-derived browsers do for a slow async sendResponse.
-  { inPageNav = false }: { inPageNav?: boolean | "hang" } = {}
+  { inPageNav = false, missingContentOnce = false }: {
+    inPageNav?: boolean | "hang";
+    missingContentOnce?: boolean;
+  } = {}
 ) {
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
@@ -47,6 +50,8 @@ function loadBackground(
   // Whether each switch let the content script re-prime the iPad's audio, which
   // is only safe when no downbeat is already on its way.
   const inPageNavAudioPrimes: Array<boolean | undefined> = [];
+  const reloadedTabs: number[] = [];
+  let shouldRejectMissingContent = missingContentOnce;
   let nextId = 1000;
   const onUpdatedListeners = new Set<(id: number, info: any, tab: FakeTab) => void>();
 
@@ -72,10 +77,21 @@ function loadBackground(
       onRemoved: { addListener() {} },
       query: async () => initialTabs.map((tab) => ({ ...tab })),
       get: async (id: number) => initialTabs.find((tab) => tab.id === id),
+      reload: async (id: number) => {
+        const tab = initialTabs.find((candidate) => candidate.id === id);
+        if (tab) {
+          reloadedTabs.push(id);
+          fireComplete(tab);
+        }
+      },
       sendMessage: async (
         id: number,
         message: { type?: string; url?: string; requestId?: number; allowAudioPrime?: boolean }
       ) => {
+        if (shouldRejectMissingContent) {
+          shouldRejectMissingContent = false;
+          throw new Error("Could not establish connection. Receiving end does not exist.");
+        }
         if (message?.type === "bandcueNavigateInPage") {
           inPageNavs.push(message.url ?? "");
           inPageNavRequestIds.push(message.requestId ?? -1);
@@ -212,12 +228,30 @@ function loadBackground(
     inPageNavs,
     inPageNavRequestIds,
     inPageNavAudioPrimes,
+    reloadedTabs,
     deliverServerMessage,
     sendRuntimeMessage,
     openConnection,
     evaluate
   };
 }
+
+describe("content script recovery", () => {
+  it("reloads and retries when an already-open Songsterr tab has no receiver", async () => {
+    const { context, reloadedTabs } = loadBackground(
+      [{ id: 7, url: SONG_A_TAB, windowId: 1, active: true }],
+      { missingContentOnce: true }
+    );
+
+    const result = await context.sendMessageToSongsterrTab(7, {
+      type: "bandcueSetTempo",
+      tempoPercent: 92
+    });
+
+    expect(reloadedTabs).toEqual([7]);
+    expect(result).toEqual({ ok: true });
+  });
+});
 
 describe("ensureSongsterrTabs tab reuse", () => {
   beforeEach(() => {
