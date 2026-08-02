@@ -644,7 +644,10 @@ function handleTransportCommand(message) {
     // Cleared first so the play's status reports how *this* command reached the
     // song rather than repeating whatever the last open did.
     lastSongOpenMethod = "";
-    ensureSongsterrTabs(message.currentSong?.song).catch(() => undefined);
+    // imminentPlay: this open is the count-in's own pre-open, so the tab must be
+    // left alone once it is on the song -- in particular the content script must
+    // not run its audio-priming play/stop cycle into our downbeat.
+    ensureSongsterrTabs(message.currentSong?.song, { imminentPlay: true }).catch(() => undefined);
   }
   // Dispatch to the content script *ahead* of the downbeat: the tab query,
   // IPC hop, and Songsterr prep all happen during the count-in, and the
@@ -1175,7 +1178,7 @@ async function openSongsterrTabs(currentSong, options = {}) {
       // A full navigation destroys the document, and on iPadOS that discards the
       // unlocked audio session with it, so playback stays silent until the
       // member taps the screen again (see the arming notes in content-script.js).
-      if (await navigateSongsterrTabInPage(reusable, targetUrl)) {
+      if (await navigateSongsterrTabInPage(reusable, targetUrl, options)) {
         lastSongOpenMethod = "switched in place, no reload";
         const activated = options.active ? await activateSongsterrTab(reusable) : reusable;
         return [{ ...activated, url: targetUrl }];
@@ -1240,19 +1243,23 @@ async function activateSongsterrTab(tab) {
 const pendingInPageNavs = new Map();
 let nextInPageNavId = 1;
 
-async function navigateSongsterrTabInPage(tab, url) {
+async function navigateSongsterrTabInPage(tab, url, options = {}) {
   if (!tab?.id) {
     return false;
   }
 
   const requestId = nextInPageNavId++;
+  // On iPadOS the content script re-primes Songsterr's audio engine after a
+  // switch (a short play/stop cycle). That is only safe when no downbeat is
+  // already on its way, which only this side knows.
+  const allowAudioPrime = !options.imminentPlay;
   const settled = new Promise((resolve) => {
     pendingInPageNavs.set(requestId, resolve);
     setTimeout(() => settleInPageNav(requestId, false), IN_PAGE_NAV_REPLY_TIMEOUT_MS);
   });
 
   chrome.tabs
-    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url, requestId })
+    .sendMessage(tab.id, { type: "bandcueNavigateInPage", url, requestId, allowAudioPrime })
     .then((result) => {
       if (result) {
         settleInPageNav(requestId, Boolean(result.ok));

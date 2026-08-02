@@ -53,8 +53,11 @@ class FakeElement {
     }
   }
 
+  // Set by a test that needs a gesture target to resolve to a control.
+  closestTarget: FakeElement | null = null;
+
   closest() {
-    return null;
+    return this.closestTarget;
   }
 
   clicks = 0;
@@ -118,18 +121,31 @@ class FakeAudioContext {
     FakeAudioContext.created += 1;
   }
 
+  // Sources still running when the test looks -- the silent keep-alive that
+  // stops iPadOS reclaiming an idle session.
+  looping = 0;
+
   createBuffer() {
     return {};
   }
 
+  createGain() {
+    return { gain: { value: 1 }, connect: () => {} };
+  }
+
   createBufferSource() {
-    return {
+    const source = {
       buffer: null,
+      loop: false,
       connect: () => {},
       start: () => {
         this.sounded += 1;
+        if (source.loop) {
+          this.looping += 1;
+        }
       }
     };
+    return source;
   }
 
   resume() {
@@ -232,11 +248,20 @@ function loadContentScript({
   }
 
   const keyEvents: string[] = [];
+  // Which keys were actually sent, so a test can tell a Space transport from the
+  // Backspace that puts the cursor back at the start.
+  const keysPressed: string[] = [];
+  const recordKey = (event: { type?: string; key?: unknown }) => {
+    if (event?.type === "keydown" && typeof event.key === "string") {
+      keysPressed.push(event.key);
+    }
+  };
   let routedTitles = 0;
   const window = {
     innerHeight: 900,
-    dispatchEvent(event: { type?: string }) {
+    dispatchEvent(event: { type?: string; key?: unknown }) {
       keyEvents.push(event?.type ?? "");
+      recordKey(event);
       if (event?.type === "popstate" && router === "spa") {
         routedTitles += 1;
         document.title = `Routed Song ${routedTitles} Tab by Artist`;
@@ -244,8 +269,9 @@ function loadContentScript({
       return true;
     }
   };
-  (document as unknown as { dispatchEvent: (e: { type?: string }) => boolean }).dispatchEvent = (event) => {
+  (document as unknown as { dispatchEvent: (e: { type?: string; key?: unknown }) => boolean }).dispatchEvent = (event) => {
     keyEvents.push(event?.type ?? "");
+    recordKey(event);
     return true;
   };
 
@@ -316,6 +342,7 @@ function loadContentScript({
     evaluate,
     documentListeners,
     fireGesture,
+    keysPressed,
     overlay
   };
 }
@@ -680,15 +707,45 @@ describe("Songsterr audio arming on iPadOS", () => {
     const { messages, evaluate, fireGesture, overlay } = loadContentScript({ ipad: true });
 
     fireGesture("pointerdown");
-    vi.runOnlyPendingTimers();
+    fireGesture("pointerup");
+    vi.advanceTimersByTime(500);
 
     expect(evaluate("audioArmed")).toBe(true);
     // Sounding a silent frame is what clears the restriction; resume() alone can
     // leave it in place.
-    expect(evaluate("audioArmContext").sounded).toBe(1);
+    expect(evaluate("audioArmContext").sounded).toBeGreaterThanOrEqual(1);
     expect(overlay()?.isConnected).toBe(false);
     expect(messages).toContainEqual(
       expect.objectContaining({ detail: expect.stringMatching(/audio is armed/i) })
+    );
+  });
+
+  it("holds a silent looping source so an idle session is not reclaimed", () => {
+    vi.useFakeTimers();
+    const { evaluate, fireGesture } = loadContentScript({ ipad: true });
+
+    fireGesture("pointerdown");
+    fireGesture("pointerdown");
+    vi.advanceTimersByTime(500);
+
+    // One keep-alive, however many gestures arrive.
+    expect(evaluate("audioArmContext").looping).toBe(1);
+  });
+
+  it("keeps the banner up until Songsterr's own engine has been started too", () => {
+    vi.useFakeTimers();
+    const { messages, evaluate, fireGesture, overlay } = loadContentScript({ ipad: true });
+
+    // pointerdown arms our context, but nothing has reached Songsterr's yet --
+    // the state members used to be stuck in, armed and still silent.
+    fireGesture("pointerdown");
+    vi.runOnlyPendingTimers();
+
+    expect(evaluate("audioArmed")).toBe(true);
+    expect(evaluate("songsterrPrimed")).toBe(false);
+    expect(overlay()?.isConnected).toBe(true);
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/engine is not started/i) })
     );
   });
 
@@ -751,6 +808,207 @@ describe("Songsterr audio arming on iPadOS", () => {
 
     expect(documentListeners.pointerdown).toBeUndefined();
     expect(overlay()).toBeUndefined();
+  });
+});
+
+// Songsterr's player transport as it really is on a localized UI: a single
+// toggle identified by its CSS-module class, with no English label to read.
+function transportToggle() {
+  return new FakeElement("", { class: "_8e144G_button _8e144G_play" });
+}
+
+describe("Songsterr audio priming on iPadOS", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("presses Play and Stop for the member, inside their own tap", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture, keysPressed, overlay } = loadContentScript({
+      elements: [toggle],
+      ipad: true
+    });
+
+    fireGesture("touchend");
+
+    // Synchronously, still inside the gesture: the document's live user
+    // activation is what lets Songsterr's own context start, and it is gone by
+    // the next task.
+    expect(toggle.clicks).toBe(1);
+
+    vi.advanceTimersByTime(200);
+    expect(toggle.clicks).toBe(2);
+    expect(keysPressed).toContain("Backspace");
+    expect(evaluate("songsterrPrimed")).toBe(true);
+    expect(overlay()?.isConnected).toBe(false);
+  });
+
+  it("primes only once, however many events one tap produces", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+
+    fireGesture("pointerdown");
+    fireGesture("touchend");
+    fireGesture("pointerup");
+    fireGesture("click");
+    vi.advanceTimersByTime(500);
+
+    // One play, one stop -- not a cycle per event.
+    expect(toggle.clicks).toBe(2);
+  });
+
+  it("leaves the member's own press of the player control alone", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const target = new FakeElement();
+    target.closestTarget = toggle;
+    const { evaluate, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+
+    fireGesture("touchend", { target });
+    vi.advanceTimersByTime(500);
+
+    // Their gesture already reaches Songsterr; a click of ours would only undo it.
+    expect(toggle.clicks).toBe(0);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("never touches the transport while a scheduled command is pending", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+    evaluate("transportCommandPending = true");
+
+    fireGesture("touchend");
+    vi.advanceTimersByTime(500);
+
+    expect(toggle.clicks).toBe(0);
+    expect(evaluate("songsterrPrimed")).toBe(false);
+  });
+
+  it("never touches the transport while BandCue playback is running", () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { evaluate, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+    evaluate("bandcuePlaybackActive = true");
+
+    fireGesture("touchend");
+    vi.advanceTimersByTime(500);
+
+    expect(toggle.clicks).toBe(0);
+  });
+
+  it("ends a priming cycle at once when a real command arrives", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { context, fireGesture } = loadContentScript({ elements: [toggle], ipad: true });
+    fireGesture("touchend");
+    expect(toggle.clicks).toBe(1);
+
+    const transport = context.chrome.runtime.onMessage.listener(
+      { type: "bandcueTransport", action: "play", dueLocalAt: 0 },
+      {},
+      () => {}
+    );
+
+    // The priming stop has already run by the time the command is being
+    // prepared, so it can never land inside the real play.
+    expect(toggle.clicks).toBe(2);
+    vi.advanceTimersByTime(500);
+    await Promise.resolve();
+    expect(transport).toBe(true);
+  });
+
+  it("re-primes after an in-page song switch", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { context, evaluate, fireGesture } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      router: "spa"
+    });
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+    expect(toggle.clicks).toBe(2);
+
+    const switched = context.navigateInPage("https://www.songsterr.com/a/wsa/song-b-tab-s200", {
+      allowAudioPrime: true
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await switched;
+    // The document -- and our arm -- survived, but Songsterr rebuilt its player.
+    expect(evaluate("songsterrPrimed")).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(toggle.clicks).toBe(4);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("does not re-prime a switch that a downbeat is already following", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const { context, evaluate, fireGesture } = loadContentScript({
+      elements: [toggle],
+      ipad: true,
+      router: "spa"
+    });
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+
+    const switched = context.navigateInPage("https://www.songsterr.com/a/wsa/song-b-tab-s200", {
+      allowAudioPrime: false
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await switched;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // Still the one play/stop from the tap: nothing of ours goes near the
+    // transport once the count-in has started.
+    expect(toggle.clicks).toBe(2);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+  });
+
+  it("tells the host when a start left the player standing still", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const clock = new FakeElement("0:00 / 3:45", { class: "player-time" });
+    const { context, evaluate, fireGesture, messages } = loadContentScript({
+      elements: [toggle, clock],
+      ipad: true
+    });
+    fireGesture("touchend");
+    vi.advanceTimersByTime(200);
+    expect(evaluate("songsterrPrimed")).toBe(true);
+
+    const played = context.runScheduledTransport({ action: "play", dueLocalAt: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    await played;
+    await vi.advanceTimersByTimeAsync(1000);
+
+    // The click landed and Songsterr flipped its button, but the position never
+    // moved: the silent WebKit start that used to be reported as a clean start.
+    expect(evaluate("songsterrPrimed")).toBe(false);
+    expect(messages).toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/never moved/i) })
+    );
+  });
+
+  it("says nothing when the player is moving", async () => {
+    vi.useFakeTimers();
+    const toggle = transportToggle();
+    const clock = new FakeElement("0:00 / 3:45", { class: "player-time" });
+    const { context, messages } = loadContentScript({ elements: [toggle, clock], ipad: true });
+
+    const played = context.runScheduledTransport({ action: "play", dueLocalAt: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+    await played;
+    clock.textContent = "0:01 / 3:45";
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({ detail: expect.stringMatching(/never moved/i) })
+    );
   });
 });
 

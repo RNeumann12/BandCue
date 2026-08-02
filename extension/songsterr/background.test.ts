@@ -44,6 +44,9 @@ function loadBackground(
   // Request ids the background stamped on each in-page switch, so a test can
   // answer a specific one the way the content script does.
   const inPageNavRequestIds: number[] = [];
+  // Whether each switch let the content script re-prime the iPad's audio, which
+  // is only safe when no downbeat is already on its way.
+  const inPageNavAudioPrimes: Array<boolean | undefined> = [];
   let nextId = 1000;
   const onUpdatedListeners = new Set<(id: number, info: any, tab: FakeTab) => void>();
 
@@ -69,10 +72,14 @@ function loadBackground(
       onRemoved: { addListener() {} },
       query: async () => initialTabs.map((tab) => ({ ...tab })),
       get: async (id: number) => initialTabs.find((tab) => tab.id === id),
-      sendMessage: async (id: number, message: { type?: string; url?: string; requestId?: number }) => {
+      sendMessage: async (
+        id: number,
+        message: { type?: string; url?: string; requestId?: number; allowAudioPrime?: boolean }
+      ) => {
         if (message?.type === "bandcueNavigateInPage") {
           inPageNavs.push(message.url ?? "");
           inPageNavRequestIds.push(message.requestId ?? -1);
+          inPageNavAudioPrimes.push(message.allowAudioPrime);
           if (inPageNav === "hang") {
             return new Promise(() => {});
           }
@@ -204,6 +211,7 @@ function loadBackground(
     updated,
     inPageNavs,
     inPageNavRequestIds,
+    inPageNavAudioPrimes,
     deliverServerMessage,
     sendRuntimeMessage,
     openConnection,
@@ -256,6 +264,20 @@ describe("ensureSongsterrTabs tab reuse", () => {
     expect(created).toHaveLength(0);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
     expect(tabs.map((t: FakeTab) => t.url)).toEqual([SONG_B]);
+  });
+
+  // The iPad's audio priming is a real play/stop through Songsterr's transport,
+  // so a switch made *inside* a count-in must not invite one.
+  it("lets an ordinary song switch re-prime the iPad's audio, but not the count-in's own", async () => {
+    const { context, inPageNavAudioPrimes } = loadBackground(
+      [{ id: 1, url: SONG_A, windowId: 1 }],
+      { inPageNav: true }
+    );
+
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_B }, { active: true });
+    await context.ensureSongsterrTabs({ songsterrUrl: SONG_A }, { imminentPlay: true });
+
+    expect(inPageNavAudioPrimes).toEqual([true, false]);
   });
 
   it("falls back to a full navigation when the router ignores the route change", async () => {

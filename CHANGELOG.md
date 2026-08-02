@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.4.1 - 2026-08-02
+
+### Fixed
+
+- Songsterr on iPad/iPhone (Orion) stayed silent unless a member pressed Play and Stop by hand
+  after every load. 1.3.2 unlocked the extension's *own* AudioContext from a real touch, which is
+  necessary but not sufficient: WebKit carries the "must start from a user gesture" restriction on
+  each AudioContext, and Songsterr's is a different object from ours. Unlocking ours only proved a
+  touch had happened — nothing had reached the engine that actually renders the Synth source, so
+  the device could report itself armed and still play nothing. Pressing Play by hand worked because
+  that gesture *did* reach Songsterr's engine, which is why the ritual had to be repeated per load
+  rather than once per session.
+
+  The extension now performs that ritual itself. On the touch that arms the device it also starts
+  Songsterr through the player's own transport and stops it again 140 ms later, synchronously
+  inside the gesture — the start runs while the document's user activation is still live, which is
+  what lets Songsterr's context begin — then sends the score back to the top. Afterwards our
+  synthetic clicks drive a running engine. It costs a blip of sound rather than a silent set.
+
+  The same cycle re-runs by itself ~700 ms after each in-page song switch, so a member who tapped
+  once at the start of the night does not have to tap again for every song BandCue loads for them.
+
+  Priming never goes near the downbeat: it is refused while a transport command is pending or a
+  BandCue play is running, it is cancelled the instant a command arrives (leaving playback
+  stopped), a switch made inside a count-in is told not to prime at all, and a tap on Songsterr's
+  own transport is left alone rather than clicked over. Playback that ends by itself — which is
+  never followed by a Stop command — is noticed on the status tick, so priming does not stay
+  blocked after the first song.
+- A play that WebKit swallowed silently used to be reported as a clean start: the click lands and
+  Songsterr's button flips to Pause whether or not any sound follows. The device now looks at
+  whether the player's position actually moved a second into the song, and when it did not, tells
+  the host **"the player never moved (silent start)"** and puts the "tap once" banner back instead
+  of leaving the member to discover it by ear. Devices that expose no position are left alone
+  rather than guessed at.
+- An armed iPad could go quiet again after sitting through a song, because iPadOS reclaims an
+  *idle* audio session when the tab is backgrounded or the screen locks. The arming context now
+  holds one silent looping source (through a gain of zero) for as long as the page lives, so the
+  session is not idle to begin with.
+- A Songsterr transport command that threw left the content script believing a command was still
+  pending, which blocked audio priming for the rest of the session and closed the reply channel
+  with no reason attached. The failure is now reported to the host like any other.
+
+### Changed
+
+- The host now distinguishes the two halves of the iPad audio state: *not armed* (no touch yet),
+  *engine is not started* (touched, but Songsterr's own audio has not run), and armed **and**
+  primed. Previously both dead states read the same, and the second was invisible.
+
 ## 1.4.0 - 2026-07-30
 
 ### Changed
