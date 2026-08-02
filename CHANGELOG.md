@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.4 - 2026-08-02
+
+### Fixed
+
+- **A Songsterr device's Stop was holding the whole band's downbeat.** Found while verifying the
+  iPad audio fix against a real device: after a few songs the iPad was asking the room for a
+  2500 ms count-in — the hard cap — and the coordinator raises the floor under *every* Play to
+  match (`scheduleDelayForClients`), so one device that stops perfectly well was delaying everyone
+  by two and a half seconds.
+
+  The cause is that a Stop is scheduled for *now* (`scheduledServerTime: now`), so it always
+  reports reaching its deadline with no lead left — the IPC hop alone guarantees it. That fed the
+  self-correcting dispatch lead, which only ever grows, so every Stop ratcheted it upwards until it
+  pegged. Only a Play adjusts the lead now: a Stop has no downbeat to hit and nothing to prepare.
+
+  Observed on the device: with the lead pegged at 2500 ms the first Play still landed 630 ms late,
+  while the following three landed within 15 ms of the downbeat.
+
 ## 1.4.3 - 2026-08-02
 
 ### Fixed

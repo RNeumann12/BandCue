@@ -511,7 +511,7 @@ describe("dispatch lead self-correction", () => {
     const { context, evaluate } = loadBackground([]);
     const before = evaluate("adaptiveDispatchLeadMs");
 
-    expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: 320 })).toBe("");
+    expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: 320 }, "play")).toBe("");
     expect(evaluate("adaptiveDispatchLeadMs")).toBe(before);
   });
 
@@ -519,17 +519,32 @@ describe("dispatch lead self-correction", () => {
     const { context, evaluate } = loadBackground([]);
     const before = evaluate("adaptiveDispatchLeadMs");
 
-    const detail = context.adjustDispatchLeadForTiming({ preparedAheadMs: -180 });
+    const detail = context.adjustDispatchLeadForTiming({ preparedAheadMs: -180 }, "play");
 
     expect(evaluate("adaptiveDispatchLeadMs")).toBe(before + 180 + 150);
     expect(detail).toContain("count-in was extended");
+  });
+
+  // Measured on a real iPad: a Stop is scheduled for *now*, so it always reports
+  // arriving with no lead left -- the IPC hop alone guarantees it. Feeding those
+  // into the estimate ratcheted it to the 2500 ms cap over a rehearsal, and that
+  // figure becomes a floor under every Play for the whole band.
+  it("never lets a Stop grow the count-in every Play has to sit through", () => {
+    const { context, evaluate } = loadBackground([]);
+    const before = evaluate("adaptiveDispatchLeadMs");
+
+    for (let i = 0; i < 20; i += 1) {
+      expect(context.adjustDispatchLeadForTiming({ preparedAheadMs: -400 }, "stop")).toBe("");
+    }
+
+    expect(evaluate("adaptiveDispatchLeadMs")).toBe(before);
   });
 
   it("never grows the lead past the cap", () => {
     const { context, evaluate } = loadBackground([]);
 
     for (let i = 0; i < 20; i += 1) {
-      context.adjustDispatchLeadForTiming({ preparedAheadMs: -900 });
+      context.adjustDispatchLeadForTiming({ preparedAheadMs: -900 }, "play");
     }
 
     expect(evaluate("adaptiveDispatchLeadMs")).toBe(evaluate("MAX_DISPATCH_LEAD_MS"));
@@ -537,7 +552,7 @@ describe("dispatch lead self-correction", () => {
 
   it("reports the lead it needs so the room's count-in can cover it", () => {
     const { context, evaluate } = loadBackground([]);
-    context.adjustDispatchLeadForTiming({ preparedAheadMs: -200 });
+    context.adjustDispatchLeadForTiming({ preparedAheadMs: -200 }, "play");
 
     const status = context.normalizeAdapterStatus({ ready: true });
 

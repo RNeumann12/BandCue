@@ -668,8 +668,18 @@ function handleTransportCommand(message) {
 // Grow the dispatch lead when the content script reported that it reached the
 // downbeat with no count-in left to prep in. Mirrors the MuseScore adapter's
 // self-correction (see src/adapters/musescore-windows.ts).
-function adjustDispatchLeadForTiming(timing) {
-  if (!timing || !Number.isFinite(timing.preparedAheadMs)) {
+//
+// Play only, and for a reason measured on a real iPad: a Stop is scheduled for
+// *now* (`scheduledServerTime: now`, see decideTransportRequest), so it always
+// reports arriving with no lead left -- the IPC hop alone guarantees it. Letting
+// stops feed this ratcheted the lead up on every stop, with nothing to pull it
+// back, until it pegged at the 2500 ms cap. That figure is published to the room
+// as requiredLeadMs, where it becomes a floor under *every* Play for the whole
+// band (scheduleDelayForClients), so a device that stops perfectly well was
+// holding everyone's downbeat 2.5 s. A Stop has no downbeat to hit and nothing
+// to prepare; only a Play needs the count-in it is asking for.
+function adjustDispatchLeadForTiming(timing, action) {
+  if (action !== "play" || !timing || !Number.isFinite(timing.preparedAheadMs)) {
     return "";
   }
 
@@ -851,7 +861,7 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     controlPath: "content-script"
   };
 
-  const leadDetail = adjustDispatchLeadForTiming(final.timing);
+  const leadDetail = adjustDispatchLeadForTiming(final.timing, action);
   const timingDetail = describeTiming(final.timing);
 
   reportCommandStatus({
