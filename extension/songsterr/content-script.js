@@ -201,18 +201,27 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function setSongsterrTempo(value) {
   const requestedPercent = Math.max(15, Math.min(175, Math.round(Number(value) || 100)));
-  if (readVisibleTempoPercent() === requestedPercent) {
+  const visiblePercent = readVisibleTempoPercent();
+  if (visiblePercent === requestedPercent) {
     return { ok: true, requestedPercent, appliedPercent: requestedPercent, detail: `${requestedPercent}% tempo already selected` };
   }
 
   const speedControl = findSpeedControl();
   if (!speedControl) {
-    return { ok: false, requestedPercent, detail: "Could not find Songsterr's playback speed control (Songsterr Plus may be required)." };
+    return tempoWithoutUsableControl(
+      requestedPercent,
+      visiblePercent,
+      "Songsterr's playback speed control is not available (changing speed needs Songsterr Plus)"
+    );
   }
   /** @type {HTMLElement} */ (speedControl).click();
   const speedDialog = await waitForSpeedDialog();
   if (!speedDialog) {
-    return { ok: false, requestedPercent, detail: "Songsterr opened speed settings but the controls did not finish loading." };
+    return tempoWithoutUsableControl(
+      requestedPercent,
+      visiblePercent,
+      "Songsterr's speed settings did not open (changing speed needs Songsterr Plus)"
+    );
   }
 
   const exactOption = [...speedDialog.querySelectorAll("button, [role='button'], [role='option']")]
@@ -238,7 +247,11 @@ async function setSongsterrTempo(value) {
         input.dispatchEvent(new Event("input", { bubbles: true }));
         input.dispatchEvent(new Event("change", { bubbles: true }));
       } else if (!await setSongsterrCompactFineTempo(speedDialog, requestedPercent)) {
-        return { ok: false, requestedPercent, detail: `Songsterr opened speed settings but exposed no control for ${requestedPercent}%.` };
+        return tempoWithoutUsableControl(
+          requestedPercent,
+          visiblePercent,
+          `Songsterr opened speed settings but exposed no control for ${requestedPercent}%`
+        );
       }
     }
   }
@@ -247,6 +260,34 @@ async function setSongsterrTempo(value) {
   return appliedPercent === requestedPercent
     ? { ok: true, requestedPercent, appliedPercent, detail: `${requestedPercent}% tempo applied through Songsterr controls` }
     : { ok: false, requestedPercent, detail: `Songsterr did not confirm ${requestedPercent}% tempo${appliedPercent ? ` (shows ${appliedPercent}%)` : ""}.` };
+}
+
+/**
+ * The answer when Songsterr's speed control cannot be driven at all.
+ *
+ * Changing playback speed is a Songsterr **Plus** feature, so on a free account
+ * the control is missing or refuses to open. Treating that as a failed tempo
+ * used to stop the adapter dead: the play preflight refuses every command until
+ * a tempo is "applied", so a free account could not start a single song, not
+ * even at Songsterr's own default.
+ *
+ * A song asking for the default 100% needs no control — that is what Songsterr
+ * already plays at — so it counts as satisfied as long as nothing on the page
+ * claims a different speed. Any other tempo still fails: a device quietly
+ * playing a song at the wrong speed is worse than one that does not play.
+ */
+function tempoWithoutUsableControl(requestedPercent, visiblePercent, reason) {
+  if (requestedPercent === 100 && (visiblePercent === undefined || visiblePercent === 100)) {
+    return {
+      ok: true,
+      requestedPercent,
+      appliedPercent: 100,
+      detail: `${reason}; playing at Songsterr's default 100%`
+    };
+  }
+
+  const shows = visiblePercent === undefined ? "" : ` (the player shows ${visiblePercent}%)`;
+  return { ok: false, requestedPercent, detail: `${reason}${shows}.` };
 }
 
 async function waitForSpeedDialog() {
@@ -346,11 +387,40 @@ function readVisibleTempoPercent() {
     const value = Number(slider.getAttribute("aria-valuenow"));
     if (Number.isFinite(value)) return Math.round(value);
   }
+  // Songsterr's speed button carries the current speed as its own text
+  // ("100%Tempo"), so ask it first and by id -- it is the one element on the
+  // page that is *about* the current speed.
+  const speedButton = document.querySelector("#control-speed");
+  const buttonPercent = percentFromTempoText(speedButton?.textContent);
+  if (buttonPercent !== undefined && speedButton?.getClientRects?.().length) {
+    return buttonPercent;
+  }
   for (const element of document.querySelectorAll("button, [role='button'], output, [aria-label]")) {
-    const match = normalizedControlText(element).match(/\b(\d{1,3})%/);
-    if (match && element.getClientRects().length) return Number(match[1]);
+    const percent = percentFromTempoText(tempoValueText(element));
+    if (percent !== undefined && element.getClientRects().length) return percent;
   }
   return undefined;
+}
+
+/**
+ * Text that can carry the *current* tempo. Deliberately excludes `title`:
+ * Songsterr's speed button uses its tooltip to describe the whole range it
+ * supports ("Tempo ändern ((Alt+1-8)) für 15%–175%"), and reading that as a
+ * value reported 15% on a tab playing at 100. That looked like a tempo needing
+ * to be changed, which on a free account opens the Songsterr Plus upsell
+ * instead of a speed panel -- and the failed tempo then blocked every Play.
+ */
+function tempoValueText(element) {
+  return [element.getAttribute?.("aria-label"), element.textContent]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function percentFromTempoText(text) {
+  const match = String(text ?? "").match(/\b(\d{1,3})\s*%/);
+  return match ? Number(match[1]) : undefined;
 }
 
 function readTempoPercentFrom(root) {

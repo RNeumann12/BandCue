@@ -559,6 +559,74 @@ describe("Songsterr tempo control", () => {
     expect(result).toMatchObject({ ok: true, requestedPercent: 92, appliedPercent: 92 });
   });
 
+  const setTempo = (context: any, tempoPercent: number) => new Promise<any>((resolve) => {
+    context.chrome.runtime.onMessage.listener({ type: "bandcueSetTempo", tempoPercent }, {}, resolve);
+  });
+
+  it("reads the speed the player shows, not the range its tooltip describes", async () => {
+    // Songsterr's real button: text "100%Tempo", tooltip "…für 15%–175%…".
+    // Reading the tooltip made a tab that plays at 100% look like 15%, which on
+    // a free account opened the Plus upsell and then blocked every Play.
+    const speedButton = new FakeElement("100%Tempo", {
+      id: "control-speed",
+      title: "Geschwindigkeitspanel öffnen ((S)) | Tempo ändern ((Alt+1–8)) für 15%–175%"
+    });
+    const { context } = loadContentScript({ elements: [speedButton] });
+
+    const result = await setTempo(context, 100);
+
+    expect(result).toMatchObject({ ok: true, appliedPercent: 100 });
+    expect(result.detail).toContain("already selected");
+    // Nothing was touched: no upsell to open, nothing to undo.
+    expect(speedButton.clicks).toBe(0);
+  });
+
+  // Changing speed is a Songsterr Plus feature. A free account has no usable
+  // speed control at all, and the play preflight refuses every command until a
+  // tempo is applied -- so treating that as a failure kept free accounts from
+  // playing a single song.
+  it("plays at Songsterr's default when the speed control is Plus-only", async () => {
+    const { context } = loadContentScript({ elements: [] });
+
+    const result = await setTempo(context, 100);
+
+    expect(result).toMatchObject({ ok: true, requestedPercent: 100, appliedPercent: 100 });
+    expect(result.detail).toContain("Songsterr Plus");
+  });
+
+  it("still refuses a non-default tempo it cannot set", async () => {
+    const { context } = loadContentScript({ elements: [] });
+
+    const result = await setTempo(context, 80);
+
+    expect(result).toMatchObject({ ok: false, requestedPercent: 80 });
+    expect(result.detail).toContain("Songsterr Plus");
+  });
+
+  it("treats a speed dialog that never opens as the default tempo, not as broken", async () => {
+    // The control is there (Songsterr shows it), but clicking it only offers the
+    // upsell, so the dialog with the actual controls never appears.
+    const speedButton = new FakeElement("Speed", { "aria-label": "Playback speed" });
+    const { context } = loadContentScript({ elements: [speedButton] });
+
+    const result = await setTempo(context, 100);
+
+    expect(speedButton.clicks).toBe(1);
+    expect(result).toMatchObject({ ok: true, appliedPercent: 100 });
+  });
+
+  it("does not claim the default when the player visibly plays at another speed", async () => {
+    // A Plus tab left at 80% with a control we cannot drive must not be reported
+    // as playing at 100%.
+    const speed = new FakeElement("80%", { "aria-label": "Playback speed 80%" });
+    const { context } = loadContentScript({ elements: [speed] });
+
+    const result = await setTempo(context, 100);
+
+    expect(result).toMatchObject({ ok: false, requestedPercent: 100 });
+    expect(result.detail).toContain("80%");
+  });
+
   it("sets 92% through Songsterr's custom desktop speed ruler", async () => {
     const speedButton = new FakeElement("100%", { "data-speed-control": "true", "data-kind": "button" });
     const dialog = new FakeElement("", { "data-tab-control": "speed", role: "dialog" });

@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.6.1 - 2026-08-03
+
+### Fixed
+
+- **Songsterr playback worked only with a Songsterr Plus account.** Changing playback speed is a
+  Plus feature, and the extension refused every Play until a tempo was "applied" — so on a free
+  account the room could not start a single song, not even at the default 100%. Two things were
+  wrong. The current speed was read from the speed button's *tooltip*, which describes the range
+  Songsterr supports ("Tempo ändern … für 15%–175%"), so a tab playing at 100% looked like 15% and
+  BandCue tried to change it; on a free account that click opens the Plus upsell rather than a
+  speed panel, and the failed tempo then blocked the transport. The speed is now read from the
+  button's own text (and the panel's slider when it is open), and a song at the default 100% no
+  longer needs a control that a free account does not have. Any other tempo is still refused, now
+  naming Plus as the reason, so nothing quietly plays at the wrong speed.
+
+  Verified live against a real Songsterr tab with no account: a room of eight starts (three from
+  the top, five at a later measure) all played, and a song asking for 80% was still refused with
+  *"Songsterr (Windows) has not applied 80% tempo: … changing speed needs Songsterr Plus (the
+  player shows 100%)."*
+
 ## 1.6.0 - 2026-08-03
 
 ### Added
