@@ -32,6 +32,7 @@ import {
   HELIX_MAX_CUE_AGE_MS,
   MANUAL_OFFSET_LIMIT_MS,
   MAX_SCHEDULE_DELAY_MS,
+  MAX_START_MEASURE,
   clampHelixOffsetMs,
   decideTransportRequest,
   hasReadyTransportCapability,
@@ -41,6 +42,7 @@ import {
   sanitizeHelixBeatsPerMeasure,
   sanitizeHelixBpm,
   sanitizeHelixTargetMeasure,
+  sanitizeStartMeasure,
   scheduleDelayForClients
 } from "../shared/transport.js";
 import {
@@ -1056,6 +1058,7 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     tempoPercent: sanitizeTempoPercent(song.tempoPercent),
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationSource(song.durationSource),
+    startMeasure: sanitizeStartMeasure(song.startMeasure),
     helixSyncEnabled: Boolean(song.helixSyncEnabled),
     helixBpm: sanitizeHelixBpm(song.helixBpm),
     helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure),
@@ -1093,6 +1096,20 @@ function sanitizeDurationMs(value: number | undefined): number | undefined {
 
   const rounded = Math.round(value);
   return rounded > 0 && rounded <= 24 * 60 * 60 * 1000 ? rounded : undefined;
+}
+
+/**
+ * The measure an adapter reports it started from. Unlike a song's configured
+ * start measure, 1 is meaningful here — it is how an adapter says "I had to
+ * start from the top" — so it is kept rather than collapsed to undefined.
+ */
+function sanitizeReportedStartMeasure(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded >= 1 && rounded <= MAX_START_MEASURE ? rounded : undefined;
 }
 
 function sanitizeRequiredLeadMs(value: number | undefined): number | undefined {
@@ -1138,6 +1155,7 @@ function sanitizeLastCommand(
     at: Number.isFinite(command.at) ? Math.max(0, Math.round(command.at)) : 0,
     detail: trimText(command.detail ?? "", 500) || undefined,
     controlPath: trimText(command.controlPath ?? "", 80) || undefined,
+    startMeasure: sanitizeReportedStartMeasure(command.startMeasure),
     firedAtServerTime: Number.isFinite(command.firedAtServerTime)
       ? Math.max(0, Math.round(command.firedAtServerTime ?? 0))
       : undefined

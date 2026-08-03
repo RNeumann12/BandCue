@@ -140,6 +140,14 @@ export interface AdapterStatus {
     detail?: string;
     controlPath?: string;
     /**
+     * Which measure this command actually started the player from, when the
+     * song asked for a later start. Adapters report the measure they reached
+     * (1 when they had to fall back to the top), so the host can warn that one
+     * device is about to play a different part of the song rather than leaving
+     * it to be discovered by ear.
+     */
+    startMeasure?: number;
+    /**
      * When the control action actually executed, in server time (local fire
      * time + measured clock offset). Lets the host show each device's real
      * start deviation from the scheduled downbeat and suggest calibration.
@@ -241,6 +249,14 @@ export interface SetlistSong {
   tempoPercent?: number;
   durationMs?: number;
   durationSource?: SongDurationSource;
+  /**
+   * Which measure a Play should start from, 1-based. Undefined or 1 means the
+   * top of the song (the classic reset-before-play). Anything higher asks every
+   * adapter to seek that far in before the downbeat, so the band can rehearse a
+   * later section together. Each adapter resolves it in its own player's measure
+   * numbering — see docs/Adapters.md.
+   */
+  startMeasure?: number;
   helixSyncEnabled?: boolean;
   helixBpm?: number;
   helixBeatsPerMeasure?: number;

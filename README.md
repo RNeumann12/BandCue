@@ -46,6 +46,7 @@ dependency once the dependencies are installed.
 - [Joining a Room](#joining-a-room)
 - [Using the Host Controls](#using-the-host-controls)
   - [Setlist Flow](#setlist-flow)
+  - [Starting at a Later Measure](#starting-at-a-later-measure)
   - [Safety Controls](#safety-controls)
   - [Timing Calibration](#timing-calibration)
 - [Adapters](#adapters)
@@ -202,6 +203,9 @@ playback tempo, a source
 type, a main Songsterr URL, optional bass/drum Songsterr override URLs, a MuseScore score
 reference, optional notes, and (once known) a duration.
 
+- **Start at measure** rehearses a section: leave it empty (or `1`) to start at the top, or set
+  e.g. `8` and every device seeks to bar 8 before the downbeat. See
+  [Starting at a Later Measure](#starting-at-a-later-measure).
 - **Make Current**, **Previous**, **Next** publish the current song to every companion.
 - **Export** / **Import** move setlists between host browsers (the setlist is stored locally).
   See [examples/setlist.example.json](examples/setlist.example.json) for the file format.
@@ -237,6 +241,34 @@ stopped, the room treats that as the end of the song. Songsterr may also report 
 automatically once a song is loaded, and any song can carry a manually entered time. A manual
 **Stop** never advances, and pressing **Stop** while the next song is loading calls off its
 auto-start.
+
+### Starting at a Later Measure
+
+Rehearsing the second chorus is not a reason to sit through the intro. Put the bar number in the
+setlist song's **Start at measure** field and every device jumps there before the count-in ends —
+the downbeat is still the same shared instant, so the band comes in together at bar 8 exactly the
+way it does at bar 1. Leave the field empty (or set `1`) and Play behaves as it always has.
+
+The seek happens **during the count-in**, never on the downbeat, so starting later costs nothing in
+timing accuracy — measured on real devices (Songsterr in Chrome and MuseScore 4 on Windows), starts
+with a measure jump land within 0–2 ms of the scheduled downbeat, the same as starts from the top.
+
+Each player counts measures its own way, and each device confirms what it actually did:
+
+- **MuseScore** jumps with its own Find / Go to (Ctrl+F), so any written measure works — but the
+  measure has to be *typed*, so MuseScore must be the front window on that machine. If Windows
+  won't bring it forward, that device starts from the top and says so instead of editing the score.
+- **Songsterr (browser)** clicks the bar under Songsterr's own measure number and then checks
+  Songsterr's play cursor really landed there. Some measures can't be jumped to at all: Songsterr
+  draws repeated measures only once, and compresses runs of empty ones, and such a measure has no
+  position of its own on screen. The device then starts from the top (or wherever Songsterr put the
+  cursor), reports which measure that was, and says which measures the tab *can* start at.
+- **Songsterr (Android)** can only seek by time, so it needs the song's **BPM** and **beats per
+  measure** (the Helix fields) filled in, and a Songsterr media session that allows seeking. When
+  it can't, it plays from the top and reports that.
+
+Whenever a device reports a different measure than the song asked for, the host panel warns about
+it by name — so "one phone is playing the intro" is something you read, not something you hear.
 
 ### Safety Controls
 
@@ -426,6 +458,9 @@ final Play key waits for the scheduled instant. The full bridge protocol is in
 - MuseScore auto-open requires a configured score folder and a single matching local score;
   otherwise the host shows missing or ambiguous catalog status.
 - Play / stop only.
+- Starting at a later measure depends on the player: MuseScore always, Songsterr in the browser for
+  every measure its tab actually draws, and Songsterr on Android only with a song BPM and a
+  seekable media session. Devices that can't reach the measure play from the top and say so.
 - Phones are companion displays by default; Android phones can be app controllers only through
   the native adapter.
 - Only the leader's device should feed audible click / backing audio to the mixer.

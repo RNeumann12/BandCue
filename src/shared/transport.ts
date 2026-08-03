@@ -12,6 +12,10 @@ export const HELIX_MIN_BPM = 20;
 export const HELIX_MAX_BPM = 400;
 export const HELIX_MAX_BEATS_PER_MEASURE = 16;
 export const HELIX_MAX_TARGET_MEASURE = 128;
+// Highest measure a song may be started from. Long enough for any rehearsal
+// piece, small enough that a typo can't ask an adapter to hunt for measure
+// 100000. Mirrored in web/host-logic.js and the start-measure input bounds.
+export const MAX_START_MEASURE = 999;
 // Helix timing shifts can legitimately span several bars. Keep this separate
 // from the much smaller per-device calibration limit.
 export const HELIX_OFFSET_LIMIT_MS = 60_000;
@@ -135,6 +139,20 @@ export function sanitizeHelixTargetMeasure(value: number | undefined): number | 
 
   const rounded = Math.round(value);
   return rounded >= 1 && rounded <= HELIX_MAX_TARGET_MEASURE ? rounded : undefined;
+}
+
+/**
+ * A song's start measure. Anything at or below the top of the song collapses to
+ * undefined, so "start from measure 1" and "no start measure" stay the same
+ * thing on the wire and in every adapter's fast path.
+ */
+export function sanitizeStartMeasure(value: number | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(value);
+  return rounded > 1 && rounded <= MAX_START_MEASURE ? rounded : undefined;
 }
 
 export function clampHelixOffsetMs(value: number | undefined): number {

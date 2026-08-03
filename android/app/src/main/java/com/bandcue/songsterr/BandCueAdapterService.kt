@@ -510,7 +510,14 @@ class BandCueAdapterService : Service() {
         // button before playing. Plain play/stop still prefer the media session.
         val wantsReset = command.action == "play" && command.resetBeforePlay
         val canSeek = controller != null && controllerSupportsSeek(controller)
-        val resetNeedsAccessibility = wantsReset && !canSeek && BandCueAccessibilityService.isEnabled()
+        val startMeasurePlan = decideStartMeasurePlan(command, canSeek)
+        // A song that starts at a later measure can only be honored by seeking
+        // the media session to that position; the accessibility fallback taps a
+        // reset-to-start button, which would land on measure 1 either way.
+        val resetNeedsAccessibility = wantsReset &&
+            !canSeek &&
+            startMeasurePlan == StartMeasurePlan.NotRequested &&
+            BandCueAccessibilityService.isEnabled()
 
         if (command.action == "stop") {
             val stopPlan = decideStopControlPlan(
@@ -551,8 +558,12 @@ class BandCueAdapterService : Service() {
 
         if (controller != null && !resetNeedsAccessibility) {
             try {
+                var reachedMeasure = if (wantsReset) 1 else null
                 if (command.action == "play") {
-                    if (wantsReset && canSeek) {
+                    if (startMeasurePlan == StartMeasurePlan.SeekToPosition) {
+                        controller.transportControls.seekTo(command.currentSong?.startPositionMs ?: 0L)
+                        reachedMeasure = command.startMeasure
+                    } else if (wantsReset && canSeek) {
                         controller.transportControls.seekTo(0)
                     }
                     controller.transportControls.play()
@@ -565,17 +576,24 @@ class BandCueAdapterService : Service() {
                     status = "succeeded",
                     at = now,
                     detail = if (command.action == "play") {
-                        if (wantsReset && canSeek) {
-                            "Requested Songsterr seek to start and playback through Android media session."
-                        } else if (wantsReset) {
-                            "Played through Android media session; the session offers no seek, so position was not reset."
-                        } else {
-                            "Requested Songsterr playback through Android media session."
+                        when {
+                            startMeasurePlan == StartMeasurePlan.SeekToPosition ->
+                                "Seeked Songsterr to measure ${command.startMeasure} (${command.currentSong?.startPositionMs} ms in) and played through the Android media session."
+                            startMeasurePlan == StartMeasurePlan.UnsupportedNoSeek ->
+                                "Songsterr's Android media session offers no seek, so it started from the top instead of measure ${command.startMeasure}."
+                            startMeasurePlan == StartMeasurePlan.UnsupportedNoTempo ->
+                                "This song has no BPM/beats per measure, so Android cannot work out where measure ${command.startMeasure} is; it started from the top."
+                            wantsReset && canSeek ->
+                                "Requested Songsterr seek to start and playback through Android media session."
+                            wantsReset ->
+                                "Played through Android media session; the session offers no seek, so position was not reset."
+                            else -> "Requested Songsterr playback through Android media session."
                         }
                     } else {
                         "Requested Songsterr pause through Android media session."
                     },
-                    controlPath = "android-media-session"
+                    controlPath = "android-media-session",
+                    startMeasure = reachedMeasure
                 )
                 publishAdapterStatus(
                     stateOverride = "last-command-succeeded",
@@ -598,8 +616,14 @@ class BandCueAdapterService : Service() {
                 sequenceId = command.sequenceId,
                 status = "succeeded",
                 at = now,
-                detail = accessibilityResult.detail,
-                controlPath = accessibilityResult.controlPath
+                detail = if (command.startMeasure != null) {
+                    // The accessibility path can only tap reset-to-start.
+                    "${accessibilityResult.detail} Measure ${command.startMeasure} cannot be reached on Android, so it started from the top."
+                } else {
+                    accessibilityResult.detail
+                },
+                controlPath = accessibilityResult.controlPath,
+                startMeasure = if (wantsReset) 1 else null
             )
             publishAdapterStatus(
                 stateOverride = "last-command-succeeded",

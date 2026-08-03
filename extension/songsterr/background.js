@@ -155,6 +155,12 @@ const MAX_DISPATCH_LEAD_MS = 2500;
 // Self-adjusting copy of DISPATCH_LEAD_MS, reported to the room as
 // requiredLeadMs so the coordinator's count-in itself grows to cover it.
 let adaptiveDispatchLeadMs = DISPATCH_LEAD_MS;
+// Extra hand-off lead for a song that starts at a later measure. Only that seek
+// needs it -- it clicks the measure and reads Songsterr's cursor back before
+// settling, which the plain prep never has to do. It is deliberately *not* part
+// of adaptiveDispatchLeadMs (and so not of the requiredLeadMs the room's
+// count-in grows to cover): every other song would otherwise pay for it too.
+const MEASURE_SEEK_LEAD_MS = 400;
 // How long to wait for the content script to confirm an in-page song switch.
 // Comfortably over the content script's own 2.5 s router timeout, so a slow
 // device still gets its real answer rather than being forced onto a reload.
@@ -665,15 +671,23 @@ function handleTransportCommand(message) {
   // content script burns the remaining time so the control action itself
   // lands on the beat. (Waiting the full delay here made every browser
   // device start late by the tab-query + messaging + prep latency.)
+  const startMeasure = startMeasureForSong(message.currentSong?.song);
+  // A measure jump is the one prep step that has to wait for Songsterr to
+  // answer (click, read the cursor back, nudge if it snapped short), so hand
+  // this command over earlier. The content script still waits out the rest
+  // against dueLocalAt, so an earlier hand-off cannot start anything sooner --
+  // it only buys the seek room away from the downbeat.
+  const leadMs = adaptiveDispatchLeadMs + (startMeasure > 1 ? MEASURE_SEEK_LEAD_MS : 0);
   setTimeout(() => {
     sendTransportToSongsterr(
       message.action,
       message.sequenceId,
       message.currentSong?.song,
       Boolean(message.resetBeforePlay),
-      dueLocalAt
+      dueLocalAt,
+      startMeasure
     );
-  }, Math.max(0, delayMs - adaptiveDispatchLeadMs));
+  }, Math.max(0, delayMs - leadMs));
 }
 
 // Grow the dispatch lead when the content script reported that it reached the
@@ -816,7 +830,14 @@ function manualOffsetForSelf(state) {
   return self?.clock?.manualOffsetMs || 0;
 }
 
-async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBeforePlay = false, dueLocalAt = 0) {
+async function sendTransportToSongsterr(
+  action,
+  sequenceId,
+  currentSong,
+  resetBeforePlay = false,
+  dueLocalAt = 0,
+  startMeasure = 0
+) {
   // This runs DISPATCH_LEAD_MS ahead of the downbeat; the content script waits
   // out the remainder against dueLocalAt and fires the control on the beat.
   // We only *locate* an existing Songsterr tab here -- we never navigate or
@@ -859,6 +880,7 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
             action,
             resetBeforePlay,
             dueLocalAt,
+            startMeasure,
             tempoPercent: sanitizeTempoPercent(currentSong?.tempoPercent)
           })
           .catch((error) => ({
@@ -887,6 +909,9 @@ async function sendTransportToSongsterr(action, sequenceId, currentSong, resetBe
     ready: lastStatus.ready || tabs.length > 0,
     detail: [final.detail, timingDetail, leadDetail, lastSongOpenMethod].filter(Boolean).join("; "),
     controlPath: final.controlPath,
+    // Which measure this tab really started from, so the host can say a device
+    // is playing a different part of the song instead of leaving it to be heard.
+    startMeasure: action === "play" && resetBeforePlay ? final.startMeasure ?? 1 : undefined,
     firedAtServerTime: final.ok && Number.isFinite(final.firedAtLocal)
       ? Math.round(final.firedAtLocal + (serverOffsetMs ?? 0))
       : undefined,
@@ -1017,6 +1042,7 @@ function reportCommandStatus(command) {
     at: command.at,
     detail: command.detail,
     controlPath: command.controlPath,
+    startMeasure: command.startMeasure,
     firedAtServerTime: command.firedAtServerTime
   };
   publishAdapterStatus({
@@ -1438,6 +1464,13 @@ function songsterrReferences(song) {
     song?.songsterrDrumUrl?.trim() ?? ""
   ].filter(Boolean);
   return [...new Set(references)];
+}
+
+// Mirror of sanitizeStartMeasure in src/shared/transport.ts: 0 means "from the
+// top", which keeps the content script's fast path exactly as it was.
+function startMeasureForSong(song) {
+  const measure = Math.round(Number(song?.startMeasure));
+  return Number.isFinite(measure) && measure > 1 && measure <= 999 ? measure : 0;
 }
 
 function explicitSongsterrInstrumentReference(song, instrument) {

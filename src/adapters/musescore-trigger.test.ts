@@ -205,6 +205,20 @@ describe("MuseScoreTrigger", () => {
     await expect(pending).resolves.toMatchObject({ ok: true, windowTitle: "Karma Police" });
   });
 
+  it("types a sequence the caller may not post, however postable it looks", async () => {
+    const fake = createFakeProcess();
+    const trigger = new MuseScoreTrigger(config, undefined, () => fake.child);
+
+    // Find / Go to: every token is postable on its own, but posted into the main
+    // window the digits are note durations and would edit the score.
+    void trigger.fire(["{ESC}", "^{HOME}", "^f", "^a", "1", "6", "{ENTER}"], "+ ", Date.now() + 5000, undefined, false);
+    expect(fake.requests()[0]).toMatchObject({ post: false, key: "+ " });
+    expect(fake.requests()[0].postKeys).toEqual([]);
+
+    void trigger.sendKeys(["{ESC}", "^f", "8", "{ENTER}"], undefined, false);
+    expect(fake.requests()[1]).toMatchObject({ post: false });
+  });
+
   it("falls back to typing keys when posting is disabled", async () => {
     const fake = createFakeProcess();
     const trigger = new MuseScoreTrigger(config, undefined, () => fake.child, false);

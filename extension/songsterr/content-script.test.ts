@@ -108,6 +108,116 @@ class FakeElement {
   }
 }
 
+/**
+ * A stand-in for Songsterr's rendered tab: one measure-number marker per
+ * measure, the play cursor of each staff line, and a staff area that reacts to
+ * a click the way the real player does (the cursor jumps to the click).
+ */
+class FakeTab {
+  markers: FakeMeasureMarker[] = [];
+  playheads: FakePlayhead[] = [];
+  clicks: Array<{ x: number; y: number; types: string[] }> = [];
+  scrolledInto: number[] = [];
+  // Set to make a click land on a different measure than the one clicked, the
+  // way a real player would if our click point were slightly off.
+  clickDrift = 0;
+  // How far into a measure a click still snaps back to the note before it --
+  // what a narrow measure on the real player does.
+  snapBackWithin = 0;
+  // One node per staff line; markers and the play cursor of a line answer
+  // closest("svg") with the same object, exactly like the real per-line <svg>.
+  lineNodes: object[] = [];
+
+  constructor(measures: Array<{ measure: number; x: number; line: number }>, lines = 1) {
+    for (let line = 0; line < lines; line += 1) {
+      this.lineNodes.push({ line });
+      this.playheads.push(new FakePlayhead(this, line));
+    }
+    for (const { measure, x, line } of measures) {
+      this.markers.push(new FakeMeasureMarker(this, measure, x, line));
+    }
+  }
+
+  staffAt(x: number, y: number) {
+    const staff = new FakeStaff(this, x, y);
+    return staff;
+  }
+
+  applyClick(x: number, y: number, types: string[]) {
+    this.clicks.push({ x, y, types });
+    const line = Math.max(0, Math.round((y - 100) / 100));
+    // Where the cursor comes to rest: the real player snaps to the nearest
+    // note, which near a barline can be the last note of the measure before.
+    const onLine = this.markers.filter((marker) => marker.line === line).sort((a, b) => a.x - b.x);
+    const measure = [...onLine].reverse().find((marker) => marker.x <= x);
+    const snapsBack = measure && x - measure.x < this.snapBackWithin;
+    const previous = snapsBack ? [...onLine].reverse().find((marker) => marker.x < measure.x) : undefined;
+    const landedX = previous ? previous.x + 2 : x;
+    for (const playhead of this.playheads) {
+      playhead.visibility = playhead.line === line ? "visible" : "hidden";
+      if (playhead.line === line) {
+        playhead.x = landedX + this.clickDrift;
+      }
+    }
+  }
+}
+
+class FakeMeasureMarker extends FakeElement {
+  constructor(
+    private readonly tab: FakeTab,
+    public measure: number,
+    public x: number,
+    public line: number
+  ) {
+    super(String(measure));
+  }
+
+  getBoundingClientRect() {
+    const top = 100 + this.line * 100;
+    return { left: this.x, top, right: this.x + 10, bottom: top + 14, width: 10, height: 14 };
+  }
+
+  closest(selector: string) {
+    return selector === "svg" ? (this.tab.lineNodes[this.line] as never) : null;
+  }
+
+  scrollIntoView() {
+    this.tab.scrolledInto.push(this.measure);
+  }
+}
+
+class FakePlayhead extends FakeElement {
+  x = 0;
+  visibility = "hidden";
+
+  constructor(private readonly tab: FakeTab, public line: number) {
+    super("");
+  }
+
+  getBoundingClientRect() {
+    const top = 100 + this.line * 100;
+    return { left: this.x, top, right: this.x + 12, bottom: top + 90, width: 12, height: 90 };
+  }
+
+  closest(selector: string) {
+    return selector === "svg" ? (this.tab.lineNodes[this.line] as never) : null;
+  }
+}
+
+class FakeStaff extends FakeElement {
+  constructor(private readonly tab: FakeTab, private readonly x: number, private readonly y: number) {
+    super("");
+  }
+
+  dispatchEvent(event: { type?: string }) {
+    this.dispatched.push(event?.type ?? "");
+    if (event?.type === "click") {
+      this.tab.applyClick(this.x, this.y, [...this.dispatched]);
+    }
+    return true;
+  }
+}
+
 class FakeSourceControl {
   constructor(private readonly radios: FakeElement[]) {}
 
@@ -206,7 +316,8 @@ function loadContentScript({
   android = false,
   // "spa" mimics Songsterr's real router: a popstate retitles the document once
   // the new song has loaded. "none" is a router that ignores the route change.
-  router = "none"
+  router = "none",
+  tab = null
 }: {
   elements?: FakeElement[];
   media?: FakeMediaElement[];
@@ -217,6 +328,7 @@ function loadContentScript({
   orion?: boolean;
   android?: boolean;
   router?: "spa" | "none";
+  tab?: FakeTab | null;
 } = {}) {
   const messages: unknown[] = [];
   // Counts the document-wide element scans, so a test can prove the downbeat
@@ -262,10 +374,19 @@ function loadContentScript({
       if (selector === "label[for]") {
         return [];
       }
+      if (/data-tab-control='marker'/.test(selector)) {
+        return tab?.markers ?? [];
+      }
+      if (/cursor-playhead/.test(selector)) {
+        return tab?.playheads ?? [];
+      }
       if (/button/.test(selector)) {
         scans.controlQueries += 1;
       }
       return elements;
+    },
+    elementFromPoint(x: number, y: number) {
+      return tab ? tab.staffAt(x, y) : null;
     }
   };
   const chrome = {
@@ -355,7 +476,11 @@ function loadContentScript({
       }
     },
     MutationObserver: FakeMutationObserver,
-    getComputedStyle: () => ({ visibility: "visible", display: "block" }),
+    getComputedStyle: (element?: { visibility?: string }) => ({
+      visibility: element?.visibility ?? "visible",
+      display: "block"
+    }),
+    MouseEvent: FakeKeyboardEvent,
     setInterval,
     clearInterval,
     setTimeout,
@@ -671,6 +796,136 @@ describe("Songsterr transport control resolution", () => {
 // Songsterr is an SPA, so the next song can be routed to inside the same
 // document. That keeps iPadOS's unlocked audio session alive, which a full tab
 // reload would throw away -- see the arming suite below.
+describe("Songsterr start measure", () => {
+  // Twelve measures on one staff line, 50 px apart, then a second line.
+  const twoLineTab = () => new FakeTab([
+    ...Array.from({ length: 8 }, (_, index) => ({ measure: index + 1, x: 100 + index * 50, line: 0 })),
+    ...Array.from({ length: 8 }, (_, index) => ({ measure: index + 9, x: 100 + index * 50, line: 1 }))
+  ], 2);
+
+  it("clicks the staff under the requested measure and confirms the cursor landed there", async () => {
+    const tab = twoLineTab();
+    const { context, keyEvents } = loadContentScript({ tab });
+
+    const seek = await context.seekToMeasure(5, Date.now() + 5000);
+
+    // Measure 5 sits at x=300; the click lands just right of its barline.
+    expect(tab.clicks).toHaveLength(1);
+    expect(tab.clicks[0].x).toBe(308);
+    expect(tab.clicks[0].types).toEqual(["pointerdown", "mousedown", "pointerup", "mouseup", "click"]);
+    // No Backspace: rewinding to the top would undo the seek.
+    expect(keyEvents).toHaveLength(0);
+    expect(seek).toMatchObject({ requested: 5, reached: 5 });
+    expect(context.playheadMeasure()).toBe(5);
+  });
+
+  it("reports the measure before rather than clicking on until the cursor looks right", async () => {
+    const tab = twoLineTab();
+    // A compressed measure: everything clicked in it snaps back to the measure
+    // before, and clicking further in would land a whole measure late instead.
+    tab.snapBackWithin = 1000;
+    const { context } = loadContentScript({ tab });
+
+    const seek = await context.seekToMeasure(5, Date.now() + 5000);
+
+    expect(tab.clicks).toHaveLength(1);
+    expect(seek).toMatchObject({ requested: 5, reached: 4 });
+    expect(seek.detail).toContain("landed on measure 4 instead of measure 5");
+  });
+
+  it("still rewinds to the top when the song starts at measure 1", () => {
+    const tab = twoLineTab();
+    const { context, keyEvents } = loadContentScript({ tab });
+
+    const plan = context.prepareTransport("play", true, 0);
+
+    expect(tab.clicks).toHaveLength(0);
+    expect(keyEvents.length).toBeGreaterThan(0);
+    expect(plan.seek).toBeUndefined();
+  });
+
+  it("reports an overshoot into the next measure just as plainly", async () => {
+    const tab = twoLineTab();
+    tab.clickDrift = 50;
+    const { context } = loadContentScript({ tab });
+
+    const seek = await context.seekToMeasure(5, Date.now() + 5000);
+
+    expect(seek.reached).toBe(6);
+    expect(seek.detail).toContain("landed on measure 6 instead of measure 5");
+    expect(tab.clicks).toHaveLength(1);
+  });
+
+  it("falls back to the top of the song when the measure is not rendered", async () => {
+    const tab = twoLineTab();
+    const { context, keyEvents } = loadContentScript({ tab });
+
+    const seek = await context.seekToMeasure(40, Date.now() + 5000);
+
+    expect(tab.clicks).toHaveLength(0);
+    // Scrolled toward the end of the rendered tab first, then gave up.
+    expect(tab.scrolledInto.length).toBeGreaterThan(0);
+    expect(keyEvents).toContain("keydown");
+    expect(seek).toMatchObject({ requested: 40, reached: 1 });
+    expect(seek.detail).toContain("started from the top");
+    // Says what this tab *can* start at, so the measure can be corrected.
+    expect(seek.detail).toContain("This tab can start at 16");
+  });
+
+  it("carries the measure it started from out to the background", async () => {
+    const tab = twoLineTab();
+    const playButton = new FakeElement("", {
+      "aria-label": "Abspielen ((Leertaste))",
+      class: "_8e144G_button _8e144G_play"
+    });
+    const { context } = loadContentScript({ tab, elements: [playButton] });
+
+    const seek = await context.seekToMeasure(5, Date.now() + 5000);
+    const plan = context.prepareTransport("play", true, 5, seek);
+    const result = await context.controlSongsterr("play", true, plan);
+
+    expect(result.startMeasure).toBe(5);
+    expect(result.detail).toContain("Moved the Songsterr cursor to measure 5");
+  });
+
+  it("gives up reading the cursor back before the downbeat's own approach", async () => {
+    const tab = twoLineTab();
+    const { context } = loadContentScript({ tab });
+
+    const startedAt = Date.now();
+    // A downbeat this close leaves no room to read the cursor back at all.
+    const seek = await context.seekToMeasure(5, Date.now() + 60);
+
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    expect(seek.requested).toBe(5);
+  });
+
+  it("answers the background even when the transport work throws", async () => {
+    const { context, evaluate } = loadContentScript();
+    const listener = context.chrome.runtime.onMessage.listener;
+    // Whatever the failure is, the background must not be left waiting.
+    evaluate("runScheduledTransport = () => Promise.reject(new Error('boom'))");
+
+    const response = await new Promise((resolve) => {
+      listener({ type: "bandcueTransport", action: "play", resetBeforePlay: true }, {}, resolve);
+    });
+
+    expect(response).toMatchObject({ ok: false, controlPath: "content-script" });
+    expect((response as { detail: string }).detail).toContain("boom");
+  });
+
+  it("clicks once, unverified, when the command arrived with no count-in left", () => {
+    const tab = twoLineTab();
+    const { context } = loadContentScript({ tab });
+
+    const plan = context.prepareTransport("play", true, 5);
+
+    expect(tab.clicks).toHaveLength(1);
+    expect(plan.seek).toMatchObject({ requested: 5, reached: 5 });
+    expect(plan.seek.detail).toContain("no count-in left");
+  });
+});
+
 describe("Songsterr in-page song switching", () => {
   afterEach(() => {
     vi.useRealTimers();

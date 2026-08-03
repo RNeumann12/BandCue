@@ -19,7 +19,8 @@
       "museScoreSource": "Scores/Example MuseScore Song.mscz",
       "tempoPercent": 100,
       "durationMs": 215000,
-      "notes": "museScoreSource matches a file from the adapter's scanned score folders."
+      "startMeasure": 8,
+      "notes": "startMeasure starts every device at bar 8 instead of the top; omit it (or use 1) to start at the beginning."
     },
     {
       "id": "example-helix-song",

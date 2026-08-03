@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.6.0 - 2026-08-03
+
+### Added
+
+- **Start a song at a later measure.** A setlist song can carry a **Start at measure**, and Play
+  then starts the whole room there instead of at the top — rehearse the second chorus without
+  sitting through the intro. The measure travels with the song on the play command every adapter
+  already receives, and each one resolves it in its own player:
+  - **MuseScore**: `Ctrl+F`, the measure number, `Enter` (its own Find / Go to), sent as prefix
+    keys during the count-in, then `play-from-selection` so the jump is what actually plays.
+    Configurable with `--goto-measure-key`. Typing into the Find box uses a shorter gap than a
+    transport key does — at the full command gap the extra keys overran the dispatch lead and the
+    Play key fired ~90 ms late. Unlike every other command it is *typed*, not posted into
+    MuseScore's message queue: posted, the digits land in the score view as note durations and
+    edit the score (observed on MuseScore 4 — added beams and a system break). Typing needs the
+    foreground, so when Windows refuses to bring MuseScore forward the song starts from the top
+    instead and reports measure 1 rather than leaving that device silent.
+  - **Songsterr in the browser**: clicks the bar under Songsterr's own measure number, then reads
+    Songsterr's play cursor back to confirm it landed there. Songsterr sometimes draws repeated or
+    empty measures compressed, and such a measure has no position of its own to start from — the
+    tab then starts where Songsterr put the cursor (or at the top when the measure isn't drawn at
+    all) and reports it, rather than clicking on until the cursor "looks right", which measurably
+    bought a start a whole measure late.
+  - **Songsterr on Android**: seeks the media session to the measure's position in time, which
+    needs the song's BPM and beats per measure and a session that allows seeking (and is stretched
+    by the song's tempo percentage, the same way its effective duration is). Where that is missing
+    it plays from the top and says so.
+
+  Timing is untouched: every adapter does the seek inside the count-in, never on the downbeat, and
+  the extra work is paid for with an earlier hand-off rather than a longer count-in for everyone.
+  Measured end to end against a live coordinator: with the real extension on a real Songsterr tab,
+  starts with a measure jump landed within 0–2 ms of the scheduled downbeat (mean 0.4 ms over five
+  jumps), and with the real MuseScore helper driving MuseScore 4, five jumps landed within 0–2 ms —
+  in both cases the same as starts from the top in the same session. MuseScore's own position
+  readout confirmed the jumps: measure 8 began playing at 0:00:14, measure 20 at 0:00:38, at
+  120 BPM in 4/4.
+
+  Adapters report the measure they really started from, and the host warns by device name when one
+  of them differs from what the song asked for — so "one phone is playing the intro" is something
+  you read rather than something you hear.
+
 ## 1.5.4 - 2026-08-02
 
 ### Fixed

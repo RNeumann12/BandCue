@@ -142,6 +142,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       lastControlDetail = result.detail;
       reportStatus();
       sendResponse(result);
+    }, (error) => {
+      // Always answer. An unanswered transport message leaves the background
+      // waiting on a promise that never settles, so the host would show the
+      // command as pending forever instead of as the failure it was.
+      lastControlDetail = `Songsterr ${message.action} failed: ${error?.message || error}`;
+      sendResponse({ ok: false, detail: lastControlDetail, controlPath: "content-script-error" });
     });
     return true;
   }
@@ -420,6 +426,7 @@ async function runScheduledTransport(message) {
   const action = message.action;
   const resetBeforePlay = Boolean(message.resetBeforePlay);
   const dueLocalAt = Number(message.dueLocalAt) || 0;
+  const startMeasure = Number(message.startMeasure) || 0;
   let prepared;
   // How much count-in was left once prep finished. Negative means the command
   // arrived too late to prep ahead at all, which the background uses to grow its
@@ -427,7 +434,14 @@ async function runScheduledTransport(message) {
   let preparedAheadMs = dueLocalAt ? dueLocalAt - Date.now() : 0;
   if (dueLocalAt > Date.now()) {
     const prepStartedAt = Date.now();
-    prepared = prepareTransport(action, resetBeforePlay);
+    // The measure jump goes first: it is the only part of prep that has to wait
+    // for Songsterr to answer, and the background hands this command over
+    // correspondingly earlier (MEASURE_SEEK_LEAD_MS) so it stays clear of the
+    // downbeat. Everything after it is the same synchronous prep as always.
+    const seek = action === "play" && resetBeforePlay && startMeasure > 1
+      ? await seekToMeasure(startMeasure, dueLocalAt)
+      : undefined;
+    prepared = prepareTransport(action, resetBeforePlay, startMeasure, seek);
     preparedAheadMs = dueLocalAt - Date.now();
     prepared.prepCostMs = Date.now() - prepStartedAt;
   }
@@ -437,7 +451,7 @@ async function runScheduledTransport(message) {
   // there. The estimate is measured, not guessed (see recordActionCost).
   const aimMs = prepared ? actionCostEstimateMs : 0;
   const wakeLatenessMs = await waitUntilLocalTime(dueLocalAt - aimMs);
-  const result = await controlSongsterr(action, resetBeforePlay, prepared);
+  const result = await controlSongsterr(action, resetBeforePlay, prepared, startMeasure);
   // Stamped after the control action has run, so it marks the moment playback
   // was actually triggered. The background converts this to server time for the
   // host's deviation view.
@@ -455,6 +469,9 @@ async function runScheduledTransport(message) {
   } else {
     bandcuePlaybackActive = false;
   }
+  // Which measure this tab really started from (1 = the top), so the host can
+  // flag a device that is about to play a different part of the song.
+  result.startMeasure = action === "play" && resetBeforePlay ? result.startMeasure ?? 1 : undefined;
   result.timing = {
     deviationMs: dueLocalAt ? result.firedAtLocal - dueLocalAt : 0,
     wakeLatenessMs,
@@ -517,12 +534,21 @@ async function waitUntilLocalTime(dueLocalAt) {
  * count-in on the scheduled path, and inline (late, as before) when a command
  * arrives with no lead time left.
  */
-function prepareTransport(action, resetBeforePlay) {
+function prepareTransport(action, resetBeforePlay, startMeasure = 0, seek = undefined) {
   // Songsterr's "Original" source streams a YouTube video, which can drift or
   // stall on a weak connection and break sync. The "Synth" source is rendered
   // locally, so force it before a synced play to keep playback deterministic.
   const synthDetail = action === "play" ? ensureSynthPlaybackMode() : "";
-  const resetDetail = action === "play" && resetBeforePlay ? resetSongsterrPosition() : "";
+  // A song that starts at a later measure has already been seeked there by the
+  // caller (it needs to await Songsterr); everything else is unchanged, and a
+  // song starting at the top still just rewinds.
+  const wantsMeasure = action === "play" && resetBeforePlay && startMeasure > 1;
+  // Only when a command arrived with no count-in left to await the seek in: one
+  // click, unverified, rather than dropping the measure or delaying the start.
+  const plannedSeek = seek ?? (wantsMeasure ? seekToMeasureInline(startMeasure) : undefined);
+  const resetDetail = plannedSeek
+    ? plannedSeek.detail
+    : action === "play" && resetBeforePlay ? resetSongsterrPosition() : "";
   const mediaElements = queryMediaElements();
   const playbackState = inferPlaybackState(mediaElements);
   const control = resolveTransportControl(action, mediaElements, playbackState);
@@ -533,7 +559,7 @@ function prepareTransport(action, resetBeforePlay) {
   // Settle style/layout while there is still time, so the click on the beat
   // doesn't trigger a synchronous recalc of everything the reset just dirtied.
   document.body?.getBoundingClientRect();
-  return { synthDetail, resetDetail, playbackState, control };
+  return { synthDetail, resetDetail, seek: plannedSeek, playbackState, control };
 }
 
 /**
@@ -563,8 +589,18 @@ function resolveTransportControl(action, mediaElements, playbackState) {
   return action === "play" ? { kind: "space" } : { kind: "none" };
 }
 
-async function controlSongsterr(action, resetBeforePlay = false, prepared = undefined) {
-  const plan = prepared ?? prepareTransport(action, resetBeforePlay);
+async function controlSongsterr(action, resetBeforePlay = false, prepared = undefined, startMeasure = 0) {
+  const plan = prepared ?? prepareTransport(action, resetBeforePlay, startMeasure);
+  const result = await applyTransportPlan(action, resetBeforePlay, plan);
+  if (plan.seek) {
+    // Carried out of every control path (including the late one that prepares
+    // inline) so the background can report where this tab really started.
+    result.startMeasure = plan.seek.reached;
+  }
+  return result;
+}
+
+async function applyTransportPlan(action, resetBeforePlay, plan) {
   const { synthDetail, resetDetail, control } = plan;
 
   if (control.kind === "no-op") {
@@ -962,6 +998,289 @@ function resetSongsterrPosition() {
   }
 
   return "Tried to reset Songsterr to the song start";
+}
+
+// --- Starting from a later measure -----------------------------------------
+// Songsterr has no "go to measure N" shortcut (its documented keys are Space,
+// Backspace to the top, and arrow keys that step note by note -- a step count
+// that depends on the track's note density, so it cannot address a measure).
+// What it does have is a click target: clicking inside a measure moves the play
+// cursor there, and Space then plays from the cursor. So the seek is a click on
+// the staff underneath that measure's number, verified against the play cursor.
+//
+// Both anchors are data attributes, not the hashed CSS-module class names
+// Songsterr rebuilds on every deploy:
+//   [data-tab-control="marker"] > text   the measure number, at the measure's
+//                                        left edge on its staff line
+//   use[href^="#cursor-playhead"]        the play cursor; one per staff line,
+//                                        the visible one marks the position
+const MEASURE_MARKER_SELECTOR = "[data-tab-control='marker'] text";
+const PLAYHEAD_SELECTOR = "use[href^='#cursor-playhead']";
+// How far below the measure number to click. The number sits just above its
+// staff, so this lands inside the clickable staff area of that same measure.
+const MEASURE_CLICK_OFFSET_Y = 40;
+// Just right of the barline: Songsterr snaps the cursor to the nearest note, so
+// this selects the measure's first note and nothing later. Measured across a
+// normally drawn measure, every click from the barline to 40 px in produced the
+// same first-beat position -- and starting there played a full measure before
+// the cursor moved on, i.e. a real downbeat start.
+//
+// It is deliberately a *single* click. Songsterr also has a compressed
+// rendering (repeated or empty measures drawn narrow), and there a click before
+// the barline and one 30 px in select positions a whole measure apart with
+// nothing in between: that measure has no position of its own to start from.
+// Clicking further in until the cursor "looks right" therefore buys a start one
+// measure late, silently. Reading the cursor back and reporting the measure it
+// really reached is the honest answer, and the host warns about it.
+const MEASURE_CLICK_OFFSET_X = 8;
+// Songsterr renders the tab lazily, so a measure far down the song may not be
+// in the DOM yet. Scroll toward it a bounded number of times before giving up.
+const MEASURE_SCROLL_ATTEMPTS = 6;
+// The seek runs early in the count-in and must be finished well before the
+// downbeat's own approach; whatever is unresolved by then is reported, never
+// chased into the start.
+const SEEK_MARGIN_MS = 250;
+const SEEK_BUDGET_MS = 700;
+const SEEK_POLL_MS = 25;
+const SEEK_SETTLE_POLLS = 4;
+
+/**
+ * Moves Songsterr's play cursor to the first beat of `measure` and reads the
+ * cursor back to see where it really landed. Returns what the host needs to
+ * know: which measure this tab will actually start from, and a human-readable
+ * detail. Never throws and never blocks — a failed seek falls back to the top of
+ * the song, exactly like a failed reset.
+ */
+async function seekToMeasure(measure, dueLocalAt = 0) {
+  const marker = findMeasureMarker(measure);
+  if (!marker) {
+    return missingMeasureSeek(measure);
+  }
+
+  const deadline = Math.min(
+    Date.now() + SEEK_BUDGET_MS,
+    dueLocalAt ? dueLocalAt - SEEK_MARGIN_MS : Number.POSITIVE_INFINITY
+  );
+  const rect = marker.getBoundingClientRect();
+  if (!clickStaffAt(rect.left + MEASURE_CLICK_OFFSET_X, rect.top + MEASURE_CLICK_OFFSET_Y)) {
+    const resetDetail = resetSongsterrPosition();
+    return {
+      requested: measure,
+      reached: 1,
+      detail: `Measure ${measure} was not clickable in this Songsterr tab, so it started from the top (${resetDetail})`
+    };
+  }
+
+  const observed = await settledPlayheadMeasure(deadline);
+  if (observed === measure) {
+    return {
+      requested: measure,
+      reached: measure,
+      detail: `Moved the Songsterr cursor to measure ${measure}`
+    };
+  }
+
+  if (observed === undefined) {
+    return {
+      requested: measure,
+      reached: measure,
+      detail: `Clicked measure ${measure} in Songsterr but could not read the cursor back to confirm it`
+    };
+  }
+
+  return {
+    requested: measure,
+    reached: observed,
+    detail: `Songsterr landed on measure ${observed} instead of measure ${measure}`
+      + " (this tab draws that measure compressed, so it has no position of its own to start from)"
+  };
+}
+
+/**
+ * The one-click version, used only when a command reached this tab with no
+ * count-in left to read the cursor back in. Better an unverified jump than a
+ * start delayed by verification.
+ */
+function seekToMeasureInline(measure) {
+  const marker = findMeasureMarker(measure);
+  if (!marker) {
+    return missingMeasureSeek(measure);
+  }
+
+  const rect = marker.getBoundingClientRect();
+  return {
+    requested: measure,
+    reached: measure,
+    detail: clickStaffAt(rect.left + MEASURE_CLICK_OFFSET_X, rect.top + MEASURE_CLICK_OFFSET_Y)
+      ? `Clicked measure ${measure} in Songsterr with no count-in left to confirm it`
+      : `Measure ${measure} was not clickable in this Songsterr tab`
+  };
+}
+
+/** The answer for a measure this tab simply does not draw. */
+function missingMeasureSeek(measure) {
+  resetSongsterrPosition();
+  return {
+    requested: measure,
+    reached: 1,
+    detail: `Songsterr does not show measure ${measure} in this tab, so it started from the top`
+      + " (repeated measures are drawn once, so a measure inside a repeat has no place to jump to)"
+      + describeNearestMeasures(measure)
+  };
+}
+
+/**
+ * The measure the play cursor comes to rest in. Songsterr re-renders the cursor
+ * a frame or two after the click, so this waits for the reading to stop moving
+ * (about 50 ms in practice) rather than trusting the first sample.
+ */
+async function settledPlayheadMeasure(deadline) {
+  let previous;
+  for (let poll = 0; poll < SEEK_SETTLE_POLLS; poll += 1) {
+    await new Promise((resolve) => setTimeout(resolve, SEEK_POLL_MS));
+    const measure = playheadMeasure();
+    if (measure !== undefined && measure === previous) {
+      return measure;
+    }
+    previous = measure;
+    if (Date.now() >= deadline) {
+      break;
+    }
+  }
+  return previous;
+}
+
+/**
+ * The drawn measures on either side of one this tab does not show, so the host
+ * can be told what it *can* start from instead of only what it can't.
+ */
+function describeNearestMeasures(measure) {
+  const measures = measureMarkers().map((marker) => marker.measure);
+  if (!measures.length) {
+    return "";
+  }
+
+  const before = measures.filter((candidate) => candidate < measure);
+  const after = measures.filter((candidate) => candidate > measure);
+  const nearest = [
+    before.length ? Math.max(...before) : undefined,
+    after.length ? Math.min(...after) : undefined
+  ].filter((candidate) => candidate !== undefined);
+  return nearest.length ? `. This tab can start at ${nearest.join(" or ")}` : "";
+}
+
+/** The measure numbers Songsterr currently has rendered, with their elements. */
+function measureMarkers() {
+  return [...document.querySelectorAll(MEASURE_MARKER_SELECTOR)]
+    .map((element) => ({ measure: Number((element.textContent || "").trim()), element }))
+    .filter((marker) => Number.isInteger(marker.measure) && marker.measure > 0);
+}
+
+function findMeasureMarker(measure) {
+  for (let attempt = 0; attempt <= MEASURE_SCROLL_ATTEMPTS; attempt += 1) {
+    const markers = measureMarkers();
+    const match = markers.find((marker) => marker.measure === measure);
+    if (match) {
+      scrollMeasureIntoView(match.element);
+      // Re-read: the scroll above moves everything, and the click point is
+      // taken from the element's rect right after this returns.
+      return measureMarkers().find((marker) => marker.measure === measure)?.element ?? match.element;
+    }
+
+    if (!markers.length || !scrollTowardMeasure(markers, measure)) {
+      return undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function scrollMeasureIntoView(element) {
+  if (typeof element.scrollIntoView !== "function") {
+    return;
+  }
+  const rect = element.getBoundingClientRect();
+  const viewportHeight = window.innerHeight || 0;
+  // Songsterr's own header floats over the top of the page, so a measure near
+  // the viewport edge is scrolled to the middle before it is clicked.
+  if (rect.top < viewportHeight * 0.2 || rect.bottom > viewportHeight * 0.85) {
+    element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  }
+}
+
+/** Scrolls toward an unrendered measure. Returns false when there is nowhere left to go. */
+function scrollTowardMeasure(markers, measure) {
+  const highest = Math.max(...markers.map((marker) => marker.measure));
+  const lowest = Math.min(...markers.map((marker) => marker.measure));
+  const target = measure > highest ? markers.find((marker) => marker.measure === highest)
+    : measure < lowest ? markers.find((marker) => marker.measure === lowest)
+      : undefined;
+  if (!target || typeof target.element.scrollIntoView !== "function") {
+    return false;
+  }
+
+  target.element.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+  return true;
+}
+
+/** Which measure Songsterr's visible play cursor currently sits in. */
+function playheadMeasure() {
+  const playhead = [...document.querySelectorAll(PLAYHEAD_SELECTOR)]
+    .find((element) => getComputedStyle(element).visibility !== "hidden");
+  if (!playhead) {
+    return undefined;
+  }
+
+  // Markers on the cursor's own staff line, found through the shared line <svg>
+  // rather than by comparing coordinates.
+  const line = typeof playhead.closest === "function" ? playhead.closest("svg") : null;
+  const onLine = measureMarkers().filter(
+    (marker) => (typeof marker.element.closest === "function" ? marker.element.closest("svg") : null) === line
+  );
+  if (!line || !onLine.length) {
+    return undefined;
+  }
+
+  const cursorX = playhead.getBoundingClientRect().left;
+  let current;
+  for (const marker of onLine) {
+    const markerX = marker.element.getBoundingClientRect().left;
+    if (markerX <= cursorX && (!current || markerX > current.x)) {
+      current = { measure: marker.measure, x: markerX };
+    }
+  }
+
+  // Before the first labelled measure of the line (the clef/tuning column at
+  // the start of a staff) the cursor still belongs to that first measure.
+  return current?.measure ?? Math.min(...onLine.map((marker) => marker.measure));
+}
+
+/**
+ * A full pointer/mouse sequence on whatever the tab draws at that point.
+ * Songsterr's player reacts to plain bubbling events, so no user gesture is
+ * involved — the same reason the synthetic Space/Backspace shortcuts already
+ * work here. Returns false when there is nothing to click.
+ */
+function clickStaffAt(x, y) {
+  const element = typeof document.elementFromPoint === "function"
+    ? document.elementFromPoint(x, y)
+    : undefined;
+  if (!element) {
+    return false;
+  }
+
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+    element.dispatchEvent(new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: x,
+      clientY: y,
+      button: 0,
+      detail: 1
+    }));
+  }
+  return true;
 }
 
 function findTransportButton(action, playbackState) {

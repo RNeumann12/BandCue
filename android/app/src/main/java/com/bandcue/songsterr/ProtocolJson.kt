@@ -11,8 +11,31 @@ data class CurrentSong(
     val songsterrUrl: String? = null,
     val songsterrBassUrl: String? = null,
     val songsterrDrumUrl: String? = null,
-    val tempoPercent: Int = 100
+    val tempoPercent: Int = 100,
+    /** Where a Play should start, 1-based; null means the top of the song. */
+    val startMeasure: Int? = null,
+    /** Tempo of the song, when the host filled it in. Needed to turn a start measure into a position. */
+    val bpm: Double? = null,
+    val beatsPerMeasure: Int? = null
 ) {
+    /**
+     * How far into the song `startMeasure` sits, in milliseconds, or null when
+     * the song carries no usable tempo. Songsterr's Android app exposes no
+     * measure API, so a media-session seek is the only way in — and that needs
+     * a position in time.
+     */
+    val startPositionMs: Long?
+        get() {
+            val measure = startMeasure?.takeIf { it > 1 } ?: return null
+            val tempo = bpm?.takeIf { it > 0 } ?: return null
+            val beats = beatsPerMeasure?.takeIf { it > 0 } ?: return null
+            // A song played at 80% takes 1/0.8 as long to reach the same bar, and
+            // the media session's position is wall-clock playback time -- the same
+            // relationship effectiveDurationMs uses on the host.
+            val stretch = 100.0 / tempoPercent.coerceIn(15, 175)
+            return ((measure - 1) * beats * 60_000.0 / tempo * stretch).toLong()
+        }
+
     /**
      * Resolve the Songsterr URL for this song, mirroring
      * src/shared/song-sources.ts: the dedicated songsterrUrl field wins,
@@ -47,7 +70,36 @@ data class TransportCommand(
     val manualOffsetMs: Long,
     val resetBeforePlay: Boolean,
     val currentSong: CurrentSong?
-)
+) {
+    /** The measure this play should start from, or null for the top of the song. */
+    val startMeasure: Int?
+        get() = if (action == "play" && resetBeforePlay) currentSong?.startMeasure else null
+}
+
+/**
+ * What the Android adapter can do about a song that starts at a later measure.
+ * Songsterr's Android app publishes no measure information at all, so the only
+ * way in is a media-session seek to a position in time — which needs both a
+ * tempo on the song and a session that actually advertises seeking. When either
+ * is missing the play still happens (a failed seek must never block playback),
+ * but it starts from the top and says so, and the host warns that this phone is
+ * about to play a different part of the song.
+ */
+enum class StartMeasurePlan { NotRequested, SeekToPosition, UnsupportedNoSeek, UnsupportedNoTempo }
+
+fun decideStartMeasurePlan(command: TransportCommand, controllerSupportsSeek: Boolean): StartMeasurePlan {
+    if (command.startMeasure == null) {
+        return StartMeasurePlan.NotRequested
+    }
+    if (!controllerSupportsSeek) {
+        return StartMeasurePlan.UnsupportedNoSeek
+    }
+    return if (command.currentSong?.startPositionMs != null) {
+        StartMeasurePlan.SeekToPosition
+    } else {
+        StartMeasurePlan.UnsupportedNoTempo
+    }
+}
 
 data class OpenSongCommand(
     val sequenceId: Int,
@@ -69,6 +121,9 @@ data class AdapterCommandStatus(
     val at: Long,
     val detail: String,
     val controlPath: String? = null,
+    // Which measure this command actually started the song from (1 = the top),
+    // so the host can flag a device playing a different part of the song.
+    val startMeasure: Int? = null,
     // When the control action actually executed, in server time; lets the host
     // show this device's start deviation from the scheduled downbeat.
     val firedAtServerTime: Long? = null
@@ -141,6 +196,9 @@ object ProtocolJson {
                 .put("detail", lastCommand.detail)
             if (!lastCommand.controlPath.isNullOrBlank()) {
                 command.put("controlPath", lastCommand.controlPath)
+            }
+            if (lastCommand.startMeasure != null) {
+                command.put("startMeasure", lastCommand.startMeasure)
             }
             if (lastCommand.firedAtServerTime != null) {
                 command.put("firedAtServerTime", lastCommand.firedAtServerTime)
@@ -248,7 +306,12 @@ object ProtocolJson {
         songsterrUrl = song.optString("songsterrUrl").takeIf { it.isNotBlank() },
         songsterrBassUrl = song.optString("songsterrBassUrl").takeIf { it.isNotBlank() },
         songsterrDrumUrl = song.optString("songsterrDrumUrl").takeIf { it.isNotBlank() },
-        tempoPercent = song.optInt("tempoPercent", 100).coerceIn(15, 175)
+        tempoPercent = song.optInt("tempoPercent", 100).coerceIn(15, 175),
+        startMeasure = song.optInt("startMeasure", 0).takeIf { it > 1 },
+        // The Helix fields double as the song's tempo: they are the only place a
+        // BandCue setlist records BPM, and a start measure needs one.
+        bpm = song.optDouble("helixBpm", 0.0).takeIf { it > 0 },
+        beatsPerMeasure = song.optInt("helixBeatsPerMeasure", 0).takeIf { it > 0 }
     )
 }
 

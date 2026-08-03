@@ -44,6 +44,8 @@ function loadBackground(
   const created: Array<{ url: string; active?: boolean }> = [];
   const updated: Array<{ id: number; url?: string; active?: boolean }> = [];
   const inPageNavs: string[] = [];
+  // Transport messages the background handed to the content script.
+  const transportMessages: Array<Record<string, unknown>> = [];
   // Request ids the background stamped on each in-page switch, so a test can
   // answer a specific one the way the content script does.
   const inPageNavRequestIds: number[] = [];
@@ -106,6 +108,10 @@ function loadBackground(
           const tab = initialTabs.find((t) => t.id === id);
           if (tab && message.url) tab.url = message.url;
           return { ok: true };
+        }
+        if (message?.type === "bandcueTransport") {
+          transportMessages.push({ ...message });
+          return { ok: true, startMeasure: (message as { startMeasure?: number }).startMeasure };
         }
         return { ok: true };
       },
@@ -229,6 +235,7 @@ function loadBackground(
     inPageNavRequestIds,
     inPageNavAudioPrimes,
     reloadedTabs,
+    transportMessages,
     deliverServerMessage,
     sendRuntimeMessage,
     openConnection,
@@ -708,6 +715,29 @@ describe("downbeat never navigates or reloads", () => {
 
     expect(created).toHaveLength(0);
     expect(updated.filter((u) => u.url)).toHaveLength(0);
+  });
+});
+
+describe("start measure hand-off", () => {
+  it("tells the content script which measure this song starts from", async () => {
+    const { context, transportMessages } = loadBackground([{ id: 1, url: SONG_A, windowId: 1 }]);
+
+    await context.sendTransportToSongsterr("play", 1, { songsterrUrl: SONG_A }, true, 0, 8);
+
+    expect(transportMessages).toHaveLength(1);
+    expect(transportMessages[0]).toMatchObject({ action: "play", resetBeforePlay: true, startMeasure: 8 });
+  });
+
+  it("reads the start measure off the current song, ignoring the ones that mean 'from the top'", () => {
+    const { context } = loadBackground([]);
+
+    expect(context.startMeasureForSong({ startMeasure: 8 })).toBe(8);
+    expect(context.startMeasureForSong({ startMeasure: 8.4 })).toBe(8);
+    expect(context.startMeasureForSong({ startMeasure: 1 })).toBe(0);
+    expect(context.startMeasureForSong({ startMeasure: 0 })).toBe(0);
+    expect(context.startMeasureForSong({ startMeasure: 5000 })).toBe(0);
+    expect(context.startMeasureForSong({})).toBe(0);
+    expect(context.startMeasureForSong(undefined)).toBe(0);
   });
 });
 

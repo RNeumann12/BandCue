@@ -29,6 +29,7 @@ import {
   describeAutoRun,
   collectWarnings,
   clampHelixOffsetMs,
+  sanitizeStartMeasure,
   applyGlobalHelixSettings,
   helixLeadReadiness,
   hostCueServerTime,
@@ -116,6 +117,7 @@ const elements = {
   songMuseScoreSourceInput: $input("#songMuseScoreSourceInput"),
   songDurationInput: $input("#songDurationInput"),
   songTempoInput: $input("#songTempoInput"),
+  songStartMeasureInput: $input("#songStartMeasureInput"),
   songHelixSyncInput: $input("#songHelixSyncInput"),
   songHelixBpmInput: $input("#songHelixBpmInput"),
   songHelixBeatsInput: $input("#songHelixBeatsInput"),
@@ -1063,6 +1065,7 @@ function readSongForm() {
     durationMs,
     tempoPercent,
     durationSource: durationMs ? "manual" : undefined,
+    startMeasure: sanitizeStartMeasure(Number(elements.songStartMeasureInput.value)),
     helixSyncEnabled,
     helixBpm: elements.songHelixBpmInput.value ? Number(elements.songHelixBpmInput.value) : undefined,
     helixBeatsPerMeasure: elements.songHelixBeatsInput.value ? Number(elements.songHelixBeatsInput.value) : undefined,
@@ -1110,6 +1113,7 @@ function startEditSong(index) {
   elements.songMuseScoreSourceInput.value = song.museScoreSource || "";
   elements.songDurationInput.value = song.durationMs ? formatElapsed(song.durationMs) : "";
   elements.songTempoInput.value = String(song.tempoPercent ?? 100);
+  elements.songStartMeasureInput.value = song.startMeasure ? String(song.startMeasure) : "";
   elements.songHelixSyncInput.checked = Boolean(song.helixSyncEnabled);
   elements.songHelixBpmInput.value = song.helixBpm ? String(song.helixBpm) : "";
   elements.songHelixBeatsInput.value = String(song.helixBeatsPerMeasure || 4);
@@ -1714,8 +1718,10 @@ function renderCommand(command) {
   const when = formatTime(command.at);
   const path = command.controlPath ? ` via ${command.controlPath}` : "";
   const fired = renderFiredDeviation(command);
+  // Only worth saying when it isn't the plain start of the song.
+  const measure = command.startMeasure > 1 ? ` from measure ${command.startMeasure}` : "";
   const detail = command.detail ? `: ${command.detail}` : "";
-  return `${command.action} ${command.status}${path} at ${when}${fired}${detail}`;
+  return `${command.action} ${command.status}${path}${measure} at ${when}${fired}${detail}`;
 }
 
 function renderTempoStatus(tempo) {

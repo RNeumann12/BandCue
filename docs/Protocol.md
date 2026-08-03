@@ -106,9 +106,15 @@ matching `durationMs` to the current song.
   "catalog": { "total": 12, "entries": [{ "title": "Bad Moon Rising", "relativePath": "CCR/Bad Moon Rising.mscz" }] },
   "songMatch": { "status": "matched", "title": "Bad Moon Rising", "relativePath": "CCR/Bad Moon Rising.mscz" },
   "detail": "…",
-  "lastCommand": { "action": "play", "sequenceId": 7, "status": "succeeded", "at": 1718900001234, "controlPath": "media-session" }
+  "lastCommand": { "action": "play", "sequenceId": 7, "status": "succeeded", "at": 1718900001234, "controlPath": "media-session", "startMeasure": 8 }
 }
 ```
+
+`lastCommand.startMeasure` is the measure this adapter actually started the song from — `1` when
+it had to fall back to the top, the song's `startMeasure` when it got there. It is only sent for a
+play with `resetBeforePlay`, and unlike a song's `startMeasure` the value `1` is meaningful and
+kept. The host compares it with what the current song asked for and warns when they differ,
+because a device playing bar 1 while the band plays bar 8 is the loudest kind of out-of-sync.
 
 ### `currentSongUpdate` *(host only)*
 Publishes which setlist song is current (1-based `index` of `total`).
@@ -271,6 +277,7 @@ A targeted failure reply (e.g. a rejected transport request or a non-host mutati
   "museScoreSource": "CCR/Bad Moon Rising",  // optional, relative path or title for MuseScore
   "durationMs": 138000,             // optional
   "durationSource": "adapter",      // adapter | manual
+  "startMeasure": 8,                // optional; 1-based, 2..999. Play starts here instead of the top
   "helixSyncEnabled": true,         // optional; Helix sends Play at measure 1 beat 1
   "helixBpm": 120,                  // optional; constant-BPM v1
   "helixBeatsPerMeasure": 4,        // optional; defaults to 4 in host UI
@@ -286,6 +293,14 @@ primary `sourceType` matches that app. For Songsterr adapters, `songsterrBassUrl
 `songsterrDrumUrl` override the main Songsterr URL for members who selected those instruments.
 When `helixSyncEnabled` is true, the server schedules Play from the Helix fields instead of the
 normal adaptive count-in.
+
+`startMeasure` moves the *whole room's* starting point into the song. The server sanitizes it to
+2..999 and drops anything that means "from the top" (missing, 1, out of range), so adapters only
+ever see a measure worth seeking to. It is not a separate message: every play already carries
+`currentSong`, and each adapter reads the measure off the song there, resolves it in its own
+player's measure numbering, and seeks during the count-in — never on the downbeat. Adapters report
+back which measure they really started from in `lastCommand.startMeasure` (see below); the host
+warns when one of them differs from the song's `startMeasure`.
 
 The count-in is measured from the **cue**, not from when its request reached the coordinator. A
 `transportRequest` may carry `cueAtServerTime` -- the requester's room-time stamp of the keystroke

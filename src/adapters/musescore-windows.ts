@@ -18,6 +18,13 @@ import {
   type LocalScoreCatalog
 } from "./musescore-catalog.js";
 import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
+import { sanitizeStartMeasure } from "../shared/transport.js";
+import {
+  gotoMeasureLeadMs as gotoMeasureLeadMsWithConfig,
+  keysForAction as keysForActionWithConfig,
+  playControlPath as playControlPathWithConfig,
+  type MuseScoreKeyStroke
+} from "./musescore-keys.js";
 import {
   blendOffset,
   calculateClockSample,
@@ -67,6 +74,7 @@ interface Args {
   playKey: string;
   playFromSelectionKey: string;
   resetKey: string;
+  gotoMeasureKey: string;
   stopKey: string;
   playMode: "single-key" | "stop-then-play";
   processMatch: string;
@@ -179,6 +187,10 @@ interface BridgeCommand {
   dueLocalAt: number;
   scheduledServerTime?: number;
   resetBeforePlay?: boolean;
+  /** Where this play should start, 1-based; absent means the top of the score. */
+  startMeasure?: number;
+  /** Where a bridge helper says it actually started, reported back with its result. */
+  reachedMeasure?: number;
   currentSong?: SetlistSong;
   status: "queued" | "claimed" | "succeeded" | "failed" | "expired";
   createdAt: number;
@@ -355,12 +367,19 @@ async function connect(): Promise<void> {
         dueLocalAt,
         scheduledServerTime: message.scheduledServerTime + manualOffsetMs,
         resetBeforePlay: Boolean(message.resetBeforePlay),
+        startMeasure: message.action === "play" && message.resetBeforePlay
+          ? startMeasureForSong(currentSong)
+          : undefined,
         currentSong,
         status: "queued",
         createdAt: Date.now()
       });
       const dispatchLeadMs = message.action === "play" && !hasActiveBridge()
-        ? Math.min(museScoreDispatchLeadMs(), delayMs)
+        // Jumping to a measure adds prefix keys, and every prefix key costs a
+        // command gap. Start that much earlier rather than letting the extra
+        // keys push the setup past the lead time and grow it for the whole
+        // session (adjustDispatchLeadForSetupMargin).
+        ? Math.min(museScoreDispatchLeadMs() + gotoMeasureLeadMs(currentSong), delayMs)
         : 0;
       setTimeout(() => {
         void triggerMuseScoreTransport(
@@ -789,12 +808,18 @@ async function triggerMuseScoreTransport(
     queuedBridgeCommand.status = "expired";
   }
 
-  const keys = keysForAction(action, resetBeforePlay);
+  // Read at trigger time, not at queue time: the room can publish a corrected
+  // start measure during the count-in, and the last word before the downbeat
+  // should win.
+  const startMeasure = action === "play" && resetBeforePlay
+    ? startMeasureForSong(currentSong)
+    : undefined;
+  const keys = keysForAction(action, resetBeforePlay, startMeasure);
   // Preferred path: a process that is already warm only has to take the window,
   // send the reset, and wait out the remaining count-in. It reports failure
   // rather than throwing, so anything unexpected drops straight through to the
   // shell-per-command path below.
-  if (await triggerTransportWithWarmProcess(action, sequenceId, dueLocalAt, keys, resetBeforePlay)) {
+  if (await triggerTransportWithWarmProcess(action, sequenceId, dueLocalAt, keys, resetBeforePlay, startMeasure)) {
     return;
   }
 
@@ -835,10 +860,13 @@ for ($attempt = 0; $attempt -lt ${args.activationRetries}; $attempt++) {
   }
 }
 if (-not $activated) { exit 3 }
-$prefixKeys = @(${keys.slice(0, -1).map((key) => `'${escapePowerShellSingleQuoted(key)}'`).join(", ")})
-foreach ($key in $prefixKeys) {
-  [System.Windows.Forms.SendKeys]::SendWait($key)
-  Start-Sleep -Milliseconds ${args.commandGapMs}
+$prefixKeys = @(${keys.slice(0, -1).map((stroke) => `'${escapePowerShellSingleQuoted(stroke.key)}'`).join(", ")})
+# Per-key pauses: a transport key needs MuseScore to settle, typing into its
+# Find box does not (see GOTO_MEASURE_TYPE_GAP_MS).
+$prefixGaps = @(${keys.slice(0, -1).map((stroke) => String(stroke.gapMs ?? args.commandGapMs)).join(", ")})
+for ($index = 0; $index -lt $prefixKeys.Count; $index++) {
+  [System.Windows.Forms.SendKeys]::SendWait($prefixKeys[$index])
+  Start-Sleep -Milliseconds $prefixGaps[$index]
 }
 $setupCompletedLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $dueLocalAt = [int64]${Math.round(dueLocalAt)}
@@ -856,7 +884,7 @@ while ($true) {
   }
 }
 $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-[System.Windows.Forms.SendKeys]::SendWait('${escapePowerShellSingleQuoted(keys.at(-1) ?? "")}')
+[System.Windows.Forms.SendKeys]::SendWait('${escapePowerShellSingleQuoted(keys.at(-1)?.key ?? "")}')
 [void][BandCueWin32]::timeEndPeriod(1)
 [PSCustomObject]@{
   processId = $process.Id
@@ -911,8 +939,11 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       action,
       sequenceId,
       status: "succeeded",
-      detail: mismatch ?? lateDetail ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, bridgeResult),
-      controlPath: `windows-sendkeys:${action === "play" ? playControlPath(resetBeforePlay) : "stop-key"}`,
+      detail: mismatch ?? lateDetail ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, bridgeResult, startMeasure),
+      controlPath: `windows-sendkeys:${action === "play" ? playControlPath(resetBeforePlay, startMeasure) : "stop-key"}`,
+      // MuseScore's Find box takes the measure number literally, so the keys
+      // either land on it or the command failed outright.
+      startMeasure: action === "play" && resetBeforePlay ? startMeasure ?? 1 : undefined,
       firedAtServerTime: Number.isFinite(commandResult?.firedAtLocal)
         ? Math.round((commandResult?.firedAtLocal ?? Date.now()) + serverOffsetMs)
         : undefined,
@@ -1069,20 +1100,30 @@ async function triggerTransportWithWarmProcess(
   action: TransportAction,
   sequenceId: number,
   dueLocalAt: number,
-  keys: string[],
-  resetBeforePlay: boolean
+  keys: MuseScoreKeyStroke[],
+  resetBeforePlay: boolean,
+  startMeasure: number | undefined
 ): Promise<boolean> {
   if (!trigger.start()) {
     return false;
   }
 
+  // The trigger paces every prefix key with one uniform gap, so only the keys
+  // themselves cross over (gotoMeasureLeadMs budgets the count-in for that).
+  const pressed = keys.map((stroke) => stroke.key);
+  // A measure jump types into MuseScore's Find box, which only listens to the
+  // real keyboard focus: posted into the main window the digits would be taken
+  // as note durations and edit the score. Verified on MuseScore 4 -- the posted
+  // attempt left added beams and a system break behind.
+  const allowPost = startMeasure === undefined;
+
   // Stop has no downbeat to hit -- send it and be done.
   if (action === "stop") {
-    const stopped = await trigger.sendKeys(keys);
+    const stopped = await trigger.sendKeys(pressed, undefined, allowPost);
     if (!stopped.ok) {
       return false;
     }
-    applyWarmTriggerSuccess(action, sequenceId, keys, false, stopped, undefined);
+    applyWarmTriggerSuccess(action, sequenceId, keys, false, stopped, undefined, undefined);
     return true;
   }
 
@@ -1093,9 +1134,17 @@ async function triggerTransportWithWarmProcess(
   }
 
   const handedOverAt = Date.now();
-  const fired = await trigger.fire(keys.slice(0, -1), keys.at(-1) ?? "", dueLocalAt);
+  const fired = await trigger.fire(pressed.slice(0, -1), pressed.at(-1) ?? "", dueLocalAt, undefined, allowPost);
   if (!fired.ok || !Number.isFinite(fired.firedAtLocal)) {
-    return false;
+    // A measure jump has to be typed, and Windows only lets a background process
+    // take the foreground under conditions an adapter cannot count on. Rather
+    // than leaving this device silent while the band plays, start it from the
+    // top the way a room without a start measure does -- posted, so no
+    // foreground is needed -- and report measure 1 so the host says out loud
+    // that this device is playing a different part of the song.
+    return startMeasure === undefined
+      ? false
+      : playFromTopAfterFailedJump(action, sequenceId, dueLocalAt, resetBeforePlay, startMeasure);
   }
 
   if (warmPathDegraded) {
@@ -1103,17 +1152,49 @@ async function triggerTransportWithWarmProcess(
     console.log("MuseScore trigger is handling commands again; count-in requirement back to normal.");
   }
   const lateDetail = adjustWarmLeadForSetup(dueLocalAt, handedOverAt, fired.readyAtLocal);
-  applyWarmTriggerSuccess(action, sequenceId, keys, resetBeforePlay, fired, lateDetail);
+  applyWarmTriggerSuccess(action, sequenceId, keys, resetBeforePlay, fired, lateDetail, startMeasure);
+  return true;
+}
+
+/** The plain reset-to-top play, for when the measure jump could not be typed. */
+async function playFromTopAfterFailedJump(
+  action: TransportAction,
+  sequenceId: number,
+  dueLocalAt: number,
+  resetBeforePlay: boolean,
+  startMeasure: number
+): Promise<boolean> {
+  const plainKeys = keysForAction(action, resetBeforePlay);
+  const pressed = plainKeys.map((stroke) => stroke.key);
+  const handedOverAt = Date.now();
+  const fired = await trigger.fire(pressed.slice(0, -1), pressed.at(-1) ?? "", dueLocalAt);
+  if (!fired.ok || !Number.isFinite(fired.firedAtLocal)) {
+    return false;
+  }
+
+  const lateDetail = adjustWarmLeadForSetup(dueLocalAt, handedOverAt, fired.readyAtLocal);
+  applyWarmTriggerSuccess(
+    action,
+    sequenceId,
+    plainKeys,
+    resetBeforePlay,
+    fired,
+    `${lateDetail ? `${lateDetail}; ` : ""}could not take the MuseScore window to type measure ${startMeasure} `
+      + "into Find / Go to, so it started from the top; bring MuseScore to the front to start at a measure",
+    // What it really did, so the host warns about the mismatch.
+    1
+  );
   return true;
 }
 
 function applyWarmTriggerSuccess(
   action: TransportAction,
   sequenceId: number,
-  keys: string[],
+  keys: MuseScoreKeyStroke[],
   resetBeforePlay: boolean,
   result: { firedAtLocal?: number; processId?: number; processName?: string; windowTitle?: string },
-  lateDetail: string | undefined
+  lateDetail: string | undefined,
+  startMeasure: number | undefined
 ): void {
   inferredPlayback = action === "play" ? "playing" : "stopped";
   lastMuseScoreStatus = {
@@ -1128,8 +1209,10 @@ function applyWarmTriggerSuccess(
     action,
     sequenceId,
     status: "succeeded",
-    detail: lateDetail ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, undefined),
+    detail: lateDetail ?? museScoreCommandSuccessDetail(action, keys, resetBeforePlay, undefined, startMeasure),
     controlPath: `windows-trigger:${action === "play" ? "warm-play" : "stop-key"}`,
+    // Same keys as the shell path, so the same measure was reached.
+    startMeasure: action === "play" && resetBeforePlay ? startMeasure ?? 1 : undefined,
     firedAtServerTime: Number.isFinite(result.firedAtLocal)
       ? Math.round((result.firedAtLocal ?? Date.now()) + serverOffsetMs)
       : undefined,
@@ -1300,6 +1383,12 @@ function applyBridgeCommandResult(
     status: "succeeded",
     detail: mismatch ?? command.detail ?? "MuseScore bridge completed the command",
     controlPath: command.controlPath ?? "musescore-bridge",
+    // A bridge helper says which measure it really started from; without an
+    // answer we can only report the top, so the host warns instead of assuming
+    // an external plugin honored the song's start measure.
+    startMeasure: action === "play" && command.resetBeforePlay
+      ? command.reachedMeasure ?? 1
+      : undefined,
     at: command.completedAt ?? Date.now()
   });
 }
@@ -1312,6 +1401,7 @@ function reportCommandStatus(command: {
   detail: string;
   at: number;
   controlPath?: string;
+  startMeasure?: number;
   firedAtServerTime?: number;
 }): void {
   const state: AdapterStatus["state"] =
@@ -1337,63 +1427,56 @@ function reportCommandStatus(command: {
       at: command.at,
       detail: command.detail,
       controlPath: command.controlPath,
+      startMeasure: command.startMeasure,
       firedAtServerTime: command.firedAtServerTime
     }
   });
 }
 
-function keysForAction(action: TransportAction, resetBeforePlay = false): string[] {
-  if (action === "stop") {
-    return [args.stopKey];
-  }
+function keysForAction(
+  action: TransportAction,
+  resetBeforePlay = false,
+  startMeasure: number | undefined = undefined
+): MuseScoreKeyStroke[] {
+  return keysForActionWithConfig(args, action, resetBeforePlay, startMeasure);
+}
 
-  if (resetBeforePlay) {
-    const prefixKeys = args.playMode === "stop-then-play"
-      ? [args.stopKey, args.resetKey]
-      : [args.resetKey];
-    // MuseScore keeps the playback position separate from the selection: the
-    // reset key (Ctrl+Home / `first-element`) moves the cursor and the view to the
-    // top of the score, but plain Play still resumes from wherever the playhead
-    // was last put -- which is why a reset looked like it "almost" worked, the
-    // score scrolling back while playback carried on from the last click. The
-    // action that starts at the cursor is `play-from-selection` (Shift+Space), so
-    // a reset-before-play uses that instead. MuseScore's own `rewind` action
-    // would also do it, but ships with no shortcut bound at all.
-    return [...prefixKeys, args.playFromSelectionKey || args.playKey];
-  }
+function startMeasureForSong(song: SetlistSong | undefined): number | undefined {
+  return sanitizeStartMeasure(song?.startMeasure);
+}
 
-  if (args.playMode === "single-key") {
-    return [args.playKey];
-  }
-
-  return [args.stopKey, args.playKey];
+/** Extra count-in this song's measure jump needs before the Play key waits. */
+function gotoMeasureLeadMs(song: SetlistSong | undefined): number {
+  return gotoMeasureLeadMsWithConfig(args, startMeasureForSong(song), args.commandGapMs);
 }
 
 function museScoreCommandSuccessDetail(
   action: TransportAction,
-  keys: string[],
+  keys: MuseScoreKeyStroke[],
   resetBeforePlay: boolean,
-  bridgeResult?: BridgeCommand
+  bridgeResult?: BridgeCommand,
+  startMeasure: number | undefined = undefined
 ): string {
   const fallbackPrefix = bridgeResult?.status === "failed"
     ? `MuseScore bridge failed (${bridgeResult.detail ?? "no detail"}); fallback `
     : "";
 
   if (action === "play" && resetBeforePlay && args.playMode === "stop-then-play") {
-    return `${fallbackPrefix}stopped first, sent ${describeKey(args.resetKey)} to reset to the beginning, then sent ${describeKey(args.playKey)} to MuseScore`;
+    const target = sanitizeStartMeasure(startMeasure)
+      ? `, jumped to measure ${sanitizeStartMeasure(startMeasure)}`
+      : "";
+    return `${fallbackPrefix}stopped first, sent ${describeKey(args.resetKey)} to reset to the beginning${target}, then sent ${describeKey(args.playFromSelectionKey || args.playKey)} to MuseScore`;
   }
 
   if (action === "play" && args.playMode === "stop-then-play") {
     return `${fallbackPrefix}stopped first, then sent ${describeKey(args.playKey)} to MuseScore`;
   }
 
-  return `${fallbackPrefix}sent ${keys.map(describeKey).join(", ")} to MuseScore`;
+  return `${fallbackPrefix}sent ${keys.map((stroke) => describeKey(stroke.key)).join(", ")} to MuseScore`;
 }
 
-function playControlPath(resetBeforePlay: boolean): string {
-  return resetBeforePlay
-    ? `${args.playMode}+reset-to-start`
-    : args.playMode;
+function playControlPath(resetBeforePlay: boolean, startMeasure?: number): string {
+  return playControlPathWithConfig(args, resetBeforePlay, startMeasure);
 }
 
 function museScoreCommandFailureDetail(result: {
@@ -1799,6 +1882,12 @@ function applyBridgeResultBody(command: BridgeCommand, body: Record<string, unkn
       ? "MuseScore bridge completed the command"
       : "MuseScore bridge reported command failure";
   command.controlPath = typeof body.controlPath === "string" ? body.controlPath : "musescore-bridge";
+  // Only what the helper claims it reached. A helper that says nothing about the
+  // measure is reported as having started from the top, so the host warns rather
+  // than assuming an external plugin honored the song's start measure.
+  command.reachedMeasure = typeof body.startMeasure === "number"
+    ? sanitizeStartMeasure(body.startMeasure)
+    : undefined;
   command.playback = parsePlayback(body.playback);
   command.title = typeof body.title === "string" ? body.title : undefined;
   command.windowTitle = typeof body.windowTitle === "string"
@@ -2140,6 +2229,9 @@ function parseArgs(raw: string[]): Args {
     // Ctrl+Home ("first-element") moves the cursor and the view to the start of
     // the score. Plain Home only jumps within the current row.
     resetKey: "^{HOME}",
+    // Ctrl+F opens MuseScore's Find / Go to box; a bare number in it jumps to
+    // that measure, which is how a song can start somewhere other than bar 1.
+    gotoMeasureKey: "^f",
     stopKey: "{ESC}",
     playMode: "stop-then-play",
     processMatch: "MuseScore|mscore",
@@ -2167,6 +2259,7 @@ function parseArgs(raw: string[]): Args {
       parsed.playFromSelectionKey = raw[index + 1] ?? parsed.playFromSelectionKey;
     }
     if (value === "--reset-key") parsed.resetKey = raw[index + 1] ?? parsed.resetKey;
+    if (value === "--goto-measure-key") parsed.gotoMeasureKey = raw[index + 1] ?? parsed.gotoMeasureKey;
     if (value === "--stop-key") parsed.stopKey = raw[index + 1] ?? parsed.stopKey;
     if (value === "--play-mode") parsed.playMode = parsePlayMode(raw[index + 1], parsed.playMode);
     if (value === "--process-match") parsed.processMatch = raw[index + 1] ?? parsed.processMatch;

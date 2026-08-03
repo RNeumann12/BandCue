@@ -540,13 +540,21 @@ export class MuseScoreTrigger {
     prefixKeys: string[],
     key: string,
     dueLocalAt: number,
-    timeoutMs?: number
+    timeoutMs?: number,
+    // Some sequences are postable but must not be posted: text typed into a
+    // MuseScore dialog (the measure number for Find / Go to) only reaches the
+    // dialog through real keyboard focus. Posted to the main window it lands in
+    // the score view instead, where digits are note durations -- it edits the
+    // score. Such a sequence takes the foreground path or fails loudly.
+    allowPost = true
   ): Promise<TriggerFireResult> {
     const wait = Math.max(0, dueLocalAt - Date.now());
     // Posting is preferred and needs no foreground window, but only when every
     // key in the sequence can be expressed that way -- a half-posted sequence
     // would leave the score in a state nobody asked for.
-    const postable = this.allowPosting ? parseSendKeysTokens([...prefixKeys, key]) : undefined;
+    const postable = this.allowPosting && allowPost
+      ? parseSendKeysTokens([...prefixKeys, key])
+      : undefined;
     return this.request({
       cmd: "fire",
       keys: prefixKeys,
@@ -562,8 +570,8 @@ export class MuseScoreTrigger {
   }
 
   /** Sends keys immediately (Stop, and any play with no lead time left). */
-  async sendKeys(keys: string[], timeoutMs = 8000): Promise<TriggerFireResult> {
-    const postable = this.allowPosting ? parseSendKeysTokens(keys) : undefined;
+  async sendKeys(keys: string[], timeoutMs = 8000, allowPost = true): Promise<TriggerFireResult> {
+    const postable = this.allowPosting && allowPost ? parseSendKeysTokens(keys) : undefined;
     return this.request({
       cmd: "keys",
       keys,

@@ -687,6 +687,90 @@ describe("RoomController", () => {
     expect(currentSong?.song?.notes).toHaveLength(500);
   });
 
+  it("keeps a usable start measure and drops the ones that mean 'from the top'", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    const startMeasureOf = (startMeasure: unknown) => {
+      room.handleMessage(host.id, {
+        type: "currentSongUpdate",
+        updatedAt: 1200,
+        song: { id: "song-1", title: "Song", sourceType: "songsterr", startMeasure }
+      } as never, 1200);
+      return room.getState(1300).currentSong?.song?.startMeasure;
+    };
+
+    expect(startMeasureOf(8)).toBe(8);
+    expect(startMeasureOf(8.6)).toBe(9);
+    expect(startMeasureOf(1)).toBeUndefined();
+    expect(startMeasureOf(0)).toBeUndefined();
+    expect(startMeasureOf(-4)).toBeUndefined();
+    expect(startMeasureOf(1000)).toBeUndefined();
+    expect(startMeasureOf("8")).toBeUndefined();
+    expect(startMeasureOf(undefined)).toBeUndefined();
+  });
+
+  it("carries the current song's start measure to every adapter with the play command", () => {
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, {
+      type: "currentSongUpdate",
+      updatedAt: 1100,
+      song: { id: "song-1", title: "Song", sourceType: "songsterr", startMeasure: 8 }
+    } as never, 1100);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1150 }, 1150);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+
+    const command = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "transportCommand" && message.action === "play");
+    expect(command.resetBeforePlay).toBe(true);
+    expect(command.currentSong.song.startMeasure).toBe(8);
+  });
+
+  it("keeps the measure an adapter reports it started from, including the top", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Songsterr",
+      role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+
+    const reported = (startMeasure: unknown) => {
+      room.handleMessage(adapter.id, {
+        type: "adapterStatus",
+        ready: true,
+        app: "songsterr",
+        lastCommand: { action: "play", sequenceId: 1, status: "succeeded", at: 1200, startMeasure }
+      } as never, 1200);
+      return room.getState(1300).clients[0].status?.lastCommand?.startMeasure;
+    };
+
+    expect(reported(8)).toBe(8);
+    expect(reported(1)).toBe(1);
+    expect(reported(0)).toBeUndefined();
+    expect(reported("8")).toBeUndefined();
+  });
+
   it("broadcasts a host request to open the current Songsterr song", () => {
     const hostMessages: string[] = [];
     const adapterMessages: string[] = [];
