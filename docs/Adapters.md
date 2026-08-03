@@ -274,11 +274,26 @@ cmd("play-from-selection");
 
 That selects a **note**, not a frame, so playback starts at bar 1 every time.
 
-**Install.** Copy the folder into MuseScore's Plugins directory (Preferences → Folders shows the
-path; usually `%USERPROFILE%\Documents\MuseScore4\Plugins`), enable **BandCue Bridge** under
+**Install.** Copy the folder into MuseScore's Plugins directory, enable **BandCue Bridge** under
 Home → Plugins, and leave its window open while playing — `pluginType: "dialog"` is what keeps the
 plugin resident, since a plain plugin exits after `onRun` and could never wait for a cue. BandCue
 minimizes that dialog automatically after startup; restoring it is optional and only shows status.
+
+Take the Plugins path from **Preferences → Folders** rather than assuming
+`%USERPROFILE%\Documents\MuseScore4\Plugins` — MuseScore resolves it through the Windows *Documents*
+shell folder, which OneDrive commonly redirects to `%USERPROFILE%\OneDrive\Dokumente` (or the
+localized equivalent). A plugin dropped in the literal `Documents` path is then never scanned, and
+MuseScore reports nothing wrong: the plugin simply does not appear under Home → Plugins. To confirm
+what MuseScore actually found, check that `bandcue.qml` is listed in
+`%LOCALAPPDATA%\MuseScore\MuseScore4\extensions\config.json`.
+
+**Verifying the bridge is really attached.** `GET http://127.0.0.1:<bridge-port>/status` returns
+`{"status":{…}}` filled in from the plugin's own 2 s keep-alive. An empty `"status":{}` means no
+plugin has ever connected — the adapter is running keyboard-only, and every non-100 % song will be
+refused with *"MuseScore Bridge must be connected to set N% tempo"* rather than played at the wrong
+speed. The adapter's `tempo.detail` in the room state says the same thing: *"100% tempo uses normal
+MuseScore playback"* is the **no-bridge** wording, while an attached plugin reports *"applied
+through MuseScore Bridge"*.
 
 **Transport.** The plugin talks to the adapter's `--bridge-port` over a WebSocket on the same port
 as the HTTP API. MuseScore's plugin sandbox has no HTTP client, but it does expose

@@ -1652,6 +1652,12 @@ function queueBridgeCommand(command: BridgeCommand): boolean {
     dueLocalAt: command.dueLocalAt,
     scheduledServerTime: command.scheduledServerTime,
     resetBeforePlay: Boolean(command.resetBeforePlay),
+    // Must be sent explicitly: the plugin cannot re-derive it from currentSong,
+    // because only the adapter applies sanitizeStartMeasure and only the adapter
+    // sees a start measure the room corrects during the count-in. Omitting it is
+    // what silently played every song from bar 1 over the socket transport while
+    // the HTTP /commands transport (which serializes the whole command) was fine.
+    startMeasure: command.startMeasure,
     currentSong: command.currentSong
   });
   reportCommandStatus({
