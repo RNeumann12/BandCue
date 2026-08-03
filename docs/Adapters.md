@@ -92,7 +92,12 @@ Build a distributable zip with `npm run package:extension`.
   elements or clicks a confidently-labelled pause/stop control.
 - **Per-song tempo** is applied through Songsterr's visible playback-speed control while loading
   and verified before Play. Paywalls or changed layouts are reported instead of starting at the
-  wrong speed.
+  wrong speed. Changing speed is a **Songsterr Plus** feature, so on a free account the speed panel
+  never opens — a song at the default **100%** plays anyway (that is what Songsterr already does),
+  while any other tempo is refused, naming Plus as the reason. The current speed is read from the
+  speed button's own text, never from its tooltip: the tooltip describes the range Songsterr
+  supports ("15%–175%"), and reading that made a tab playing at 100% look like 15%, which used to
+  block every Play on free accounts.
 - **Start timing** — everything a Play needs is worked out during the count-in, so the downbeat
   itself is a single click or key dispatch:
   - The background forwards the command `adaptiveDispatchLeadMs` (400 ms by default) ahead of the
