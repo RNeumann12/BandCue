@@ -41,6 +41,22 @@ export function effectiveDurationMs(durationMs, tempoPercent) {
   return duration === undefined ? undefined : Math.round(duration * 100 / sanitizeTempoPercent(tempoPercent));
 }
 
+// Mirror of MAX_START_MEASURE in src/shared/transport.ts and the start-measure
+// input bounds in web/index.html. Keep all three in sync.
+export const MAX_START_MEASURE = 999;
+
+// A song's start measure. "Measure 1" is the same thing as "no start measure",
+// so it collapses to undefined and never reaches the adapters as extra work.
+export function sanitizeStartMeasure(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return undefined;
+  }
+
+  const rounded = Math.round(number);
+  return rounded > 1 && rounded <= MAX_START_MEASURE ? rounded : undefined;
+}
+
 // Trim a setlist song for publishing/persisting: drop empty optional fields and
 // only keep a duration source when there is a usable duration.
 export function normalizeSong(song) {
@@ -60,6 +76,7 @@ export function normalizeSong(song) {
     tempoPercent: sanitizeTempoPercent(song.tempoPercent),
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? (song.durationSource || "manual") : undefined,
+    startMeasure: sanitizeStartMeasure(song.startMeasure),
     helixSyncEnabled: Boolean(song.helixSyncEnabled),
     helixBpm: sanitizeHelixBpm(song.helixBpm),
     helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure),
@@ -92,6 +109,7 @@ export function normalizeStoredSong(song) {
     tempoPercent: sanitizeTempoPercent(song.tempoPercent),
     durationMs: sanitizeDurationMs(song.durationMs),
     durationSource: sanitizeDurationMs(song.durationMs) ? normalizeDurationSource(song.durationSource) : undefined,
+    startMeasure: sanitizeStartMeasure(song.startMeasure),
     helixSyncEnabled: Boolean(song.helixSyncEnabled),
     helixBpm: sanitizeHelixBpm(Number(song.helixBpm)),
     helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(Number(song.helixBeatsPerMeasure)) ?? 4,
@@ -688,7 +706,42 @@ export function collectWarnings(state, readyAdapters, desktopAdapters) {
     }
   }
 
+  warnings.push(...startMeasureWarnings(state, desktopAdapters));
+
   return [...new Set(warnings)];
+}
+
+/**
+ * Devices that answered the last Play from a different measure than the current
+ * song asked for. A device playing bar 1 while the band plays bar 8 is the
+ * loudest kind of out-of-sync, so it is worth saying out loud rather than
+ * leaving it to be noticed by ear.
+ */
+export function startMeasureWarnings(state, desktopAdapters) {
+  const startMeasure = sanitizeStartMeasure(state?.currentSong?.song?.startMeasure);
+  if (!startMeasure) {
+    return [];
+  }
+
+  const warnings = [];
+  for (const device of desktopAdapters ?? []) {
+    const lastCommand = device.status?.lastCommand;
+    if (!lastCommand || lastCommand.action !== "play" || lastCommand.startMeasure === undefined) {
+      continue;
+    }
+    // Only the run the room is actually in; a stale report from the previous
+    // song would otherwise keep warning about a measure nobody asked for now.
+    if (lastCommand.sequenceId !== undefined && lastCommand.sequenceId !== state?.transport?.sequenceId) {
+      continue;
+    }
+    if (lastCommand.startMeasure !== startMeasure) {
+      warnings.push(
+        `${device.deviceName}: started from measure ${lastCommand.startMeasure}, not ${startMeasure} - this device is playing a different part of the song.`
+      );
+    }
+  }
+
+  return warnings;
 }
 
 // --- Formatting -----------------------------------------------------------
@@ -777,8 +830,10 @@ export function formatSongMeta(song, index, total) {
     ? ` - ${formatElapsed(song.durationMs)}${sanitizeTempoPercent(song.tempoPercent) === 100 ? "" : ` base / ${formatElapsed(effectiveDurationMs(song.durationMs, song.tempoPercent))} effective`} ${song.durationSource === "adapter" ? "(adapter)" : ""}`.trimEnd()
     : "";
   const tempo = ` - ${sanitizeTempoPercent(song.tempoPercent)}% tempo`;
+  const startMeasure = sanitizeStartMeasure(song.startMeasure);
+  const start = startMeasure ? ` - from measure ${startMeasure}` : "";
   const helix = formatHelixMeta(song);
-  return `${position} - ${source}${tempo}${duration}${helix}${reference}`;
+  return `${position} - ${source}${tempo}${duration}${start}${helix}${reference}`;
 }
 
 export function formatHelixMeta(song) {

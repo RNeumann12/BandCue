@@ -130,6 +130,23 @@ Every accepted **play** command sets `resetBeforePlay: true`. Each adapter seeks
 to the top of the song using that platform's official seek API on a best-effort basis, then plays
 — so the band starts from the same bar. A failed reset must never block playback.
 
+### Starting from a later measure
+
+A setlist song can carry a `startMeasure`, and the play command's `currentSong` carries it to every
+adapter: instead of rewinding to the top, each one seeks to that measure in its own player before
+the downbeat. Two rules keep this from costing the thing BandCue exists for:
+
+- **The seek happens during the count-in, never on the downbeat.** It is part of the same prep step
+  as the reset it replaces (Songsterr: the extension's count-in prep; MuseScore: the prefix keys
+  that run before the precise wait). The downbeat itself is still a single click or key dispatch.
+- **The extra work is paid for up front.** The MuseScore adapter starts its setup earlier by
+  exactly what its extra keys cost, so the measure jump cannot push setup past the lead time and
+  grow the room's count-in for the rest of the session.
+
+Adapters report the measure they really reached back in `adapterStatus.lastCommand.startMeasure`,
+and the host warns about any device that ended up somewhere else — including platforms that cannot
+honor it at all (see [Adapters.md](Adapters.md)).
+
 ### Per-client manual offset
 
 The host sends `calibrationUpdate { targetClientId, manualOffsetMs }` (clamped to ±5000 ms). The

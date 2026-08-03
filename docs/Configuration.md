@@ -85,6 +85,7 @@ Parsed by `parseArgs` in [`musescore-windows.ts`](../src/adapters/musescore-wind
 | --- | --- | --- |
 | `--play-key <keys>` | **`" "`** (Space) | Keystroke(s) sent to play. |
 | `--reset-key <keys>` | **`^{HOME}`** (Ctrl+Home) | Keystroke(s) to seek to the start before play. |
+| `--goto-measure-key <keys>` | **`^f`** (Ctrl+F) | Keystroke(s) that open MuseScore's Find / Go to box, used when the song starts at a later measure. The measure number and `{ENTER}` follow automatically. |
 | `--stop-key <keys>` | **`{ESC}`** | Keystroke(s) sent to stop. |
 | `--play-mode <mode>` | **`stop-then-play`** | `stop-then-play` (ESC, wait, Space — safer) or `single-key` (legacy toggle). |
 | `--process-match <regex>` | **`MuseScore\|mscore`** | Regex matching the MuseScore process name. |

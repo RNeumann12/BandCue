@@ -220,6 +220,7 @@ function sanitizeLastCommand(value: unknown): AdapterStatus["lastCommand"] | und
     at: value.at,
     detail: typeof value.detail === "string" ? value.detail : undefined,
     controlPath: typeof value.controlPath === "string" ? value.controlPath : undefined,
+    startMeasure: isFiniteNumber(value.startMeasure) ? value.startMeasure : undefined,
     firedAtServerTime: isFiniteNumber(value.firedAtServerTime) ? value.firedAtServerTime : undefined
   };
 }

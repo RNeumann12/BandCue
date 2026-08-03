@@ -121,6 +121,23 @@ describe("server message guards", () => {
     })).toMatchObject({ requiredLeadMs: undefined });
   });
 
+  it("keeps the measure an adapter reports it started from", () => {
+    const command = { action: "play", status: "succeeded", at: 5 };
+    expect(sanitizeClientMessage({
+      type: "adapterStatus",
+      ready: true,
+      app: "songsterr",
+      lastCommand: { ...command, startMeasure: 8 }
+    })).toMatchObject({ lastCommand: { startMeasure: 8 } });
+
+    expect(sanitizeClientMessage({
+      type: "adapterStatus",
+      ready: true,
+      app: "songsterr",
+      lastCommand: { ...command, startMeasure: "eight" }
+    })).toMatchObject({ lastCommand: { startMeasure: undefined } });
+  });
+
   it("parses only known JSON client messages", () => {
     expect(parseClientMessagePayload(JSON.stringify({
       type: "safetyUpdate",

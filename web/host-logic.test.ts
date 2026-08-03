@@ -179,6 +179,15 @@ describe("song normalization", () => {
     });
   });
 
+  it("keeps a start measure from storage and treats the top of the song as none", () => {
+    expect(normalizeStoredSong({ title: "A", startMeasure: 8 })).toMatchObject({ startMeasure: 8 });
+    expect(normalizeStoredSong({ title: "A", startMeasure: 1 })?.startMeasure).toBeUndefined();
+    expect(normalizeStoredSong({ title: "A", startMeasure: 0 })?.startMeasure).toBeUndefined();
+    expect(normalizeStoredSong({ title: "A", startMeasure: 5000 })?.startMeasure).toBeUndefined();
+    expect(normalizeStoredSong({ title: "A" })?.startMeasure).toBeUndefined();
+    expect(normalizeSong({ id: "1", title: "A", startMeasure: 8.4 })).toMatchObject({ startMeasure: 8 });
+  });
+
   it("trims alternate Songsterr URLs from storage", () => {
     expect(normalizeStoredSong({
       title: "A",
@@ -706,6 +715,36 @@ describe("collectWarnings", () => {
   });
 });
 
+describe("start-measure warnings", () => {
+  const state = (startMeasure: number | undefined, sequenceId = 4) => ({
+    currentSong: { song: { title: "A", sourceType: "songsterr", startMeasure } },
+    transport: { sequenceId }
+  });
+  const adapter = (startMeasure: number | undefined, sequenceId = 4) => readyAdapter({
+    status: {
+      ready: true,
+      lastCommand: { action: "play", status: "succeeded", sequenceId, startMeasure }
+    }
+  });
+
+  it("warns when a device started somewhere else than the song asked for", () => {
+    expect(collectWarnings(state(8), [adapter(1)], [adapter(1)])).toContain(
+      "MuseScore laptop: started from measure 1, not 8 - this device is playing a different part of the song."
+    );
+  });
+
+  it("stays quiet when the device reached the requested measure", () => {
+    expect(collectWarnings(state(8), [adapter(8)], [adapter(8)])).not.toContain(
+      "MuseScore laptop: started from measure 1, not 8 - this device is playing a different part of the song."
+    );
+  });
+
+  it("ignores a report from an earlier play and songs without a start measure", () => {
+    expect(collectWarnings(state(8), [adapter(1, 3)], [adapter(1, 3)]).join()).not.toContain("different part");
+    expect(collectWarnings(state(undefined), [adapter(1)], [adapter(1)]).join()).not.toContain("different part");
+  });
+});
+
 describe("formatting", () => {
   it("formats elapsed milliseconds as mm:ss", () => {
     expect(formatElapsed(0)).toBe("00:00");
@@ -728,6 +767,13 @@ describe("formatting", () => {
     expect(formatSongMeta({ sourceType: "musescore", durationMs: 65_000, durationSource: "adapter" }, 2, 4))
       .toBe("2 / 4 - MuseScore - 100% tempo - 01:05 (adapter)");
     expect(formatSongMeta({ sourceType: "other" }, 0, 0)).toBe("setlist - Other - 100% tempo");
+  });
+
+  it("says which measure a song starts from", () => {
+    expect(formatSongMeta({ sourceType: "songsterr", startMeasure: 8 }, 1, 2))
+      .toBe("1 / 2 - Songsterr - 100% tempo - from measure 8");
+    expect(formatSongMeta({ sourceType: "songsterr", startMeasure: 1 }, 1, 2))
+      .toBe("1 / 2 - Songsterr - 100% tempo");
   });
 
   it("includes Helix sync timing in song meta", () => {

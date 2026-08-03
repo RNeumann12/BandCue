@@ -16,6 +16,23 @@ A shared design rule across all of them: **reset-before-play is best-effort and 
 playback**, and **Stop is state-aware, never toggle-like** — repeating Stop must never restart
 playback. See the rationale in [Improvements.md](Improvements.md).
 
+### Starting from a later measure
+
+When the current song has a `startMeasure`, each adapter seeks there instead of rewinding to the
+top. Every adapter does that work **inside the count-in**, so the downbeat stays a single action,
+and every adapter reports the measure it actually reached in `lastCommand.startMeasure` so the
+host can warn when one device is about to play a different part of the song.
+
+| Adapter | How it reaches the measure | When it can't |
+| --- | --- | --- |
+| Browser extension | Clicks the staff under Songsterr's own measure number, then verifies the move against Songsterr's play cursor. | Reports the measure it really reached. A measure Songsterr does not draw (inside a repeat) falls back to the top; a measure it draws compressed has no position of its own, so the cursor lands on a neighbour and that is what gets reported. |
+| MuseScore helper | `Ctrl+F`, the measure number, `Enter` — MuseScore's Find / Go to — as prefix keys before Play. | Only if MuseScore itself can't be activated, which already fails the command. |
+| Android app | `MediaController.seekTo()` at the measure's position in time, which needs the song's **BPM and beats per measure**. | Songsterr's Android session usually advertises no seek: it plays from the top and reports measure 1, so the host warns. |
+
+Measure numbering is each player's own. That matters for songs with repeats: MuseScore counts
+written measures, while Songsterr's tab numbers the measures it draws. Set the measure by what
+the players in your band actually see.
+
 ---
 
 ## Songsterr — Browser Extension
@@ -185,6 +202,19 @@ The helper detects a MuseScore window, confirms Windows made it foreground, then
   an already-playing score from being toggled off by a Play command. `--play-mode single-key`
   restores the single-key toggle.
 - **Reset-before-play** → `^{HOME}` (Ctrl+Home) to move the cursor to the start of the score.
+- **Start at measure N** → after the reset, `^f` (`--goto-measure-key`), `^a`, the measure number
+  one digit at a time, `{ENTER}`: MuseScore's Find / Go to box takes a bare number as a measure,
+  and the play key that follows is `play-from-selection`, so the jump is what actually plays. These
+  are prefix keys, so they run during the count-in; the helper also starts its setup that much
+  earlier (one command gap per extra key, plus a cushion) so the jump never delays the Play key.
+
+  **A measure jump needs MuseScore in the foreground.** Every other command is *posted* into
+  MuseScore's message queue and needs no focus, but text typed into a dialog only reaches it
+  through the real keyboard focus — posted to the main window the digits are taken as note
+  durations and edit the score. So a measure jump is typed, and when Windows refuses to bring
+  MuseScore forward the helper starts the song **from the top** instead (posted, as usual) and
+  reports measure 1, which the host shows as a mismatch. Keep MuseScore in front on the machine
+  that plays from it, or expect that fallback.
 
 The host page shows the active MuseScore window title, whether playback is inferred playing or
 stopped from the last successful command, and a visible failure if Windows could not activate the
@@ -276,9 +306,9 @@ state instead of relying on simulated keystrokes.
 | --- | --- |
 | `GET /status` | Current bridge status, current song, and `{ fallbackMs, lastSeenAt }`. |
 | `GET /catalog` | The privacy-safe local score catalog (title + relative path). |
-| `GET /commands` | Queued/claimed BandCue commands, soonest first. Each carries `sequenceId`, `action`, `dueLocalAt`, `scheduledServerTime`, `resetBeforePlay`, and the current MuseScore song. |
+| `GET /commands` | Queued/claimed BandCue commands, soonest first. Each carries `sequenceId`, `action`, `dueLocalAt`, `scheduledServerTime`, `resetBeforePlay`, `startMeasure` (absent means "from the top"), and the current MuseScore song. |
 | `POST /commands/{sequenceId}/claim` | Claim a command (body `{ "controlPath": "musescore-plugin" }`). |
-| `POST /commands/{sequenceId}/result` | Report the outcome (`{ "status": "succeeded", "playback": "playing", "title": "…", "controlPath": "…" }`). |
+| `POST /commands/{sequenceId}/result` | Report the outcome (`{ "status": "succeeded", "playback": "playing", "title": "…", "controlPath": "…", "startMeasure": 8 }`). Report `startMeasure` for a play so the host knows the jump was honored; without it the helper reports measure 1 and the host warns. |
 | `POST /status` | Push status to the helper (`{ "ready": true, "title": "…", "playback": "playing" }`). |
 
 **Example flow** (PowerShell):

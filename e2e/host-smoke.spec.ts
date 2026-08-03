@@ -86,6 +86,72 @@ test("host connects, edits the setlist, and schedules a play", async ({ page }) 
 });
 
 /**
+ * A song that starts at a later measure. The host form is the only place the
+ * measure is entered, and the adapters read it off the play command, so this
+ * covers the whole path from the input to what a real adapter would receive.
+ */
+test("a start measure entered on the host reaches the adapters' play command", async ({ page }) => {
+  await page.goto(`/host?token=${TOKEN}`);
+  await expect(page.locator("#roomCode")).toHaveText(new RegExp(ROOM_CODE));
+
+  await page.fill("#songTitleInput", "Measure Eight Song");
+  await page.fill("#songStartMeasureInput", "8");
+  await page.click("#setlistSubmitButton");
+  await expect(page.locator("#setlistItems")).toContainText("from measure 8");
+
+  await page.locator(".setlist-item", { hasText: "Measure Eight Song" })
+    .getByRole("button", { name: "Make Current" })
+    .click();
+  await expect(page.locator("#currentSongMeta")).toContainText("from measure 8");
+
+  const adapter = await joinFakeAdapter("E2E measure adapter");
+  const commands: Array<Record<string, any>> = [];
+  adapter.on("message", (raw) => {
+    const message = JSON.parse(String(raw));
+    if (message.type === "transportCommand") {
+      commands.push(message);
+    }
+  });
+
+  try {
+    await expect(page.locator("#devices")).toContainText("E2E measure adapter");
+    await page.click("#armButton");
+    await expect(page.locator("#playButton")).toBeEnabled();
+    await page.click("#playButton");
+
+    await expect.poll(() => commands.find((command) => command.action === "play")?.currentSong?.song?.startMeasure)
+      .toBe(8);
+
+    // An adapter that had to start from the top is called out, not left to be
+    // discovered by ear.
+    adapter.send(JSON.stringify({
+      type: "adapterStatus",
+      ready: true,
+      app: "mock",
+      lastCommand: {
+        action: "play",
+        sequenceId: commands.find((command) => command.action === "play")?.sequenceId,
+        status: "succeeded",
+        at: Date.now(),
+        startMeasure: 1
+      }
+    }));
+    await expect(page.locator("#warnings")).toContainText("started from measure 1, not 8");
+
+    await page.click("#stopButton");
+    await expect
+      .poll(async () => {
+        const response = await page.request.get("/api/room");
+        const state = await response.json();
+        return state.transport.status;
+      })
+      .toBe("stopped");
+  } finally {
+    adapter.close();
+  }
+});
+
+/**
  * The two setlist-automation switches next to Arm/Play/Stop. Both songs are
  * one second long and carry no openable source, so the room's own auto-duration
  * stop ends each one and the runner has nothing to wait for a tab to load.
