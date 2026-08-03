@@ -33,7 +33,7 @@ MuseScore {
 
   title: "BandCue Bridge"
   description: "Starts and stops playback on BandCue's downbeat, from the top of the score."
-  version: "1.2"
+  version: "1.3"
   // A dialog stays open, which is what makes the plugin resident: a plain plugin
   // finishes after onRun and could not wait for a cue.
   pluginType: "dialog"
