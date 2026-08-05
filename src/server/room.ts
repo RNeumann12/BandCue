@@ -68,9 +68,12 @@ const PLAYBACK_END_SETTLE_MS = 750;
 // A connected client sends clockSync at ~1 Hz (faster during warm-up), so silence
 // for longer than this means the socket is half-open (Wi-Fi drop, laptop sleep,
 // Android Doze, killed app) even though no TCP FIN ever arrived. The periodic
-// sweep evicts such clients so the room list stays truthful and a vanished
-// transport leader still triggers the leader-disconnect Stop promptly.
+// sweep evicts such clients so the room list stays truthful. It never stops
+// playback -- see removeClient.
 const CLIENT_IDLE_TIMEOUT_MS = 12_000;
+// How long the duration-based auto-stop waits before looking again when an
+// adapter is still reporting playback past the song's expected end.
+const AUTO_STOP_RECHECK_MS = 2_000;
 const LIVENESS_SWEEP_INTERVAL_MS = 4_000;
 export const MAX_SETLIST_SONGS = 500;
 
@@ -144,30 +147,21 @@ export class RoomController {
     return client;
   }
 
+  /**
+   * Drops a client from the room. Deliberately does *not* touch the transport,
+   * even when the client that leaves is the one that started playback.
+   *
+   * Earlier versions turned a vanished leader into a room-wide Stop. In a
+   * rehearsal room that is exactly the wrong reaction: the leader is normally
+   * the host laptop, and a Wi-Fi blip or a suspended page is enough to make it
+   * vanish for a few seconds -- so a dropped socket cut the whole band off
+   * mid-song, with nobody having touched Stop. Playback now only ever ends
+   * because somebody asked for it (or because the players themselves reached
+   * the end of the song), and a host can always stop the room once it is back,
+   * whatever leaderId the run carries.
+   */
   removeClient(clientId: string): void {
     this.clients.delete(clientId);
-    if (this.transport.leaderId === clientId && this.transport.status !== "stopped") {
-      const now = this.now();
-      this.transport = {
-        status: "stopped",
-        leaderId: clientId,
-        action: "stop",
-        sequenceId: this.transport.sequenceId + 1,
-        scheduledServerTime: now,
-        stopReason: "leader-disconnect"
-      };
-      this.clearAutoStopTimer();
-      this.clearPlaybackEndTracking();
-      this.broadcastTransportCommand({
-        type: "transportCommand",
-        action: "stop",
-        leaderId: clientId,
-        sequenceId: this.transport.sequenceId,
-        scheduledServerTime: now,
-        resetBeforePlay: false,
-        currentSong: this.currentSong
-      });
-    }
     this.broadcastState();
   }
 
@@ -175,8 +169,8 @@ export class RoomController {
    * Evict clients we have not heard from within CLIENT_IDLE_TIMEOUT_MS. A live
    * client sends clockSync every second, so prolonged silence means a half-open
    * socket that never produced a `close` event. We terminate the socket (best
-   * effort) and drop the client via removeClient, which also fires the
-   * leader-disconnect Stop when the vanished client held transport.
+   * effort) and drop the client via removeClient. A running transport is left
+   * alone: a device falling off the Wi-Fi is not a reason to stop the band.
    */
   sweepIdleClients(now = this.now()): void {
     const staleIds: string[] = [];
@@ -695,7 +689,12 @@ export class RoomController {
     const sequenceId = this.transport.sequenceId;
     const leaderId = this.transport.leaderId;
     const delayMs = Math.max(0, startedServerTime + durationMs - this.now());
+    this.armAutoStopTimer(sequenceId, leaderId, delayMs);
+  }
+
+  private armAutoStopTimer(sequenceId: number, leaderId: string | undefined, delayMs: number): void {
     this.autoStopTimer = setTimeout(() => {
+      this.autoStopTimer = undefined;
       if (
         this.transport.status !== "running" ||
         this.transport.action !== "play" ||
@@ -704,11 +703,32 @@ export class RoomController {
         return;
       }
 
-      const now = this.now();
-      if (this.stopRoomAutomatically("auto-duration", leaderId, now)) {
+      // A song length is an estimate -- adapter-reported, tempo-scaled, or typed
+      // in by hand -- while an adapter saying "playing" is an observation. When
+      // the two disagree the observation wins: a song that runs longer than the
+      // room thought must not have the room declare it over, because the host's
+      // auto-advance would then load the next song out from under a band that is
+      // still playing. Check again shortly instead; the real end arrives either
+      // through auto-playback-ended or through a later pass of this timer.
+      if (this.hasAdapterReportingPlayback()) {
+        this.armAutoStopTimer(sequenceId, leaderId, AUTO_STOP_RECHECK_MS);
+        return;
+      }
+
+      if (this.stopRoomAutomatically("auto-duration", leaderId, this.now())) {
         this.broadcastState();
       }
     }, delayMs);
+  }
+
+  /** Whether any connected adapter currently reports that it is still playing. */
+  private hasAdapterReportingPlayback(): boolean {
+    for (const client of this.clients.values()) {
+      if (client.status?.playback === "playing") {
+        return true;
+      }
+    }
+    return false;
   }
 
   private tempoReadinessError(): string | undefined {

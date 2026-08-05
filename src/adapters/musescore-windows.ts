@@ -63,7 +63,8 @@ import type {
   AdapterTempoStatus,
   SetlistSong,
   ServerMessage,
-  TransportAction
+  TransportAction,
+  TransportStatus
 } from "../shared/protocol.js";
 
 interface Args {
@@ -251,6 +252,9 @@ let triggerResolvedAt: number | undefined;
 // the next command the trigger handles itself.
 let warmPathDegraded = false;
 let lastArmed = false;
+// The room's own view of the transport, so bridge preparation can tell "nothing
+// is playing" from "a song is running" -- see prepareBridgeStartMeasure.
+let lastTransportStatus: TransportStatus = "stopped";
 let cueHotkeyListener: CueHotkeyListener | undefined;
 const trigger = new MuseScoreTrigger(
   {
@@ -411,15 +415,25 @@ async function connect(): Promise<void> {
       // window up now, so the count-in does not pay for the process scan. This
       // deliberately stops short of activating it: the cue is a keystroke, and
       // taking the foreground here would take the cue away from the host page.
+      lastTransportStatus = message.transport?.status ?? lastTransportStatus;
       const armed = Boolean(message.safety?.armed);
       if (armed && !lastArmed) {
         void resolveTriggerTarget();
+        // Arming is the room's "a Play is coming": the last quiet moment to send
+        // an attached plugin to the song's start measure, so the count-in has
+        // nothing left to seek.
+        prepareBridgeStartMeasure("the room armed");
       }
       lastArmed = armed;
       if (songChanged) {
         // A different score means a different window to aim at.
         triggerResolvedAt = undefined;
-        broadcastBridgeSocket({ type: "song", currentSong });
+        broadcastBridgeSocket({
+          type: "song",
+          startMeasure: startMeasureForSong(currentSong),
+          currentSong
+        });
+        prepareBridgeStartMeasure("the song changed");
         void reportMuseScoreStatus();
       }
       return;
@@ -1342,6 +1356,11 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     controlPath: "local-score-catalog",
     at: Date.now()
   });
+  if (opened.opened) {
+    // Normally the reopened score brings a fresh plugin, which gets the start
+    // measure with its `hello`. This covers a plugin that survived the retire.
+    prepareBridgeStartMeasure("the score was opened");
+  }
 }
 
 function applyBridgeCommandResult(
@@ -1699,8 +1718,11 @@ function attachBridgeSocket(server: HttpServer): void {
     sendBridgeSocket(socket, {
       type: "hello",
       fallbackMs: args.bridgeFallbackMs,
+      startMeasure: startMeasureForSong(currentSong),
       currentSong
     });
+    // A plugin that just attached has its cursor wherever MuseScore left it.
+    prepareBridgeStartMeasure("the bridge connected");
 
     socket.on("message", (raw) => {
       bridgeLastSeenAt = Date.now();
@@ -1753,6 +1775,39 @@ function broadcastBridgeSocket(message: unknown): void {
   for (const socket of bridgeSockets) {
     sendBridgeSocket(socket, message);
   }
+}
+
+/**
+ * Asks an attached plugin to put the cursor where this song's Play should start,
+ * now rather than during the count-in.
+ *
+ * Seeking is the slowest thing the plugin does (it walks the score measure by
+ * measure) and it is the one part of a Play that does not have to happen on the
+ * beat. Doing it whenever the room's intent is already known -- the score is
+ * open, the song changed, the host armed -- means the downbeat itself is only
+ * ever "start playing", and a jump that goes wrong is visible on screen while
+ * there is still time to do something about it.
+ */
+function prepareBridgeStartMeasure(reason: string): void {
+  if (!bridgeSockets.size) {
+    return;
+  }
+
+  // Never mid-run: moving the selection republishes the score view, and a band
+  // reading from that screen should not have it jump back to bar 10 because the
+  // host was lining up the next song. The plugin cannot make this call itself --
+  // it sees playback start but never sees a song end on its own -- so the
+  // adapter, which follows the room's transport state, makes it here.
+  if (lastTransportStatus !== "stopped") {
+    return;
+  }
+
+  broadcastBridgeSocket({
+    type: "prepare",
+    startMeasure: startMeasureForSong(currentSong),
+    reason,
+    currentSong
+  });
 }
 
 /** Shared by both bridge transports; `undefined` means accepted. */

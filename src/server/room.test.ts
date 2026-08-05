@@ -1165,6 +1165,68 @@ describe("RoomController", () => {
     }
   });
 
+  it("does not auto-stop on duration while an adapter still reports playing", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1000);
+      const room = new RoomController("ABC123", "http://room", "http://host", 100);
+      const host = room.addClient(undefined, {
+        type: "clientHello",
+        deviceName: "Host",
+        role: "host",
+        capabilities: []
+      }, 1000);
+      const adapter = room.addClient(fakeSocket([]), {
+        type: "clientHello",
+        deviceName: "Songsterr",
+        role: "desktop-adapter",
+        capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+      }, 1000);
+
+      room.handleMessage(host.id, {
+        type: "currentSongUpdate",
+        index: 1,
+        total: 1,
+        updatedAt: 1000,
+        song: {
+          id: "song-1",
+          // The duration is wrong -- the real song runs longer.
+          title: "Underestimated Song",
+          sourceType: "songsterr",
+          durationMs: 2_000,
+          durationSource: "manual"
+        }
+      }, 1000);
+      room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1000 }, 1000);
+      room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1000 }, 1000);
+
+      await vi.advanceTimersByTimeAsync(100);
+      room.handleMessage(adapter.id, {
+        type: "adapterStatus",
+        app: "songsterr",
+        ready: true,
+        playback: "playing"
+      }, 1100);
+
+      // Well past the claimed duration: the adapter is still playing, so the room
+      // stays running rather than declaring the song over.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(room.getState(11_100).transport.status).toBe("running");
+
+      // Once playback really ends, the duration timer's next pass finishes the run.
+      room.handleMessage(adapter.id, {
+        type: "adapterStatus",
+        app: "songsterr",
+        ready: true,
+        playback: "stopped"
+      }, 11_100);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(room.getState(13_100).transport.status).toBe("stopped");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("auto-stops the room when observed playback clients all report stopped", async () => {
     vi.useFakeTimers();
     try {
@@ -1468,7 +1530,7 @@ describe("RoomController", () => {
     });
   });
 
-  it("broadcasts a stop command when the active leader disconnects", () => {
+  it("keeps the band playing when the active leader disconnects", () => {
     const adapterMessages: string[] = [];
     const adapterSocket = fakeSocket(adapterMessages);
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
@@ -1501,12 +1563,52 @@ describe("RoomController", () => {
     const stopCommand = adapterMessages
       .map((message) => JSON.parse(message))
       .find((message) => message.type === "transportCommand" && message.action === "stop");
-    expect(stopCommand).toMatchObject({
-      action: "stop",
-      leaderId: host.id,
-      sequenceId: 2
+    expect(stopCommand).toBeUndefined();
+    expect(room.getState(1300).transport).toMatchObject({
+      status: "scheduled",
+      action: "play",
+      leaderId: host.id
     });
-    expect(room.getState(1300).transport.status).toBe("stopped");
+  });
+
+  it("lets a reconnected host stop a run whose leader is gone", () => {
+    const adapterMessages: string[] = [];
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 1000);
+    room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello",
+      deviceName: "MuseScore",
+      role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1100 }, 1100);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1200 }, 1200);
+    room.removeClient(host.id);
+
+    // The same laptop comes back as a new client, and can still call the room off.
+    const rejoined = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host",
+      role: "host",
+      capabilities: []
+    }, 5000);
+    room.handleMessage(rejoined.id, { type: "transportRequest", action: "stop", requestedAt: 5100 }, 5100);
+
+    expect(room.getState(5200).transport).toMatchObject({
+      status: "stopped",
+      stopReason: "manual",
+      leaderId: rejoined.id
+    });
+    const stopCommand = adapterMessages
+      .map((message) => JSON.parse(message))
+      .find((message) => message.type === "transportCommand" && message.action === "stop");
+    expect(stopCommand).toMatchObject({ action: "stop" });
   });
 
   it("evicts clients that have gone silent past the idle timeout", () => {
@@ -1536,7 +1638,7 @@ describe("RoomController", () => {
     expect(ids).not.toContain(stale.id);
   });
 
-  it("stops transport when the silent client was the leader", () => {
+  it("keeps transport running when the silent client was the leader", () => {
     const adapterMessages: string[] = [];
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const host = room.addClient(undefined, {
@@ -1561,8 +1663,9 @@ describe("RoomController", () => {
     const stopCommand = adapterMessages
       .map((message) => JSON.parse(message))
       .find((message) => message.type === "transportCommand" && message.action === "stop");
-    expect(stopCommand).toMatchObject({ action: "stop", leaderId: host.id });
-    expect(room.getState(20_000).transport.status).toBe("stopped");
+    expect(stopCommand).toBeUndefined();
+    expect(room.getState(20_000).transport.status).not.toBe("stopped");
+    expect(room.getState(20_000).clients.map((client) => client.id)).not.toContain(host.id);
   });
 });
 

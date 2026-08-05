@@ -53,6 +53,26 @@ describe("cross-platform project metadata", () => {
     expect(plugin).toContain("root.parent.Window.window");
     expect(plugin).toContain("pluginWindow.showMinimized()");
   });
+
+  // An attached plugin claims the play command, which suppresses the keyboard
+  // path that knows how to drive MuseScore's Find / Go to. If the plugin ever
+  // stops handling start measures itself, a bridged MuseScore silently plays
+  // every song from the top again.
+  it("keeps the MuseScore bridge in charge of the song's start measure", () => {
+    const plugin = read("extension/musescore/bandcue.qml");
+    const adapter = read("src/adapters/musescore-windows.ts");
+
+    expect(plugin).toContain("function selectStartPoint(measureNumber)");
+    expect(plugin).toContain("cursor.rewindToTick(measure.firstSegment.tick)");
+    // Pre-positioned ahead of the downbeat, not during the count-in.
+    expect(plugin).toContain('if (message.type === "prepare")');
+    expect(plugin).toContain("function prepareStartPoint(");
+    // And reported back, so a jump that falls short reaches the host.
+    expect(plugin).toContain("result.startMeasure = root.pendingReachedMeasure");
+
+    expect(adapter).toContain("startMeasure: command.startMeasure");
+    expect(adapter).toContain("function prepareBridgeStartMeasure(");
+  });
 });
 
 function read(relativePath: string): string {

@@ -36,7 +36,7 @@ client                                   server
 | `TransportAction` | `play` · `stop` |
 | `AdapterCommandAction` | `play` · `stop` · `open-song` |
 | `TransportStatus` | `stopped` · `scheduled` · `running` |
-| `StopReason` | `manual` · `auto-duration` · `auto-playback-ended` · `leader-disconnect` |
+| `StopReason` | `manual` · `auto-duration` · `auto-playback-ended` · `leader-disconnect` *(legacy, never emitted)* |
 | `SongSourceType` | `songsterr` · `musescore` · `other` |
 | `ControlMode` | `host-only` · `leader-stop` · `everyone-can-stop` |
 | `AdapterState` | `ready` · `not-ready` · `command-pending` · `last-command-succeeded` · `last-command-failed` |

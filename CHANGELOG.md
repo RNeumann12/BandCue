@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.6.2 - 2026-08-05
+
+### Fixed
+
+- **Playback stopped by itself, for the whole band, mid-song.** The coordinator used to turn a
+  vanished transport leader into a room-wide Stop: whoever pressed Play owned the run, and if that
+  client's socket dropped — a Wi-Fi blip on the host laptop, a suspended browser tab, or just 12 s
+  of silence caught by the liveness sweep — every device was sent a real Stop command and the band
+  cut out with nobody having touched the button. It no longer exists. A client leaving the room is
+  now only a client leaving the room; the run keeps going, and a host that comes back can still
+  stop it, whichever client id the run was started under. `leader-disconnect` stays in the protocol
+  as a reason no coordinator emits, so clients talking to an older coordinator still understand it.
+
+  The other way a song could end early was its own length. The duration-based end (which never
+  commanded a Stop, but did end the run — and with auto-advance on, loaded the next song over the
+  top of it) trusted a number that is an estimate: adapter-reported, tempo-scaled, or typed in by
+  hand. It now yields to observation — while any adapter still reports that it is playing, the room
+  looks again in 2 s instead of declaring the song over. The end of a song is still detected, from
+  the players actually stopping.
+
+- **A bridged MuseScore ignored the song's start measure.** With BandCue Bridge attached, the
+  plugin claims the play command and the keyboard path — the one that knows how to drive MuseScore's
+  Find / Go to — is deliberately suppressed. The plugin had no idea start measures existed, so it
+  did what it always did and played from the top while everyone else came in at measure 10. The
+  command now carries the measure and `selectStartPoint()` walks the measure chain to it, rewinding
+  the cursor to that measure's first segment and falling back across tracks when voice 1 of the top
+  staff rests there. It reports the measure it actually reached, so a score too short for the song
+  shows up as a host warning instead of being discovered by ear.
+
+- **The bridge's measure jump no longer waits for Play.** The adapter tells an attached plugin the
+  start measure as soon as it knows it and nothing is running — when the bridge connects, when the
+  score opens, when the current song changes, when the host arms, and after a Stop — so the cursor
+  is already parked on the right bar, visibly on screen, well before the count-in, and the downbeat
+  only has to start playback. The bridge window shows where it is parked ("Ready at measure 10").
+  A Play still re-selects, so a missed message costs nothing and a click in the score between
+  arming and Play cannot move where the song starts.
+
 ## 1.6.1 - 2026-08-03
 
 ### Fixed

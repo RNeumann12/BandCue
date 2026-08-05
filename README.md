@@ -255,9 +255,14 @@ with a measure jump land within 0–2 ms of the scheduled downbeat, the same as 
 
 Each player counts measures its own way, and each device confirms what it actually did:
 
-- **MuseScore** jumps with its own Find / Go to (Ctrl+F), so any written measure works — but the
-  measure has to be *typed*, so MuseScore must be the front window on that machine. If Windows
-  won't bring it forward, that device starts from the top and says so instead of editing the score.
+- **MuseScore with the BandCue Bridge plugin** parks its cursor on the bar as soon as it knows
+  which one — when the score opens, when you pick the song, when you press **Arm** — so you can see
+  it sitting on the right measure long before anyone presses Play. Nothing has to be typed and
+  MuseScore does not need to be the front window.
+- **MuseScore without the plugin** jumps with its own Find / Go to (Ctrl+F), so any written measure
+  works — but the measure has to be *typed*, so MuseScore must be the front window on that machine.
+  If Windows won't bring it forward, that device starts from the top and says so instead of editing
+  the score.
 - **Songsterr (browser)** clicks the bar under Songsterr's own measure number and then checks
   Songsterr's play cursor really landed there. Some measures can't be jumped to at all: Songsterr
   draws repeated measures only once, and compresses runs of empty ones, and such a measure has no

@@ -8,6 +8,17 @@ export type AdapterCommandAction = TransportAction | "open-song";
 
 export type TransportStatus = "stopped" | "scheduled" | "running";
 
+/**
+ * Why the room left the running state. `manual` is the only one that ever
+ * carries a Stop command to the devices; the two `auto-` reasons just record
+ * that the players finished on their own.
+ *
+ * `leader-disconnect` is legacy: coordinators used to stop the whole room when
+ * the client that started playback dropped off, which turned a Wi-Fi blip on
+ * the host laptop into a dead stop mid-song. No coordinator emits it any more —
+ * it stays in the union so a client talking to an older coordinator still
+ * understands what it is being told.
+ */
 export type StopReason = "manual" | "auto-duration" | "auto-playback-ended" | "leader-disconnect";
 
 export type SongSourceType = "songsterr" | "musescore" | "other";

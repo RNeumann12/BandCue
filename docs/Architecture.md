@@ -173,18 +173,24 @@ name locally and re-applies them on reconnect.
 ```
  stopped ──play accepted──► scheduled ──(scheduledServerTime reached)──► running
     ▲                                                                       │
-    └──── stop accepted / leader disconnect / automatic end detection ◄─────┘
+    └──────── stop accepted / automatic end detection ◄─────────────────────┘
 ```
 
 - **scheduled → running**: a server timer fires at `scheduledServerTime` and flips the state.
-- **Leader disconnect**: if the transport leader drops while not stopped, the server broadcasts a
-  Stop and returns to stopped.
 - **Manual stop**: an accepted Stop request returns the room to stopped with
-  `stopReason: "manual"` and broadcasts Stop to adapters.
+  `stopReason: "manual"` and broadcasts Stop to adapters. **This is the only thing that ever sends
+  a Stop command to the devices.**
+- **Leader disconnect is not a stop**: a client dropping off — including the one that started
+  playback — leaves the transport alone. Rehearsal Wi-Fi drops sockets, and cutting the whole band
+  off mid-song because a laptop blinked is worse than any state it leaves behind. A host can stop
+  the room whatever `leaderId` the run carries, so a reconnected host always has the button.
 - **Duration auto-stop**: if the current song has a known `durationMs`, the server schedules an
   auto-stop at `startedServerTime + durationMs`. This updates the room/UI state to **stopped**
   but deliberately **does not broadcast a Stop command** — clients that already auto-stopped
   shouldn't be toggled. (Stop on toggle-like players is fragile; see [Improvements.md](Improvements.md).)
+  A duration is an estimate, so it never overrules an observation: while any adapter still reports
+  `playback: "playing"`, the timer re-checks every 2 s rather than declaring the song over — which
+  otherwise let a too-short duration hand the room to the host's auto-advance mid-song.
 - **Playback auto-stop**: while running, the server tracks adapters that report `playback:
   "playing"`. Once those observed players all report `playback: "stopped"` and stay that way
   briefly, the server marks the room stopped with `stopReason: "auto-playback-ended"`, again
