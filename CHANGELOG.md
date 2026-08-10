@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.6.3 - 2026-08-10
+
+### Fixed
+
+- **The extension kept scanning the network after it had been disconnected.** Discovery's last
+  resort is a sweep of the documented rehearsal subnets — eleven of them, hosts `.1`–`.254`, about
+  2800 probes. Most of those addresses are on networks the machine is not attached to, so the
+  connection attempts leave through the default gateway and sit in the router's NAT table until
+  they expire, which a home router feels. That sweep was running far more often than anyone asked
+  for: every automatic reconnect re-ran discovery, and the storage restore at the top of the
+  service worker did too — and Chrome evicts and revives that worker constantly, once a minute from
+  the reconnect alarm alone. With the coordinator switched off, a browser nobody was touching put a
+  full LAN sweep on the network every minute, indefinitely.
+
+  The sweep is now reserved for a **Connect the user just pressed**. Automatic reconnects and
+  service-worker restarts probe only hosts that have already served a room, and skip the scan
+  entirely when there are none — so a coordinator that stays down costs a few probes per retry
+  instead of thousands. Pressing Connect still runs the full search, including the slow
+  weak-signal second pass. Scan concurrency also drops from 150 to 48 in-flight probes, since each
+  probe to a dead host is a half-open connection the router has to hold state for.
+
+  Disconnect already meant disconnected — it clears the alarm, the retry timer, and the socket, and
+  nothing reconnects until you press Connect. What was missing is that *being offline* is no longer
+  a reason to search the whole network on repeat.
+
 ## 1.6.2 - 2026-08-05
 
 ### Fixed

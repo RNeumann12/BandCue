@@ -63,6 +63,15 @@ Ordered most-likely-first (common router defaults and the Fritz!Box `192.168.178
 scan that finds the room early avoids probing hundreds of dead hosts. Clients prioritize their
 **own** subnet first when the platform exposes the local IP (`prioritizeScanSubnets`).
 
+**Only a Connect you pressed sweeps the LAN.** The full sweep is ~2800 probes, most of them aimed
+at subnets the device is not on — those SYNs leave through the default gateway and sit in the
+router's NAT table until they time out, which a consumer router notices. So the browser extension
+runs it only for a connect the user just triggered from the popup. Automatic reconnects and
+service-worker restarts (Chrome revives the worker from the reconnect alarm about once a minute)
+probe only hosts that have already served a room, and skip the scan entirely when there are none.
+A coordinator that stays down therefore costs a handful of probes per retry, not a LAN sweep per
+minute. Pressing **Connect** is always the way to get the full search back.
+
 > **Keep these in sync.** Three copies of the subnet list exist:
 > [`src/shared/room-locator.ts`](../src/shared/room-locator.ts) (canonical),
 > `extension/songsterr/background.js` (`LAN_SCAN_SUBNETS`), and
