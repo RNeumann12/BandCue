@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(npm test *)",
+      "Bash(git --no-pager diff --stat)",
+      "Bash(npx vitest *)",
+      "Bash(gh release *)"
+    ]
+  }
+}
