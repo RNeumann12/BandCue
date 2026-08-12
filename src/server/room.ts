@@ -56,6 +56,12 @@ interface RoomClient extends RoomClientSummary {
   socket?: WebSocket;
 }
 
+// The adapter converts the Windows input time with a continuously blended clock
+// offset. A healthy estimate can briefly lead the coordinator by a few
+// milliseconds, especially between sync samples. Treat that bounded skew as
+// "now"; a materially future timestamp is still rejected.
+export const EXTERNAL_HOTKEY_FUTURE_TOLERANCE_MS = 250;
+
 type ClientClock = NonNullable<RoomClientSummary["clock"]>;
 
 interface RecentClock {
@@ -284,7 +290,7 @@ export class RoomController {
     // A stale stamp cannot anchor a count-in, and reclaiming that much elapsed
     // time would start the room far too early. Mirrors HELIX_MAX_CUE_AGE_MS.
     const ageMs = now - cue.cueAtServerTime;
-    if (!(ageMs >= 0) || ageMs > HELIX_MAX_CUE_AGE_MS) {
+    if (ageMs < -EXTERNAL_HOTKEY_FUTURE_TOLERANCE_MS || ageMs > HELIX_MAX_CUE_AGE_MS) {
       this.send(client, {
         type: "error",
         message: `External hotkey ignored: its timestamp is ${Math.round(ageMs)} ms old.`
@@ -304,7 +310,9 @@ export class RoomController {
     const relayed: ExternalCue = {
       type: "externalCue",
       ...(cue.action ? { action: cue.action } : {}),
-      cueAtServerTime: cue.cueAtServerTime,
+      // Do not relay a future stamp to the host: Play returns it in a transport
+      // request, and clamping once here keeps the second hop unambiguous.
+      cueAtServerTime: Math.min(cue.cueAtServerTime, now),
       source: cue.source ?? client.deviceName
     };
     for (const host of hosts) {
