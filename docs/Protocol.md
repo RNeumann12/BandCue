@@ -181,8 +181,10 @@ authority it did not already have. The coordinator relays the action to every ho
 runs through the same handler as the matching local shortcut. Play then issues the host's ordinary
 `transportRequest` carrying the same `cueAtServerTime`, so every safety rule applies unchanged.
 
-Answered with an `error` when the stamp is in the future or older than `HELIX_MAX_CUE_AGE_MS`
-(3 s) — it could no longer anchor a count-in — or when no host is connected to act on it.
+Answered with an `error` when the stamp is more than 250 ms in the future or older than
+`HELIX_MAX_CUE_AGE_MS` (3 s) — it could no longer anchor a count-in — or when no host is connected
+to act on it. A small future lead from normal clock-sync jitter is accepted and clamped to the
+coordinator's current time before relay.
 
 ---
 

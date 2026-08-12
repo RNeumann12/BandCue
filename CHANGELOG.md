@@ -14,6 +14,9 @@
 - **The MuseScore Helix Bridge now starts with global hotkeys enabled.** The hotkey flag table is
   initialized before startup argument parsing, avoiding the `GLOBAL_HOTKEY_FLAGS` temporal-dead-zone
   `ReferenceError` that previously aborted the helper immediately.
+- **Global hotkeys no longer fail on harmless clock-sync jitter.** Adapter timestamps up to 250 ms
+  ahead of the coordinator are normalized to its current time; materially future and stale inputs
+  are still rejected.
 
 ## 1.6.3 - 2026-08-10
 

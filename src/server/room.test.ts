@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
-import { MAX_SETLIST_SONGS, RoomController } from "./room.js";
+import {
+  EXTERNAL_HOTKEY_FUTURE_TOLERANCE_MS,
+  MAX_SETLIST_SONGS,
+  RoomController
+} from "./room.js";
 
 describe("RoomController", () => {
   it("blocks non-100% play until every applicable adapter confirms tempo", () => {
@@ -1748,6 +1752,37 @@ describe("RoomController external cue", () => {
     }, 2000);
 
     expect(parsed(hostMessages, "externalCue")).toEqual([]);
+  });
+
+  it("accepts small clock-estimation lead and normalizes it to coordinator time", () => {
+    const { room, adapter, hostMessages, adapterMessages } = roomWithHostAndAdapter();
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      action: "toggle-arm",
+      cueAtServerTime: 2015
+    }, 2000);
+
+    expect(parsed(adapterMessages, "error")).toEqual([]);
+    expect(parsed(hostMessages, "externalCue")).toContainEqual({
+      type: "externalCue",
+      action: "toggle-arm",
+      cueAtServerTime: 2000,
+      source: "MuseScore laptop"
+    });
+  });
+
+  it("still rejects a timestamp beyond the clock-skew tolerance", () => {
+    const { room, adapter, hostMessages, adapterMessages } = roomWithHostAndAdapter();
+
+    room.handleMessage(adapter.id, {
+      type: "externalCue",
+      action: "stop",
+      cueAtServerTime: 2000 + EXTERNAL_HOTKEY_FUTURE_TOLERANCE_MS + 1
+    }, 2000);
+
+    expect(parsed(hostMessages, "externalCue")).toEqual([]);
+    expect(parsed(adapterMessages, "error")).toHaveLength(1);
   });
 
   it("tells the adapter when no host is there to act on the cue", () => {
