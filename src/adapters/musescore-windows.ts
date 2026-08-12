@@ -209,6 +209,21 @@ interface BridgeCommand {
   windowTitle?: string;
 }
 
+// This must be initialized before the top-level parseArgs call below. Keeping it
+// beside startup makes that ordering visible; a module-level const declared near
+// parseArgs at the end of the file is still in its temporal dead zone here.
+const GLOBAL_HOTKEY_FLAGS = new Map<string, ExternalHotkeyAction>([
+  ["--arm-hotkey", "toggle-arm"],
+  ["--cue-hotkey", "play"],
+  ["--play-hotkey", "play"],
+  ["--stop-hotkey", "stop"],
+  ["--next-song-hotkey", "next-song"],
+  ["--previous-song-hotkey", "previous-song"],
+  ["--open-song-hotkey", "open-current-song"],
+  ["--auto-advance-hotkey", "toggle-auto-advance"],
+  ["--auto-start-hotkey", "toggle-auto-start"]
+]);
+
 const args = parseArgs(process.argv.slice(2));
 if (args.room && isAbsoluteRoomUrl(args.room) && isPlaceholderRoom(args.room)) {
   console.error("The --room value still contains HOST/TOKEN placeholders.");
@@ -2299,18 +2314,6 @@ function escapePowerShellSingleQuoted(value: string): string {
 function trimSingleLine(value: string): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 220);
 }
-
-const GLOBAL_HOTKEY_FLAGS = new Map<string, ExternalHotkeyAction>([
-  ["--arm-hotkey", "toggle-arm"],
-  ["--cue-hotkey", "play"],
-  ["--play-hotkey", "play"],
-  ["--stop-hotkey", "stop"],
-  ["--next-song-hotkey", "next-song"],
-  ["--previous-song-hotkey", "previous-song"],
-  ["--open-song-hotkey", "open-current-song"],
-  ["--auto-advance-hotkey", "toggle-auto-advance"],
-  ["--auto-start-hotkey", "toggle-auto-start"]
-]);
 
 function parseArgs(raw: string[]): Args {
   const parsed: Args = {
