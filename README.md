@@ -312,14 +312,14 @@ host page focused is enough.
 
 If you would rather use MuseScore's window yourself during a song, or keep the host page on a
 phone, start that machine's adapter with **`BandCue MuseScore Bridge - Helix Cue.cmd`** instead of
-the plain Connect launcher. It claims `Ctrl+Alt+P` system-wide, so the cue arrives whatever has
-focus. Use it on exactly one machine per room — it prints `Listening for the Ctrl+Alt+P cue
-system-wide` when it has the hotkey, and says so plainly if another application already owns it. A
-cue captured this way is relayed to the host, which still issues the Play, so `host-only` control
-mode keeps working unchanged.
+the plain Connect launcher. It claims the live controls `Ctrl+Alt+A/P/S/N/B/O` (Arm, Play, Stop,
+Next, Previous, Open) system-wide, so they arrive whatever has focus. Use it on exactly one machine
+per room. The console confirms each shortcut separately and says plainly if another application
+already owns one. Captured actions are relayed to the host, so `host-only` control and the usual
+safety checks keep working unchanged.
 
-To pick a different combination, or to run it by hand, the underlying flag is `--cue-hotkey`
-(`-CueHotkey` on the launcher script) — see
+To pick different combinations, or to run it by hand, use the per-action hotkey flags
+(`-PlayHotkey`/`-CueHotkey`, `-StopHotkey`, and so on in the launcher script) — see
 [Configuration.md](docs/Configuration.md#external-cue-helix-and-other-pedals).
 
 The count-in is measured **from the Helix's cue**, not from when the keystroke finished reaching

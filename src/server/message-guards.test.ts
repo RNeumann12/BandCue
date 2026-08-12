@@ -60,12 +60,24 @@ describe("server message guards", () => {
 
     expect(sanitizeClientMessage({
       type: "externalCue",
+      action: "next-song",
       cueAtServerTime: 1950,
       source: "ctrl+alt+p on MASTASURFACE"
     })).toEqual({
       type: "externalCue",
+      action: "next-song",
       cueAtServerTime: 1950,
       source: "ctrl+alt+p on MASTASURFACE"
+    });
+
+    // Play-only adapters from before multi-action hotkeys omitted the action.
+    expect(sanitizeClientMessage({
+      type: "externalCue",
+      cueAtServerTime: 1950
+    })).toEqual({
+      type: "externalCue",
+      cueAtServerTime: 1950,
+      source: undefined
     });
 
     // Without a usable instant there is nothing to anchor a count-in to.
@@ -73,6 +85,11 @@ describe("server message guards", () => {
     expect(sanitizeClientMessage({
       type: "externalCue",
       cueAtServerTime: "soon"
+    })).toBeUndefined();
+    expect(sanitizeClientMessage({
+      type: "externalCue",
+      action: "delete-setlist",
+      cueAtServerTime: 1950
     })).toBeUndefined();
 
     expect(sanitizeClientMessage({

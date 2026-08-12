@@ -397,11 +397,22 @@ function handleHostHotkey(event) {
   }
 
   event.preventDefault();
+  runHostHotkeyAction(action, undefined, event);
+}
+
+/**
+ * Runs one of the host's keyboard actions. System-wide shortcuts relayed by the
+ * MuseScore helper come through the same dispatch table as local keydown events,
+ * so focus changes cannot subtly change an action's safety or setlist behavior.
+ */
+function runHostHotkeyAction(action, cueAtServerTime, cueEvent) {
   const handler = {
     "toggle-arm": toggleArm,
     // The Helix triggers this hotkey at its cue; pass the event through so the
     // count-in is measured from the keystroke, not from when the request lands.
-    play: () => requestPlay(event),
+    play: () => cueAtServerTime === undefined
+      ? requestPlay(cueEvent)
+      : requestPlayAtCue(cueAtServerTime),
     stop: requestStop,
     "next-song": selectNextSong,
     "previous-song": selectPreviousSong,
@@ -534,13 +545,13 @@ function connect() {
       renderHelixScheduleDebug(message);
     }
 
-    // A pedal cue that an adapter claimed system-wide, relayed here because the
-    // host is the authority on starting playback. Treated exactly like the Play
-    // hotkey arriving in this window, except that the cue's instant is already in
-    // room time and does not have to be derived from a local event.
+    // A shortcut that an adapter claimed system-wide. It is relayed here because
+    // the host remains the authority for transport, safety, and setlist changes.
+    // Missing action means Play for compatibility with older adapters.
     if (message.type === "externalCue") {
-      setText(elements.subline, `Cue from ${message.source || "an adapter"}.`);
-      requestPlayAtCue(message.cueAtServerTime);
+      const action = message.action || "play";
+      setText(elements.subline, `${action} hotkey from ${message.source || "an adapter"}.`);
+      runHostHotkeyAction(action, message.cueAtServerTime);
     }
   });
 

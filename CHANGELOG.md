@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **MuseScore's Windows bridge can claim the full live-control hotkey set globally.** Arm, Play,
+  Stop, Next, Previous, and Open now work while MuseScore has focus; auto-load and auto-start are
+  available as opt-in global shortcuts. All captured actions are still relayed to the host, so the
+  bridge gains no transport or setlist authority and host-only safety behavior is unchanged.
+
 ## 1.6.3 - 2026-08-10
 
 ### Fixed

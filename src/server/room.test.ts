@@ -1711,16 +1711,18 @@ describe("RoomController external cue", () => {
     ]);
   });
 
-  it("keeps the adapter's own label when it supplies one", () => {
+  it("keeps the adapter's action and label when it supplies them", () => {
     const { room, adapter, hostMessages } = roomWithHostAndAdapter();
 
     room.handleMessage(adapter.id, {
       type: "externalCue",
+      action: "stop",
       cueAtServerTime: 1950,
       source: "ctrl+alt+p on MASTASURFACE"
     }, 2000);
 
     expect(parsed(hostMessages, "externalCue")[0]).toMatchObject({
+      action: "stop",
       source: "ctrl+alt+p on MASTASURFACE"
     });
   });

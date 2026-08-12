@@ -410,9 +410,10 @@ verified against a real MuseScore 4 window while another application held the fo
 translated from their SendKeys spelling by `parseSendKeysToken`, and if any key in a sequence cannot
 be expressed that way the whole sequence falls back to `SendKeys` rather than being half-posted.
 
-Because focus no longer matters, [`--cue-hotkey`](Configuration.md#external-cue-helix-and-other-pedals)
-is now optional rather than required — it remains useful when you want to *use* MuseScore's window
-yourself, or keep the host page on a phone, without the cue going missing.
+Because focus no longer matters, the [system-wide hotkey options](Configuration.md#external-cue-helix-and-other-pedals)
+are optional rather than required. They remain useful when you want to *use* MuseScore's window
+yourself, or keep the host page on a phone. The listener can claim Arm, Play, Stop, Next, Previous,
+Open, and the two setlist-automation toggles in one resident process.
 
 When a command does fall back, the adapter says so on its console and immediately reports the
 fallback's much larger `requiredLeadMs` to the room, so a degraded path can never quietly sit

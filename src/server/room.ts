@@ -275,10 +275,10 @@ export class RoomController {
   }
 
   /**
-   * Relays a pedal cue captured by an adapter to the hosts, which then make their
-   * own ordinary play request. The cue never starts playback by itself: who may
-   * start it is a room policy, and an adapter that claimed a hotkey has not
-   * acquired any authority it did not already have.
+   * Relays a system-wide shortcut captured by an adapter to the hosts. The input
+   * never acts by itself: an adapter that claimed a hotkey has not acquired any
+   * authority it did not already have. In particular, Play is still turned into
+   * an ordinary request by the host, so room policy remains in force.
    */
   private handleExternalCue(client: RoomClientSummary, cue: ExternalCue, now: number): void {
     // A stale stamp cannot anchor a count-in, and reclaiming that much elapsed
@@ -287,7 +287,7 @@ export class RoomController {
     if (!(ageMs >= 0) || ageMs > HELIX_MAX_CUE_AGE_MS) {
       this.send(client, {
         type: "error",
-        message: `External cue ignored: its timestamp is ${Math.round(ageMs)} ms old.`
+        message: `External hotkey ignored: its timestamp is ${Math.round(ageMs)} ms old.`
       });
       return;
     }
@@ -296,13 +296,14 @@ export class RoomController {
     if (hosts.length === 0) {
       this.send(client, {
         type: "error",
-        message: "External cue ignored: no host is connected to act on it."
+        message: "External hotkey ignored: no host is connected to act on it."
       });
       return;
     }
 
     const relayed: ExternalCue = {
       type: "externalCue",
+      ...(cue.action ? { action: cue.action } : {}),
       cueAtServerTime: cue.cueAtServerTime,
       source: cue.source ?? client.deviceName
     };

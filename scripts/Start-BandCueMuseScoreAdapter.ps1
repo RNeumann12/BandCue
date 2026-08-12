@@ -1,11 +1,17 @@
 param(
   [string]$Room,
   [string]$Name = "MuseScore ($env:COMPUTERNAME)",
-  # Claims the cue combination system-wide on this machine, for the PC the Helix
-  # (or any other pedal sending keystrokes) is plugged into. Without it the cue
-  # only arrives while the host page has keyboard focus -- which MuseScore needs
-  # for itself. Use on exactly one machine per room.
+  # Claims host shortcuts system-wide on this machine. CueHotkey remains the
+  # backward-compatible name for Play; the others mirror the host page actions.
+  [Alias("PlayHotkey")]
   [string]$CueHotkey,
+  [string]$ArmHotkey,
+  [string]$StopHotkey,
+  [string]$NextSongHotkey,
+  [string]$PreviousSongHotkey,
+  [string]$OpenSongHotkey,
+  [string]$AutoAdvanceHotkey,
+  [string]$AutoStartHotkey,
   # Opens the localhost bridge on this port so the BandCue MuseScore plugin can
   # attach. Without it the plugin has nothing to connect to, and playback falls
   # back to keystrokes -- which cannot reset the playhead to the start of a score.
@@ -70,6 +76,27 @@ if ($Room) {
 if ($CueHotkey) {
   $npmArgs += @("--cue-hotkey", $CueHotkey)
 }
+if ($ArmHotkey) {
+  $npmArgs += @("--arm-hotkey", $ArmHotkey)
+}
+if ($StopHotkey) {
+  $npmArgs += @("--stop-hotkey", $StopHotkey)
+}
+if ($NextSongHotkey) {
+  $npmArgs += @("--next-song-hotkey", $NextSongHotkey)
+}
+if ($PreviousSongHotkey) {
+  $npmArgs += @("--previous-song-hotkey", $PreviousSongHotkey)
+}
+if ($OpenSongHotkey) {
+  $npmArgs += @("--open-song-hotkey", $OpenSongHotkey)
+}
+if ($AutoAdvanceHotkey) {
+  $npmArgs += @("--auto-advance-hotkey", $AutoAdvanceHotkey)
+}
+if ($AutoStartHotkey) {
+  $npmArgs += @("--auto-start-hotkey", $AutoStartHotkey)
+}
 if ($BridgePort -gt 0) {
   $npmArgs += @("--bridge-port", "$BridgePort")
 }
@@ -81,8 +108,8 @@ if ($Room) {
   Write-Host "Searching this network for a running BandCue room, connecting as '$Name'..." -ForegroundColor Cyan
   Write-Host "(Pass -Room <code|host:port|URL> to skip discovery and target a specific host.)" -ForegroundColor DarkGray
 }
-if ($CueHotkey) {
-  Write-Host "Claiming '$CueHotkey' system-wide as this room's cue, so it reaches BandCue whatever window has focus." -ForegroundColor Cyan
+if ($CueHotkey -or $ArmHotkey -or $StopHotkey -or $NextSongHotkey -or $PreviousSongHotkey -or $OpenSongHotkey -or $AutoAdvanceHotkey -or $AutoStartHotkey) {
+  Write-Host "Claiming configured BandCue shortcuts system-wide, so they work whatever window has focus." -ForegroundColor Cyan
 }
 if ($BridgePort -gt 0) {
   Write-Host "Bridge open on 127.0.0.1:$BridgePort - enable the 'BandCue Bridge' plugin in MuseScore and leave its window open." -ForegroundColor Cyan

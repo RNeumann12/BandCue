@@ -8,6 +8,7 @@ import type {
   ClientMessage,
   ClientRole,
   ControlMode,
+  ExternalHotkeyAction,
   TransportAction
 } from "../shared/protocol.js";
 
@@ -17,6 +18,16 @@ const CLIENT_ROLES = new Set<ClientRole>(["host", "desktop-adapter", "companion"
 const APP_TYPES = new Set<AdapterCapability["app"]>(["musescore", "songsterr", "mock"]);
 const CONTROL_MODES = new Set<ControlMode>(["host-only", "leader-stop", "everyone-can-stop"]);
 const TRANSPORT_ACTIONS = new Set<TransportAction>(["play", "stop"]);
+const EXTERNAL_HOTKEY_ACTIONS = new Set<ExternalHotkeyAction>([
+  "toggle-arm",
+  "play",
+  "stop",
+  "next-song",
+  "previous-song",
+  "open-current-song",
+  "toggle-auto-advance",
+  "toggle-auto-start"
+]);
 const ADAPTER_STATES = new Set<NonNullable<AdapterStatus["state"]>>([
   "ready",
   "not-ready",
@@ -141,13 +152,18 @@ export function sanitizeClientMessage(value: unknown): ClientMessage | undefined
     case "externalCue":
       // Without a usable cue instant there is nothing to anchor a count-in to,
       // and relaying it would just be a play request in disguise.
-      return isFiniteNumber(value.cueAtServerTime)
-        ? {
-            type: "externalCue",
-            cueAtServerTime: value.cueAtServerTime,
-            source: typeof value.source === "string" ? value.source.slice(0, 120) : undefined
-          }
-        : undefined;
+      if (
+        !isFiniteNumber(value.cueAtServerTime) ||
+        value.action !== undefined && !EXTERNAL_HOTKEY_ACTIONS.has(value.action as ExternalHotkeyAction)
+      ) {
+        return undefined;
+      }
+      return {
+        type: "externalCue",
+        ...(value.action ? { action: value.action as ExternalHotkeyAction } : {}),
+        cueAtServerTime: value.cueAtServerTime,
+        source: typeof value.source === "string" ? value.source.slice(0, 120) : undefined
+      };
     default:
       return undefined;
   }
