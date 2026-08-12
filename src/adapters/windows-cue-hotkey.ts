@@ -1,15 +1,15 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ExternalHotkeyAction } from "../shared/protocol.js";
 
 /**
- * A system-wide hotkey listener for an external cue (a Helix sending BandCue's
- * Play shortcut over USB).
+ * A system-wide hotkey listener for host controls sent from a pedal or keyboard.
  *
  * The host page can only see that keystroke while the browser holds the keyboard
  * focus -- and on a machine that also runs the MuseScore adapter, that focus is
  * exactly what MuseScore needs in order to be driven by keystrokes. The two
- * requirements cannot both hold, and the cue is the one that must never be
- * missed. `RegisterHotKey` takes the combination system-wide, so the cue arrives
- * whatever has focus, and MuseScore is free to keep it.
+ * requirements cannot both hold, and the controls must not be missed.
+ * `RegisterHotKey` takes the combinations system-wide, so they arrive whatever
+ * has focus, and MuseScore is free to keep it.
  *
  * The timestamp comes from the message's own `time` (the tick count when Windows
  * generated the input), not from when this process got round to handling it, so
@@ -92,7 +92,24 @@ function virtualKeyFor(key: string): number | undefined {
   return undefined;
 }
 
-export function buildCueHotkeyScript(hotkey: CueHotkey): string {
+export interface GlobalHotkeyBinding {
+  action: ExternalHotkeyAction;
+  hotkey: CueHotkey;
+}
+
+export function buildGlobalHotkeyScript(bindings: GlobalHotkeyBinding[]): string {
+  const registrations = bindings.map(({ action, hotkey }, index) => {
+    const id = index + 1;
+    return `
+if ([BandCueHotKey]::RegisterHotKey([IntPtr]::Zero, ${id}, ${hotkey.modifiers}, ${hotkey.virtualKey})) {
+  $actions[${id}] = '${action}'
+  [Console]::Out.WriteLine('{"type":"ready","action":"${action}"}')
+} else {
+  [Console]::Out.WriteLine('{"type":"error","action":"${action}","detail":"registration-failed"}')
+}
+[Console]::Out.Flush()`;
+  }).join("\n");
+
   return `
 Add-Type @"
 using System;
@@ -108,18 +125,18 @@ public static class BandCueHotKey {
 }
 "@
 
-if (-not [BandCueHotKey]::RegisterHotKey([IntPtr]::Zero, 1, ${hotkey.modifiers}, ${hotkey.virtualKey})) {
-  [Console]::Out.WriteLine('{"type":"error","detail":"registration-failed"}')
-  [Console]::Out.Flush()
+$actions = @{}
+${registrations}
+if ($actions.Count -eq 0) {
   exit 1
 }
-[Console]::Out.WriteLine('{"type":"ready"}')
-[Console]::Out.Flush()
 
 $msg = New-Object BandCueHotKey+MSG
 while ([BandCueHotKey]::GetMessage([ref]$msg, [IntPtr]::Zero, 0, 0) -gt 0) {
   # WM_HOTKEY
   if ($msg.message -eq 0x0312) {
+    $action = $actions[[int]$msg.wParam]
+    if (-not $action) { continue }
     # How long ago Windows generated the input, from the message's own tick
     # stamp. Tick counts are unsigned 32-bit and wrap; a wrapped or otherwise
     # implausible difference is reported as 0 rather than as a cue from the past.
@@ -127,29 +144,29 @@ while ([BandCueHotKey]::GetMessage([ref]$msg, [IntPtr]::Zero, 0, 0) -gt 0) {
     $ageMs = $nowTicks - [int64]$msg.time
     if ($ageMs -lt 0 -or $ageMs -gt 3000) { $ageMs = 0 }
     $cueAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $ageMs
-    [Console]::Out.WriteLine("{""type"":""cue"",""atLocal"":$cueAtLocal,""ageMs"":$ageMs}")
+    [Console]::Out.WriteLine("{""type"":""hotkey"",""action"":""$action"",""atLocal"":$cueAtLocal,""ageMs"":$ageMs}")
     [Console]::Out.Flush()
   }
 }
 `.trim();
 }
 
-export interface CueHotkeyEvents {
-  onCue: (cueAtLocalMs: number, ageMs: number) => void;
-  onReady?: (hotkey: CueHotkey) => void;
-  onError?: (detail: string) => void;
+export interface GlobalHotkeyEvents {
+  onHotkey: (binding: GlobalHotkeyBinding, inputAtLocalMs: number, ageMs: number) => void;
+  onReady?: (binding: GlobalHotkeyBinding) => void;
+  onError?: (binding: GlobalHotkeyBinding | undefined, detail: string) => void;
 }
 
 /** Owns the listener process and restarts it if it dies. */
-export class CueHotkeyListener {
+export class GlobalHotkeyListener {
   private child?: ChildProcessWithoutNullStreams;
   private stdoutBuffer = "";
   private restartTimer?: NodeJS.Timeout;
   private stopped = false;
 
   constructor(
-    private readonly hotkey: CueHotkey,
-    private readonly events: CueHotkeyEvents,
+    private readonly bindings: GlobalHotkeyBinding[],
+    private readonly events: GlobalHotkeyEvents,
     // Another process already owning the combination is a configuration problem,
     // not a transient one, so retries are slow enough to stay out of the way.
     private readonly restartDelayMs = 10_000,
@@ -163,7 +180,7 @@ export class CueHotkeyListener {
     }
 
     try {
-      const child = this.launch(buildCueHotkeyScript(this.hotkey));
+      const child = this.launch(buildGlobalHotkeyScript(this.bindings));
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => this.consumeStdout(chunk));
       child.on("error", (error) => this.handleExit(error.message));
@@ -201,23 +218,30 @@ export class CueHotkeyListener {
   }
 
   private handleLine(line: string): void {
-    let parsed: { type?: string; atLocal?: number; ageMs?: number; detail?: string } | undefined;
+    let parsed: {
+      type?: string;
+      action?: ExternalHotkeyAction;
+      atLocal?: number;
+      ageMs?: number;
+      detail?: string;
+    } | undefined;
     try {
       parsed = JSON.parse(line) as typeof parsed;
     } catch {
       return;
     }
 
-    if (parsed?.type === "cue" && Number.isFinite(parsed.atLocal)) {
-      this.events.onCue(parsed.atLocal as number, Number(parsed.ageMs ?? 0));
+    const binding = this.bindings.find((candidate) => candidate.action === parsed?.action);
+    if (parsed?.type === "hotkey" && binding && Number.isFinite(parsed.atLocal)) {
+      this.events.onHotkey(binding, parsed.atLocal as number, Number(parsed.ageMs ?? 0));
       return;
     }
-    if (parsed?.type === "ready") {
-      this.events.onReady?.(this.hotkey);
+    if (parsed?.type === "ready" && binding) {
+      this.events.onReady?.(binding);
       return;
     }
     if (parsed?.type === "error") {
-      this.events.onError?.(parsed.detail ?? "unknown");
+      this.events.onError?.(binding, parsed.detail ?? "unknown");
     }
   }
 
@@ -227,7 +251,7 @@ export class CueHotkeyListener {
     if (this.stopped || this.restartTimer) {
       return;
     }
-    this.events.onError?.(detail);
+    this.events.onError?.(undefined, detail);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
       this.start();

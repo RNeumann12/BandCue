@@ -32,20 +32,22 @@ MuseScore {
   id: root
 
   title: "BandCue Bridge"
-  description: "Starts and stops playback on BandCue's downbeat, from the top of the score."
-  version: "1.2"
+  description: "Starts and stops playback on BandCue's downbeat, from the top of the score or a chosen measure."
+  version: "1.3"
   // A dialog stays open, which is what makes the plugin resident: a plain plugin
   // finishes after onRun and could not wait for a cue.
   pluginType: "dialog"
   requiresScore: false
   implicitWidth: 320
-  implicitHeight: 148
+  implicitHeight: 172
 
   property int bridgePort: 4731
   property int socketId: -1
   property bool connected: false
   property string statusLine: "Not connected"
   property string lastCommandLine: ""
+  /** Where the cursor is parked for the next Play, shown next to the status. */
+  property string cursorLine: ""
 
   // The downbeat currently waiting to fire, in this machine's clock. The adapter
   // and MuseScore run on the same machine, so its dueLocalAt needs no conversion.
@@ -53,11 +55,22 @@ MuseScore {
   property string pendingAction: ""
   property bool pendingReset: false
   property double pendingDueLocalAt: 0
+  // Where this play should start, 1-based. 0 means the top of the score.
+  property int pendingStartMeasure: 0
+  // Where the selection actually landed, so the host can warn when a score is
+  // too short for the song's start measure instead of quietly playing bar 1.
+  property int pendingReachedMeasure: 0
+  // The current song's start measure (0 = top), and where the cursor is already
+  // parked for it. Held between commands so the walk to the measure can happen
+  // when the song is picked rather than inside the count-in.
+  property int songStartMeasure: 0
+  property int preparedMeasure: 0
   property int requestedTempoPercent: 100
   property int appliedTempoPercent: 100
   property string tempoState: "applied"
   property string tempoDetail: "100% tempo"
   property int minimizeAttempts: 0
+  property int minimizeConfirmations: 0
 
   PlaybackToolBarModel {
     id: playbackModel
@@ -68,9 +81,20 @@ MuseScore {
   readonly property int prepareLeadMs: 250
 
   onRun: {
-    playbackModel.load()
+    // Ordered so one failure cannot take the others down with it. Loading the
+    // playback model is the only step that touches a MuseScore internal model,
+    // and a build where that type moved must still get cues and still get out
+    // of the way of the score.
+    try {
+      playbackModel.load()
+    } catch (error) {
+      root.tempoState = "unsupported"
+      root.tempoDetail = "MuseScore Bridge could not load the playback model: " + error
+      root.log("playback model unavailable: " + error)
+    }
     root.connect()
     root.minimizeAttempts = 0
+    root.minimizeConfirmations = 0
     minimizeTimer.restart()
   }
 
@@ -139,11 +163,20 @@ MuseScore {
     if (message.type === "hello") {
       root.statusLine = "Connected to BandCue"
       root.applyTempo(message.currentSong)
+      // Recorded, not acted on: the `prepare` that follows is the one that knows
+      // whether the room is in a state where moving the cursor is welcome.
+      root.noteStartMeasure(message)
       return
     }
 
     if (message.type === "song") {
       root.applyTempo(message.currentSong)
+      root.noteStartMeasure(message)
+      return
+    }
+
+    if (message.type === "prepare") {
+      root.prepareStartPoint(message, message.reason)
       return
     }
 
@@ -179,6 +212,10 @@ MuseScore {
     root.pendingAction = message.action
     root.pendingReset = message.resetBeforePlay === true
     root.pendingDueLocalAt = message.dueLocalAt
+    // The adapter's sanitized value wins; currentSong is the fallback for an
+    // older adapter that does not put startMeasure on the socket payload.
+    root.pendingStartMeasure = root.requestedStartMeasure(message)
+    root.pendingReachedMeasure = 0
 
     // Claim it so the adapter does not also fire its keyboard fallback.
     root.send({ type: "claim", sequenceId: message.sequenceId, controlPath: "musescore-plugin" })
@@ -205,10 +242,15 @@ MuseScore {
       return
     }
 
-    // Put the selection on the first note now, during the count-in, so the beat
-    // itself only has to start playback.
+    // Put the selection on the starting note now, during the count-in, so the
+    // beat itself only has to start playback. Usually the cursor is already
+    // there -- the room sends a `prepare` as soon as it knows the measure, well
+    // before any count-in -- and this is a re-check; it runs anyway so a Play is
+    // never at the mercy of a prepare that did not arrive, and so a click in the
+    // score between arming and Play cannot move where the song starts.
     if (root.pendingReset) {
-      root.selectScoreStart()
+      root.pendingReachedMeasure = root.selectStartPoint(root.pendingStartMeasure)
+      root.describeStartPoint(root.pendingStartMeasure, root.pendingReachedMeasure)
     }
 
     var waitMs = remainingMs
@@ -221,20 +263,28 @@ MuseScore {
   }
 
   // A dialog plugin must remain open to receive cues, but it should not cover
-  // the score. MuseScore exposes the native dialog through this attached Window
-  // property. Retry briefly because the wrapper is created just after onRun.
-  function minimizeBridgeWindow() {
-    root.minimizeAttempts += 1
+  // the score.
+  //
+  // `Window.window` is attached to the *item*, and MuseScore only puts the
+  // plugin item into its dialog after onRun -- so this returns null for the
+  // first few ticks no matter which build is running. root.parent is tried as
+  // well because MuseScore has wrapped the plugin item differently across 4.x.
+  function bridgeWindow() {
     try {
-      var pluginWindow = root.parent.Window.window
-      if (pluginWindow) {
-        pluginWindow.showMinimized()
-        return true
+      if (root.Window.window) {
+        return root.Window.window
       }
     } catch (error) {
-      root.log("bridge window not ready to minimize: " + error)
+      // Attached property unavailable on this build; the parent lookup may work.
     }
-    return false
+    try {
+      if (root.parent && root.parent.Window.window) {
+        return root.parent.Window.window
+      }
+    } catch (error) {
+      root.log("bridge window not reachable yet: " + error)
+    }
+    return null
   }
 
   function applyTempo(song) {
@@ -259,30 +309,174 @@ MuseScore {
   }
 
   /**
-   * Moves the selection to the score's first note or rest.
+   * Notes where the next Play starts, without touching the score.
+   *
+   * Kept apart from acting on it because `hello` and `song` say what the song
+   * is, not whether this is a moment to move the cursor -- a song can be picked
+   * while the band is still playing the previous one.
+   */
+  function noteStartMeasure(message) {
+    var measure = root.requestedStartMeasure(message)
+    if (measure === root.songStartMeasure) {
+      return
+    }
+    root.songStartMeasure = measure
+    // The cursor is wherever the last song left it, which is no longer where the
+    // next Play starts.
+    root.preparedMeasure = 0
+    root.cursorLine = ""
+  }
+
+  /**
+   * Moves the cursor to the song's start measure right away, outside any
+   * count-in.
+   *
+   * Walking to a measure is the slowest thing this plugin does and the only part
+   * of a Play that does not have to happen on the beat, so the adapter asks for
+   * it as soon as the answer is known: the score opened, the song changed, the
+   * host armed, playback stopped. By the downbeat the cursor is normally already
+   * parked -- visibly, on screen, while there is still time to react if the jump
+   * went somewhere unexpected.
+   *
+   * Whether the moment is safe is the *adapter's* call: it follows the room's
+   * transport state, while this plugin only ever learns that playback started,
+   * never that a song ended on its own. A `prepare` that arrives is one the room
+   * says nothing is playing for.
+   */
+  function prepareStartPoint(message, reason) {
+    root.noteStartMeasure(message)
+    var wanted = root.songStartMeasure > 1 ? root.songStartMeasure : 1
+    if (root.preparedMeasure === wanted) {
+      return
+    }
+
+    root.preparedMeasure = root.selectStartPoint(root.songStartMeasure)
+    root.describeStartPoint(root.songStartMeasure, root.preparedMeasure)
+    root.log(root.cursorLine + " (" + reason + ")")
+  }
+
+  /**
+   * The cursor's own status line. Separate from lastCommandLine so "where the
+   * next Play starts" stays readable next to a command that is counting in.
+   */
+  function describeStartPoint(requested, reached) {
+    if (!reached) {
+      root.cursorLine = requested > 1
+        ? "Could not place the cursor for measure " + requested
+        : "No score to place the cursor in"
+      return
+    }
+    if (requested > 1 && reached !== requested) {
+      root.cursorLine = "Could only reach measure " + reached + " of " + requested
+      return
+    }
+    root.cursorLine = requested > 1
+      ? "Ready at measure " + reached
+      : "Ready at the start of the score"
+  }
+
+  /** The start measure the adapter asked for, or 0 for the top of the score. */
+  function requestedStartMeasure(message) {
+    if (typeof message.startMeasure === "number" && message.startMeasure > 1) {
+      return Math.round(message.startMeasure)
+    }
+    if (message.currentSong && typeof message.currentSong.startMeasure === "number"
+        && message.currentSong.startMeasure > 1) {
+      return Math.round(message.currentSong.startMeasure)
+    }
+    return 0
+  }
+
+  /**
+   * Moves the selection to the first note or rest of `measureNumber` (1-based),
+   * or of the score when it is 0. Returns the measure actually reached, or 0 if
+   * nothing could be selected.
    *
    * This is the whole reason the plugin exists. `Cursor.rewind(0)` seeks to the
    * start of the score and `cursor.element` is then the first chord or rest --
    * a real note, not the title frame that "first-element" would land on.
+   * `rewindToTick` extends that to any measure, which is what keystrokes could
+   * only do by typing into MuseScore's Find box with the window in front.
    */
-  function selectScoreStart() {
+  function selectStartPoint(measureNumber) {
     try {
       if (!curScore) {
-        return false
+        return 0
       }
       var cursor = curScore.newCursor()
       cursor.rewind(0)
-      var element = cursor.element
+      var reached = 1
+
+      if (measureNumber > 1) {
+        // Walk the measure chain rather than calling nextMeasure() in a loop:
+        // the chain is a plain property in every 3.x/4.x plugin API, so this
+        // does not depend on a Cursor method whose return value has changed.
+        var measure = curScore.firstMeasure
+        while (measure && reached < measureNumber && measure.nextMeasure) {
+          measure = measure.nextMeasure
+          reached += 1
+        }
+        if (!measure) {
+          root.log("score has no measures")
+          return 0
+        }
+        // Short score: land on the last measure and say so, rather than
+        // pretending the requested one was reached.
+        if (reached < measureNumber) {
+          root.log("score ends at measure " + reached + "; measure " + measureNumber + " was requested")
+        }
+        cursor.rewindToTick(measure.firstSegment.tick)
+      }
+
+      var element = root.elementAtCursor(cursor)
       if (!element) {
-        root.log("no element at the start of the score")
-        return false
+        root.log("no note or rest at measure " + reached)
+        return 0
       }
       curScore.selection.select(element)
-      return true
+      return reached
     } catch (error) {
-      root.log("could not select the start of the score: " + error)
-      return false
+      root.log("could not select the start point: " + error)
+      return 0
     }
+  }
+
+  /**
+   * The chord or rest under the cursor. Voice 1 of the top staff is empty often
+   * enough (a score that starts on a pickup in another voice, a part that rests
+   * through the intro) that falling back across the staves beats reporting that
+   * the measure could not be played.
+   */
+  function elementAtCursor(cursor) {
+    if (cursor.element) {
+      return cursor.element
+    }
+    var trackCount = curScore.ntracks
+    for (var track = 1; track < trackCount; track++) {
+      cursor.track = track
+      if (cursor.element) {
+        return cursor.element
+      }
+    }
+    return null
+  }
+
+  /** What this play actually did, in the words the host shows the band. */
+  function playDetail() {
+    if (root.pendingAction !== "play") {
+      return "stopped playback"
+    }
+    if (!root.pendingReset) {
+      return "played from the playback position"
+    }
+    if (root.pendingStartMeasure > 1 && root.pendingReachedMeasure === root.pendingStartMeasure) {
+      return "played from measure " + root.pendingReachedMeasure
+    }
+    if (root.pendingStartMeasure > 1) {
+      return "could not reach measure " + root.pendingStartMeasure
+        + "; played from measure " + root.pendingReachedMeasure + " instead"
+    }
+    return "played from the start of the score"
   }
 
   function execute() {
@@ -313,17 +507,30 @@ MuseScore {
     }
 
     root.lastCommandLine = root.pendingAction + (ok ? " fired" : " failed")
-    root.send({
+    var result = {
       type: "result",
       sequenceId: sequenceId,
       status: ok ? "succeeded" : "failed",
       playback: playback,
       controlPath: "musescore-plugin",
-      detail: ok
-        ? (root.pendingReset ? "played from the start of the score" : "played from the playback position")
-        : "the plugin could not run the command"
-    })
+      detail: ok ? root.playDetail() : "the plugin could not run the command"
+    }
+    // The adapter reads this back as reachedMeasure and the host warns when it
+    // does not match the song, so only claim a measure the selection reached.
+    if (ok && root.pendingAction === "play" && root.pendingReset && root.pendingReachedMeasure > 0) {
+      result.startMeasure = root.pendingReachedMeasure
+    }
+    root.send(result)
     root.sendStatus(playback)
+
+    if (root.pendingAction === "play" && root.pendingReset) {
+      // The play consumed the parked cursor; MuseScore moves it as it plays.
+      root.preparedMeasure = 0
+    } else if (root.pendingAction === "stop") {
+      // Nothing is playing now, so put the cursor back on this song's starting
+      // point and leave the next Play with nothing to seek either.
+      root.prepareStartPoint({ startMeasure: root.songStartMeasure }, "playback stopped")
+    }
   }
 
   Timer {
@@ -332,12 +539,27 @@ MuseScore {
     onTriggered: root.execute()
   }
 
+  // Keeps minimizing until the window *stays* minimized. One showMinimized() is
+  // not enough: MuseScore raises the dialog as part of showing it, so a single
+  // early call can be undone a tick later and the score stays covered. Stops
+  // after three consecutive minimized ticks, or gives up after 10 s so a build
+  // that never exposes the window does not spin all night.
   Timer {
     id: minimizeTimer
     interval: 250
     repeat: true
     onTriggered: {
-      if (root.minimizeBridgeWindow() || root.minimizeAttempts >= 12) {
+      var pluginWindow = root.bridgeWindow()
+      if (pluginWindow) {
+        if (pluginWindow.visibility === Window.Minimized) {
+          root.minimizeConfirmations += 1
+        } else {
+          root.minimizeConfirmations = 0
+          pluginWindow.showMinimized()
+        }
+      }
+      root.minimizeAttempts += 1
+      if (root.minimizeConfirmations >= 3 || root.minimizeAttempts >= 40) {
         minimizeTimer.stop()
       }
     }
@@ -366,6 +588,10 @@ MuseScore {
         font.bold: true
       }
       Text { text: root.statusLine }
+      Text {
+        text: root.cursorLine
+        visible: root.cursorLine !== ""
+      }
       Text {
         text: root.lastCommandLine
         visible: root.lastCommandLine !== ""

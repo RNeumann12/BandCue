@@ -19,14 +19,16 @@ playback. See the rationale in [Improvements.md](Improvements.md).
 ### Starting from a later measure
 
 When the current song has a `startMeasure`, each adapter seeks there instead of rewinding to the
-top. Every adapter does that work **inside the count-in**, so the downbeat stays a single action,
+top. Every adapter does that work **no later than the count-in** (a MuseScore Bridge does it as
+soon as the song is known, which is earlier still), so the downbeat stays a single action,
 and every adapter reports the measure it actually reached in `lastCommand.startMeasure` so the
 host can warn when one device is about to play a different part of the song.
 
 | Adapter | How it reaches the measure | When it can't |
 | --- | --- | --- |
 | Browser extension | Clicks the staff under Songsterr's own measure number, then verifies the move against Songsterr's play cursor. | Reports the measure it really reached. A measure Songsterr does not draw (inside a repeat) falls back to the top; a measure it draws compressed has no position of its own, so the cursor lands on a neighbour and that is what gets reported. |
-| MuseScore helper | `Ctrl+F`, the measure number, `Enter` — MuseScore's Find / Go to — as prefix keys before Play. | Only if MuseScore itself can't be activated, which already fails the command. |
+| MuseScore helper (keyboard) | `Ctrl+F`, the measure number, `Enter` — MuseScore's Find / Go to — as prefix keys before Play. | Only if MuseScore itself can't be activated, which already fails the command. |
+| MuseScore Bridge (plugin attached) | Walks the measure chain and rewinds the cursor to that measure's first segment, then plays from the selection. Done **ahead of the count-in** — when the score opens, the song changes, or the host arms — so the cursor is visibly parked on the right bar before Play. | Reports the measure it really reached: a score that ends before the requested measure lands on its last one, and the host warns. |
 | Android app | `MediaController.seekTo()` at the measure's position in time, which needs the song's **BPM and beats per measure**. | Songsterr's Android session usually advertises no seek: it plays from the top and reports measure 1, so the host warns. |
 
 Measure numbering is each player's own. That matters for songs with repeats: MuseScore counts
@@ -274,11 +276,26 @@ cmd("play-from-selection");
 
 That selects a **note**, not a frame, so playback starts at bar 1 every time.
 
-**Install.** Copy the folder into MuseScore's Plugins directory (Preferences → Folders shows the
-path; usually `%USERPROFILE%\Documents\MuseScore4\Plugins`), enable **BandCue Bridge** under
+**Install.** Copy the folder into MuseScore's Plugins directory, enable **BandCue Bridge** under
 Home → Plugins, and leave its window open while playing — `pluginType: "dialog"` is what keeps the
 plugin resident, since a plain plugin exits after `onRun` and could never wait for a cue. BandCue
 minimizes that dialog automatically after startup; restoring it is optional and only shows status.
+
+Take the Plugins path from **Preferences → Folders** rather than assuming
+`%USERPROFILE%\Documents\MuseScore4\Plugins` — MuseScore resolves it through the Windows *Documents*
+shell folder, which OneDrive commonly redirects to `%USERPROFILE%\OneDrive\Dokumente` (or the
+localized equivalent). A plugin dropped in the literal `Documents` path is then never scanned, and
+MuseScore reports nothing wrong: the plugin simply does not appear under Home → Plugins. To confirm
+what MuseScore actually found, check that `bandcue.qml` is listed in
+`%LOCALAPPDATA%\MuseScore\MuseScore4\extensions\config.json`.
+
+**Verifying the bridge is really attached.** `GET http://127.0.0.1:<bridge-port>/status` returns
+`{"status":{…}}` filled in from the plugin's own 2 s keep-alive. An empty `"status":{}` means no
+plugin has ever connected — the adapter is running keyboard-only, and every non-100 % song will be
+refused with *"MuseScore Bridge must be connected to set N% tempo"* rather than played at the wrong
+speed. The adapter's `tempo.detail` in the room state says the same thing: *"100% tempo uses normal
+MuseScore playback"* is the **no-bridge** wording, while an attached plugin reports *"applied
+through MuseScore Bridge"*.
 
 **Transport.** The plugin talks to the adapter's `--bridge-port` over a WebSocket on the same port
 as the HTTP API. MuseScore's plugin sandbox has no HTTP client, but it does expose
@@ -288,13 +305,30 @@ interval sits between the count-in and the plugin.
 
 | Direction | Message | Meaning |
 | --- | --- | --- |
-| → plugin | `hello` | `{ fallbackMs, currentSong }` on connect |
-| → plugin | `command` | `{ sequenceId, action, dueLocalAt, resetBeforePlay, currentSong }` |
-| → plugin | `song` | the current song changed |
+| → plugin | `hello` | `{ fallbackMs, startMeasure, currentSong }` on connect |
+| → plugin | `command` | `{ sequenceId, action, dueLocalAt, resetBeforePlay, startMeasure, currentSong }` |
+| → plugin | `song` | the current song changed: `{ startMeasure, currentSong }` |
+| → plugin | `prepare` | `{ startMeasure, reason, currentSong }` — park the cursor there now, no downbeat involved |
 | → plugin | `retire` | disconnect before the helper opens a score in a new MuseScore process |
 | → adapter | `claim` | stops the keyboard fallback from also firing |
-| → adapter | `result` | `{ sequenceId, status, playback, detail }` |
+| → adapter | `result` | `{ sequenceId, status, playback, detail, startMeasure }` |
 | → adapter | `status` | `{ ready, title, playback }`; also the keep-alive, every 2 s |
+
+**Start measures belong to the plugin while it is attached.** A claim suppresses the keyboard path,
+including the Find / Go to typing that jumps to a measure — so the plugin does the jump itself:
+`selectStartPoint()` walks the measure chain from `curScore.firstMeasure` and rewinds the cursor to
+that measure's first segment, falling back across tracks when voice 1 of the top staff rests there.
+The measure it actually reached comes back in the `result`, so a score too short for the song shows
+up as a host warning instead of quietly playing the intro.
+
+The `prepare` message keeps that walk off the critical path. The adapter sends it whenever the
+room's intent is already known and nothing is waiting on a beat — the bridge connected, the score
+opened, the current song changed, the host armed, playback stopped — so by the time a Play arrives
+the cursor is normally already on the right bar, visibly, and the downbeat only has to start
+playback. The adapter never sends it while the transport is running: the plugin sees playback start
+but never sees a song end on its own, so only the adapter can tell a quiet moment from a song in
+progress. The Play re-selects anyway, so a `prepare` that never arrived costs correctness nothing —
+and a click in the score between arming and Play cannot move where the song starts.
 
 These route through the same handlers as the HTTP endpoints, so the two transports cannot drift
 apart. While a bridge is attached the adapter reports **`requiredLeadMs: 0`** — there is no window
@@ -376,9 +410,10 @@ verified against a real MuseScore 4 window while another application held the fo
 translated from their SendKeys spelling by `parseSendKeysToken`, and if any key in a sequence cannot
 be expressed that way the whole sequence falls back to `SendKeys` rather than being half-posted.
 
-Because focus no longer matters, [`--cue-hotkey`](Configuration.md#external-cue-helix-and-other-pedals)
-is now optional rather than required — it remains useful when you want to *use* MuseScore's window
-yourself, or keep the host page on a phone, without the cue going missing.
+Because focus no longer matters, the [system-wide hotkey options](Configuration.md#external-cue-helix-and-other-pedals)
+are optional rather than required. They remain useful when you want to *use* MuseScore's window
+yourself, or keep the host page on a phone. The listener can claim Arm, Play, Stop, Next, Previous,
+Open, and the two setlist-automation toggles in one resident process.
 
 When a command does fall back, the adapter says so on its console and immediately reports the
 fallback's much larger `requiredLeadMs` to the room, so a degraded path can never quietly sit

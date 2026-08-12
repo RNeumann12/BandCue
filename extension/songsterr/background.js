@@ -186,9 +186,12 @@ const RESOLVE_EVERY_N_ATTEMPTS = 4;
 // disconnected. Chrome clamps alarm periods to a 1-minute minimum.
 const RECONNECT_ALARM_NAME = "bandcue-reconnect";
 const RECONNECT_ALARM_PERIOD_MINUTES = 1;
-// Number of LAN probes in flight at once. High enough to cover a /24 quickly
-// while staying under Chrome's ~256 total socket budget for the service worker.
-const LAN_SCAN_CONCURRENCY = 150;
+// Number of LAN probes in flight at once. Every probe to a dead host becomes a
+// half-open TCP connection that the home router must hold NAT/conntrack state
+// for, so this is deliberately well under Chrome's ~256 socket budget: a large
+// pool used to fill consumer router state tables and slow down unrelated
+// traffic on the whole network.
+const LAN_SCAN_CONCURRENCY = 48;
 const LAN_SCAN_FAST_TIMEOUT_MS = 400;
 // Weak rehearsal Wi-Fi can answer just after the fast LAN probe window. Keep the
 // normal path snappy, then make a slower second pass over likely subnets.
@@ -334,7 +337,13 @@ chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConne
     roomInput = storedInput;
   }
   if (storedInput && autoConnectEnabled) {
-    configureConnection(storedInput).catch((error) => {
+    // This block runs on every service-worker start, not just browser start:
+    // Chrome evicts the worker aggressively and the reconnect alarm revives it
+    // once a minute. So this is not a user-initiated connect and must not sweep
+    // the default subnets, or a coordinator that stays down would put a full
+    // LAN scan on the network every minute. Known hosts are still probed, and
+    // pressing Connect in the popup still runs the full sweep.
+    configureConnection(storedInput, { allowFullLanScan: false }).catch((error) => {
       connectionState = "error";
       connectionDetail = error.message;
     });
@@ -356,19 +365,22 @@ chrome.tabs.onRemoved.addListener(() => {
   scheduleActiveTabStatusReport();
 });
 
-async function configureConnection(input) {
+// options.allowFullLanScan defaults to true: the popup's Connect button is the
+// caller, and a user waiting on a press they just made may need the full sweep.
+// The service-worker startup path passes false (see the storage restore above).
+async function configureConnection(input, options = {}) {
   roomInput = normalizeRoomLocator(input);
   // A fresh user-initiated connect resets backoff so the first retry is quick.
   reconnectAttempts = 0;
-  await refreshRoomEndpoint();
+  await refreshRoomEndpoint({ allowFullLanScan: options.allowFullLanScan ?? true });
   autoConnectEnabled = true;
   chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
   await connect();
 }
 
-async function refreshRoomEndpoint() {
+async function refreshRoomEndpoint(options = {}) {
   await assertRoomPermissions(roomInput);
-  const endpoint = await resolveRoomEndpoint(roomInput);
+  const endpoint = await resolveRoomEndpoint(roomInput, options);
   roomUrl = endpoint.roomUrl;
   wsUrl = endpoint.wsUrl;
 }
@@ -402,7 +414,10 @@ async function connect() {
     !wsUrl || (reconnectAttempts > 0 && reconnectAttempts % RESOLVE_EVERY_N_ATTEMPTS === 0);
   if (roomInput && shouldResolve) {
     try {
-      await refreshRoomEndpoint();
+      // Background retry: never sweep the default subnets. Only hosts that have
+      // already served a room are probed, so a coordinator that stays down
+      // cannot generate LAN scan traffic indefinitely.
+      await refreshRoomEndpoint({ allowFullLanScan: false });
       chrome.storage.local.set({ roomInput, roomUrl, autoConnectEnabled });
     } catch (error) {
       if (wsUrl && reconnectAttempts > 0) {
@@ -1654,7 +1669,11 @@ function toWsUrl(value) {
   return url.toString();
 }
 
-async function resolveRoomEndpoint(input) {
+// options.allowFullLanScan — true only for a connect the user just triggered.
+// Automatic reconnects pass false so a downed coordinator cannot turn into an
+// endless background sweep of every default subnet (see knownScanSubnets).
+async function resolveRoomEndpoint(input, options = {}) {
+  const allowFullLanScan = options.allowFullLanScan ?? true;
   const locator = normalizeRoomLocator(input);
   if (isAbsoluteRoomUrl(locator)) {
     return resolveAbsoluteRoomEndpoint(locator);
@@ -1693,8 +1712,9 @@ async function resolveRoomEndpoint(input) {
     }
   }
 
-  if (isRoomCode(locator) || isPort(locator)) {
-    const scanResult = await scanLanForRoom(locator);
+  const scanSubnets = allowFullLanScan ? scanSubnetsWithKnownFirst() : knownScanSubnets();
+  if ((isRoomCode(locator) || isPort(locator)) && scanSubnets.length) {
+    const scanResult = await scanLanForRoom(locator, { subnets: scanSubnets });
     if (scanResult.endpoint) {
       rememberHost(hostFromUrl(scanResult.endpoint.roomUrl));
       return scanResult.endpoint;
@@ -1724,14 +1744,17 @@ async function resolveRoomEndpoint(input) {
     return slowMdnsResult;
   }
 
-  if (isRoomCode(locator) || isPort(locator)) {
+  const slowScanSubnets = allowFullLanScan
+    ? weakSignalScanSubnets()
+    : knownScanSubnets().slice(0, LAN_SCAN_WEAK_SIGNAL_SUBNET_LIMIT);
+  if ((isRoomCode(locator) || isPort(locator)) && slowScanSubnets.length) {
     connectionDetail = isRoomCode(locator)
       ? `Retrying weak-signal scan for room ${locator.toUpperCase()}`
       : `Retrying weak-signal scan on port ${locator}`;
     const slowScanResult = await scanLanForRoom(locator, {
       timeoutMs: LAN_SCAN_WEAK_SIGNAL_TIMEOUT_MS,
       concurrency: LAN_SCAN_WEAK_SIGNAL_CONCURRENCY,
-      subnets: weakSignalScanSubnets(),
+      subnets: slowScanSubnets,
       statusPrefix: "Retrying weak-signal scan"
     });
     if (slowScanResult.endpoint) {
@@ -1878,6 +1901,24 @@ function scanSubnetsWithKnownFirst() {
 
 function weakSignalScanSubnets() {
   return scanSubnetsWithKnownFirst().slice(0, LAN_SCAN_WEAK_SIGNAL_SUBNET_LIMIT);
+}
+
+// Subnets of hosts that have actually served a room before, with no fallback to
+// the documented defaults. Automatic reconnects scan only these: sweeping every
+// default subnet is ~2800 probes, and most of them target networks this machine
+// is not on, so the SYNs leave via the default gateway and pile up as dead NAT
+// entries in the router. That is fine to do once when a user is waiting on a
+// Connect they just pressed; it is not fine to repeat forever in the background
+// while the coordinator is down.
+function knownScanSubnets() {
+  const ordered = [];
+  for (const host of knownRoomHosts()) {
+    const prefix = subnetPrefix(host);
+    if (prefix && !ordered.includes(prefix)) {
+      ordered.push(prefix);
+    }
+  }
+  return ordered;
 }
 
 async function tryResolveRoomCandidate(candidate, timeoutMs) {

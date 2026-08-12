@@ -104,14 +104,20 @@ Parsed by `parseArgs` in [`musescore-windows.ts`](../src/adapters/musescore-wind
 
 | Flag / Env var | Default | Purpose |
 | --- | --- | --- |
-| `--cue-hotkey <combo>` / `BANDCUE_CUE_HOTKEY` | unset (off) | Claim this combination system-wide on this machine and turn it into a Play request stamped with the instant the input happened, e.g. `ctrl+alt+p`. Needs at least one modifier (`ctrl`/`alt`/`shift`/`win`) plus a letter, digit, or `f1`–`f24`. |
+| `--cue-hotkey <combo>` / `--play-hotkey <combo>` / `BANDCUE_CUE_HOTKEY` / `BANDCUE_PLAY_HOTKEY` | unset (off) | Claim Play system-wide and stamp it with the instant the input happened, e.g. `ctrl+alt+p`. `cue` is the backward-compatible name. |
+| `--arm-hotkey <combo>` / `BANDCUE_ARM_HOTKEY` | unset (off) | Claim the host's Arm/Disarm action system-wide. |
+| `--stop-hotkey <combo>` / `BANDCUE_STOP_HOTKEY` | unset (off) | Claim Stop system-wide. |
+| `--next-song-hotkey <combo>` / `BANDCUE_NEXT_SONG_HOTKEY` | unset (off) | Select the next setlist song system-wide. |
+| `--previous-song-hotkey <combo>` / `BANDCUE_PREVIOUS_SONG_HOTKEY` | unset (off) | Select the previous setlist song system-wide. |
+| `--open-song-hotkey <combo>` / `BANDCUE_OPEN_SONG_HOTKEY` | unset (off) | Open the current song system-wide. |
+| `--auto-advance-hotkey <combo>` / `BANDCUE_AUTO_ADVANCE_HOTKEY` | unset (off) | Toggle auto-load system-wide. Supported but not enabled by the launcher. |
+| `--auto-start-hotkey <combo>` / `BANDCUE_AUTO_START_HOTKEY` | unset (off) | Toggle auto-start system-wide. Supported but not enabled by the launcher. |
 
-Use this on the one machine the pedal is plugged into. Without it, the cue only reaches BandCue
-while the **host page** holds the keyboard focus — and on a machine that also drives MuseScore,
-that is the same focus MuseScore needs to receive its keystrokes, so one of the two always loses.
-Registering the cue system-wide lets MuseScore keep the foreground all night while the cue still
-arrives. The room must still be armed; the coordinator rejects the Play otherwise, and rejects it
-from an adapter entirely when the control mode is host-only.
+Every combination needs at least one modifier (`ctrl`/`alt`/`shift`/`win`) plus a letter, digit, or
+`f1`–`f24`. Use these on one machine per room. The **Helix Cue** launcher enables the live
+performance controls (`Ctrl+Alt+A/P/S/N/B/O` for Arm, Play, Stop, Next, Previous, and Open). It
+leaves the two automation-setting toggles opt-in. Captured actions are relayed to the host rather
+than executed with adapter authority, so host-only mode and the usual safety checks still apply.
 
 ### Bridge mode
 

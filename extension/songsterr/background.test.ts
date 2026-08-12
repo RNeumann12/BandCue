@@ -36,9 +36,11 @@ function loadBackground(
   // navigation fallback.
   // true/false: the content script replies. "hang": the reply channel is
   // dropped, as Safari-derived browsers do for a slow async sendResponse.
-  { inPageNav = false, missingContentOnce = false }: {
+  { inPageNav = false, missingContentOnce = false, stored = {} }: {
     inPageNav?: boolean | "hang";
     missingContentOnce?: boolean;
+    // What chrome.storage.local already holds when the service worker starts.
+    stored?: Record<string, unknown>;
   } = {}
 ) {
   const created: Array<{ url: string; active?: boolean }> = [];
@@ -69,7 +71,7 @@ function loadBackground(
   const chrome = {
     runtime: { onMessage: { addListener: (fn: any) => { messageListener = fn; } } },
     permissions: { contains: async () => true },
-    storage: { local: { get: (_keys: unknown, cb: (v: object) => void) => cb({}), set() {} } },
+    storage: { local: { get: (_keys: unknown, cb: (v: object) => void) => cb(stored), set() {} } },
     windows: { update: async () => undefined },
     tabs: {
       onUpdated: {
@@ -229,6 +231,7 @@ function loadBackground(
 
   return {
     context,
+    flush,
     created,
     updated,
     inPageNavs,
@@ -645,6 +648,67 @@ describe("discovery constants", () => {
     ]);
     expect(endpoint.roomUrl).toBe("http://192.168.1.44:4173/?token=TEST");
     expect(endpoint.wsUrl).toBe("ws://192.168.1.44:4173/ws?token=TEST");
+  });
+
+  // Regression: a coordinator that stays down used to make every automatic
+  // reconnect re-sweep all default subnets (11 x 254 probes). Those probes are
+  // mostly to networks the device is not on, so they leave via the default
+  // gateway and fill the router's NAT table, slowing down unrelated traffic for
+  // the whole LAN. Background retries must never brute-force the LAN.
+  it("does not sweep default subnets on an automatic reconnect", async () => {
+    const { context } = loadBackground([]);
+    const probed: string[] = [];
+    context.fetch = async (url: string) => {
+      probed.push(String(url));
+      throw new Error("nothing listening");
+    };
+
+    await expect(
+      context.resolveRoomEndpoint("4173", { allowFullLanScan: false })
+    ).rejects.toThrow(/No BandCue room found/);
+
+    // Only loopback + mDNS names, never an a.b.c.N sweep.
+    expect(probed.length).toBeLessThan(20);
+    expect(probed.some((url) => /\/\/192\.168\.\d+\.\d+:/.test(url))).toBe(false);
+    expect(probed.some((url) => /\/\/10\.0\.\d+\.\d+:/.test(url))).toBe(false);
+  });
+
+  it("still sweeps the LAN for a connect the user just triggered", async () => {
+    const { context } = loadBackground([]);
+    const probed: string[] = [];
+    context.fetch = async (url: string) => {
+      probed.push(String(url));
+      throw new Error("nothing listening");
+    };
+
+    await expect(
+      context.resolveRoomEndpoint("4173", { allowFullLanScan: true })
+    ).rejects.toThrow(/No BandCue room found/);
+
+    expect(probed.some((url) => url.includes("//192.168.178.42:4173/"))).toBe(true);
+  });
+
+  // The storage restore at the top of background.js runs on every service-worker
+  // start, and Chrome revives the worker from the reconnect alarm once a minute.
+  // Sweeping the defaults there put a full LAN scan on the network every minute
+  // for as long as the coordinator stayed down.
+  it("does not sweep default subnets when the service worker restarts", async () => {
+    const probed: string[] = [];
+    const { context, flush } = loadBackground([], {
+      stored: { roomInput: "4173", autoConnectEnabled: true }
+    });
+    // The restore's first await lands after this assignment, so every probe it
+    // makes goes through the stub.
+    context.fetch = async (url: string) => {
+      probed.push(String(url));
+      throw new Error("nothing listening");
+    };
+
+    await flush();
+    expect(probed.length).toBeGreaterThan(0);
+
+    expect(probed.some((url) => /\/\/192\.168\.\d+\.\d+:/.test(url))).toBe(false);
+    expect(probed.some((url) => /\/\/10\.0\.\d+\.\d+:/.test(url))).toBe(false);
   });
 });
 

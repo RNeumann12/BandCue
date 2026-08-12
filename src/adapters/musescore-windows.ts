@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
 import { MuseScoreTrigger } from "./musescore-trigger.js";
-import { CueHotkeyListener, parseCueHotkey } from "./windows-cue-hotkey.js";
+import {
+  GlobalHotkeyListener,
+  parseCueHotkey,
+  type GlobalHotkeyBinding
+} from "./windows-cue-hotkey.js";
 import {
   createServer,
   type IncomingMessage,
@@ -61,9 +65,11 @@ import type {
   AdapterPlaybackState,
   AdapterStatus,
   AdapterTempoStatus,
+  ExternalHotkeyAction,
   SetlistSong,
   ServerMessage,
-  TransportAction
+  TransportAction,
+  TransportStatus
 } from "../shared/protocol.js";
 
 interface Args {
@@ -88,7 +94,7 @@ interface Args {
   scoreFolders: string[];
   scoreCatalogRecursive: boolean;
   closeOldInstances: boolean;
-  cueHotkey?: string;
+  globalHotkeys: Record<ExternalHotkeyAction, string | undefined>;
 }
 
 // How long to wait for the freshly opened score's window before giving up on
@@ -251,7 +257,11 @@ let triggerResolvedAt: number | undefined;
 // the next command the trigger handles itself.
 let warmPathDegraded = false;
 let lastArmed = false;
-let cueHotkeyListener: CueHotkeyListener | undefined;
+// The room's own view of the transport, so bridge preparation can tell "nothing
+// is playing" from "a song is running" -- see prepareBridgeStartMeasure.
+let lastTransportStatus: TransportStatus = "stopped";
+let globalHotkeyListener: GlobalHotkeyListener | undefined;
+const registeredGlobalHotkeys = new Set<ExternalHotkeyAction>();
 const trigger = new MuseScoreTrigger(
   {
     processMatch: args.processMatch,
@@ -276,7 +286,7 @@ refreshScoreCatalog();
 // Start the resident trigger now so its shell launch and assembly load (~1.8 s
 // together) are spent while nothing is waiting, rather than inside a count-in.
 trigger.start();
-startCueHotkeyListener();
+startGlobalHotkeyListener();
 primeSendKeysAssemblies();
 assemblyPrimeTimer = setInterval(() => {
   if (!trigger.running) {
@@ -411,15 +421,25 @@ async function connect(): Promise<void> {
       // window up now, so the count-in does not pay for the process scan. This
       // deliberately stops short of activating it: the cue is a keystroke, and
       // taking the foreground here would take the cue away from the host page.
+      lastTransportStatus = message.transport?.status ?? lastTransportStatus;
       const armed = Boolean(message.safety?.armed);
       if (armed && !lastArmed) {
         void resolveTriggerTarget();
+        // Arming is the room's "a Play is coming": the last quiet moment to send
+        // an attached plugin to the song's start measure, so the count-in has
+        // nothing left to seek.
+        prepareBridgeStartMeasure("the room armed");
       }
       lastArmed = armed;
       if (songChanged) {
         // A different score means a different window to aim at.
         triggerResolvedAt = undefined;
-        broadcastBridgeSocket({ type: "song", currentSong });
+        broadcastBridgeSocket({
+          type: "song",
+          startMeasure: startMeasureForSong(currentSong),
+          currentSong
+        });
+        prepareBridgeStartMeasure("the song changed");
         void reportMuseScoreStatus();
       }
       return;
@@ -683,13 +703,13 @@ async function reportMuseScoreStatus(): Promise<void> {
 // to register on the next run. Release both on the way out.
 for (const signal of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) {
   process.on(signal, () => {
-    cueHotkeyListener?.stop();
+    globalHotkeyListener?.stop();
     trigger.stop();
     process.exit(0);
   });
 }
 process.on("exit", () => {
-  cueHotkeyListener?.stop();
+  globalHotkeyListener?.stop();
   trigger.stop();
 });
 
@@ -832,7 +852,7 @@ async function triggerMuseScoreTransport(
       "MuseScore trigger could not run this command (usually because Windows would not let a "
         + "background process take the foreground); falling back to a shell per command and asking "
         + `the room for ${adaptiveDispatchLeadMs} ms of count-in. Give this machine's cue a global `
-        + "hotkey (--cue-hotkey) so MuseScore can keep the foreground."
+        + "Play hotkey (--cue-hotkey or --play-hotkey) so MuseScore can keep the foreground."
     );
     void reportMuseScoreStatus();
   }
@@ -964,66 +984,83 @@ function museScoreDispatchLeadMs(): number {
 }
 
 /**
- * Claims the external cue system-wide, on the machine the pedal is plugged into.
+ * Claims configured host shortcuts system-wide on the MuseScore machine.
  *
  * Without this the cue only reaches BandCue while the host page holds the
  * keyboard focus -- which is the same focus MuseScore needs to be driven by
  * keystrokes, so one of the two always loses. With it, MuseScore can keep the
  * foreground all night and the cue still arrives.
  */
-function startCueHotkeyListener(): void {
-  if (!args.cueHotkey) {
+function startGlobalHotkeyListener(): void {
+  const bindings: GlobalHotkeyBinding[] = [];
+  for (const [action, value] of Object.entries(args.globalHotkeys) as [ExternalHotkeyAction, string | undefined][]) {
+    if (!value) {
+      continue;
+    }
+    const hotkey = parseCueHotkey(value);
+    if (!hotkey) {
+      console.error(
+        `${action} hotkey "${value}" is not a combination this adapter can register. `
+          + 'Use at least one modifier and one key, e.g. "ctrl+alt+p".'
+      );
+      continue;
+    }
+    bindings.push({ action, hotkey });
+  }
+
+  if (!bindings.length) {
     return;
   }
 
-  const hotkey = parseCueHotkey(args.cueHotkey);
-  if (!hotkey) {
-    console.error(
-      `--cue-hotkey "${args.cueHotkey}" is not a combination this adapter can register. `
-        + 'Use at least one modifier and one key, e.g. "ctrl+alt+p".'
-    );
-    return;
-  }
-
-  cueHotkeyListener = new CueHotkeyListener(hotkey, {
-    onReady: (registered) => {
+  globalHotkeyListener = new GlobalHotkeyListener(bindings, {
+    onReady: (binding) => {
+      registeredGlobalHotkeys.add(binding.action);
       console.log(
-        `Listening for the ${registered.label} cue system-wide; MuseScore can keep the foreground.`
+        `Listening for ${binding.hotkey.label} (${binding.action}) system-wide; MuseScore can keep the foreground.`
       );
     },
-    onCue: (cueAtLocalMs, ageMs) => forwardCue(cueAtLocalMs, ageMs),
-    onError: (detail) => {
-      console.warn(
-        `Cue hotkey ${hotkey.label} unavailable (${detail}). Another application may already own `
-          + "it; the host page's own hotkey still works while its window has focus."
-      );
+    onHotkey: (binding, inputAtLocalMs, ageMs) => forwardHotkey(binding, inputAtLocalMs, ageMs),
+    onError: (binding, detail) => {
+      if (binding) {
+        registeredGlobalHotkeys.delete(binding.action);
+        console.warn(
+          `${binding.action} hotkey ${binding.hotkey.label} unavailable (${detail}). Another application may `
+            + "already own it; the host page's own hotkey still works while its window has focus."
+        );
+      } else {
+        registeredGlobalHotkeys.clear();
+        console.warn(`Global hotkey listener unavailable (${detail}); retrying.`);
+      }
     }
   });
-  cueHotkeyListener.start();
+  globalHotkeyListener.start();
 }
 
 /**
- * Forwards a captured cue to the room, stamped with the instant Windows generated
- * the input so the count-in can be anchored to the pedal's beat -- the same
- * anchoring the host page does with the keydown's `event.timeStamp`.
+ * Forwards a captured shortcut to the room, stamped with the instant Windows
+ * generated the input. Play uses the stamp to anchor its count-in to the pedal's
+ * beat; the freshness check also prevents delayed non-Play actions from firing.
  *
- * Sent as an `externalCue`, not a play request: the coordinator relays it to the
- * host, which issues its own Play. Claiming a hotkey must not promote this
- * adapter into an authority that may start playback -- host-only mode has to keep
- * meaning what it says.
+ * Sent as an `externalCue`, not as a direct room mutation: the coordinator relays
+ * it to the host, which runs the matching local action. Claiming a hotkey must not
+ * promote this adapter into an authority that can alter transport, safety, or the
+ * setlist -- host-only mode has to keep meaning what it says.
  */
-function forwardCue(cueAtLocalMs: number, ageMs: number): void {
+function forwardHotkey(binding: GlobalHotkeyBinding, inputAtLocalMs: number, ageMs: number): void {
   if (ws?.readyState !== WebSocket.OPEN) {
-    console.warn("Cue ignored: not connected to a BandCue room.");
+    console.warn(`${binding.action} hotkey ignored: not connected to a BandCue room.`);
     return;
   }
 
   send({
     type: "externalCue",
-    cueAtServerTime: Math.round(cueAtLocalMs + serverOffsetMs),
-    source: `${args.cueHotkey ?? "cue"} on ${args.name}`
+    action: binding.action,
+    cueAtServerTime: Math.round(inputAtLocalMs + serverOffsetMs),
+    source: `${binding.hotkey.label} on ${args.name}`
   });
-  console.log(`Cue forwarded to the host (input was ${ageMs} ms old when it reached the adapter).`);
+  console.log(
+    `${binding.action} hotkey forwarded to the host (input was ${ageMs} ms old when it reached the adapter).`
+  );
 }
 
 /**
@@ -1052,7 +1089,7 @@ async function resolveTriggerTarget(): Promise<boolean> {
   // Bringing the window forward while the room merely arms is only safe once the
   // cue is claimed system-wide, since otherwise this would take the cue away from
   // the host page.
-  if (cueHotkeyListener && result.processId) {
+  if (registeredGlobalHotkeys.has("play") && result.processId) {
     await activateMuseScoreWindow(result.processId);
   }
   return true;
@@ -1342,6 +1379,11 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     controlPath: "local-score-catalog",
     at: Date.now()
   });
+  if (opened.opened) {
+    // Normally the reopened score brings a fresh plugin, which gets the start
+    // measure with its `hello`. This covers a plugin that survived the retire.
+    prepareBridgeStartMeasure("the score was opened");
+  }
 }
 
 function applyBridgeCommandResult(
@@ -1652,6 +1694,12 @@ function queueBridgeCommand(command: BridgeCommand): boolean {
     dueLocalAt: command.dueLocalAt,
     scheduledServerTime: command.scheduledServerTime,
     resetBeforePlay: Boolean(command.resetBeforePlay),
+    // Must be sent explicitly: the plugin cannot re-derive it from currentSong,
+    // because only the adapter applies sanitizeStartMeasure and only the adapter
+    // sees a start measure the room corrects during the count-in. Omitting it is
+    // what silently played every song from bar 1 over the socket transport while
+    // the HTTP /commands transport (which serializes the whole command) was fine.
+    startMeasure: command.startMeasure,
     currentSong: command.currentSong
   });
   reportCommandStatus({
@@ -1693,8 +1741,11 @@ function attachBridgeSocket(server: HttpServer): void {
     sendBridgeSocket(socket, {
       type: "hello",
       fallbackMs: args.bridgeFallbackMs,
+      startMeasure: startMeasureForSong(currentSong),
       currentSong
     });
+    // A plugin that just attached has its cursor wherever MuseScore left it.
+    prepareBridgeStartMeasure("the bridge connected");
 
     socket.on("message", (raw) => {
       bridgeLastSeenAt = Date.now();
@@ -1747,6 +1798,39 @@ function broadcastBridgeSocket(message: unknown): void {
   for (const socket of bridgeSockets) {
     sendBridgeSocket(socket, message);
   }
+}
+
+/**
+ * Asks an attached plugin to put the cursor where this song's Play should start,
+ * now rather than during the count-in.
+ *
+ * Seeking is the slowest thing the plugin does (it walks the score measure by
+ * measure) and it is the one part of a Play that does not have to happen on the
+ * beat. Doing it whenever the room's intent is already known -- the score is
+ * open, the song changed, the host armed -- means the downbeat itself is only
+ * ever "start playing", and a jump that goes wrong is visible on screen while
+ * there is still time to do something about it.
+ */
+function prepareBridgeStartMeasure(reason: string): void {
+  if (!bridgeSockets.size) {
+    return;
+  }
+
+  // Never mid-run: moving the selection republishes the score view, and a band
+  // reading from that screen should not have it jump back to bar 10 because the
+  // host was lining up the next song. The plugin cannot make this call itself --
+  // it sees playback start but never sees a song end on its own -- so the
+  // adapter, which follows the room's transport state, makes it here.
+  if (lastTransportStatus !== "stopped") {
+    return;
+  }
+
+  broadcastBridgeSocket({
+    type: "prepare",
+    startMeasure: startMeasureForSong(currentSong),
+    reason,
+    currentSong
+  });
 }
 
 /** Shared by both bridge transports; `undefined` means accepted. */
@@ -2216,6 +2300,18 @@ function trimSingleLine(value: string): string {
   return value.replace(/\s+/g, " ").trim().slice(0, 220);
 }
 
+const GLOBAL_HOTKEY_FLAGS = new Map<string, ExternalHotkeyAction>([
+  ["--arm-hotkey", "toggle-arm"],
+  ["--cue-hotkey", "play"],
+  ["--play-hotkey", "play"],
+  ["--stop-hotkey", "stop"],
+  ["--next-song-hotkey", "next-song"],
+  ["--previous-song-hotkey", "previous-song"],
+  ["--open-song-hotkey", "open-current-song"],
+  ["--auto-advance-hotkey", "toggle-auto-advance"],
+  ["--auto-start-hotkey", "toggle-auto-start"]
+]);
+
 function parseArgs(raw: string[]): Args {
   const parsed: Args = {
     port: parsePositiveInt(process.env.BANDCUE_PORT ?? process.env.PORT, DEFAULT_ROOM_PORT),
@@ -2243,7 +2339,16 @@ function parseArgs(raw: string[]): Args {
     scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
     scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0",
     closeOldInstances: process.env.BANDCUE_MUSESCORE_CLOSE_OLD !== "0",
-    cueHotkey: process.env.BANDCUE_CUE_HOTKEY
+    globalHotkeys: {
+      "toggle-arm": process.env.BANDCUE_ARM_HOTKEY,
+      play: process.env.BANDCUE_PLAY_HOTKEY ?? process.env.BANDCUE_CUE_HOTKEY,
+      stop: process.env.BANDCUE_STOP_HOTKEY,
+      "next-song": process.env.BANDCUE_NEXT_SONG_HOTKEY,
+      "previous-song": process.env.BANDCUE_PREVIOUS_SONG_HOTKEY,
+      "open-current-song": process.env.BANDCUE_OPEN_SONG_HOTKEY,
+      "toggle-auto-advance": process.env.BANDCUE_AUTO_ADVANCE_HOTKEY,
+      "toggle-auto-start": process.env.BANDCUE_AUTO_START_HOTKEY
+    }
   };
 
   for (let index = 0; index < raw.length; index += 1) {
@@ -2276,8 +2381,9 @@ function parseArgs(raw: string[]): Args {
     if (value === "--dispatch-lead-ms") {
       parsed.dispatchLeadMs = parseNonNegativeInt(raw[index + 1], parsed.dispatchLeadMs);
     }
-    if (value === "--cue-hotkey") {
-      parsed.cueHotkey = raw[index + 1];
+    const hotkeyAction = GLOBAL_HOTKEY_FLAGS.get(value);
+    if (hotkeyAction) {
+      parsed.globalHotkeys[hotkeyAction] = raw[index + 1];
     }
     if (value === "--bridge-port") {
       parsed.bridgePort = parseNonNegativeInt(raw[index + 1], 0);

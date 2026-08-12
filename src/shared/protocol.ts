@@ -8,6 +8,17 @@ export type AdapterCommandAction = TransportAction | "open-song";
 
 export type TransportStatus = "stopped" | "scheduled" | "running";
 
+/**
+ * Why the room left the running state. `manual` is the only one that ever
+ * carries a Stop command to the devices; the two `auto-` reasons just record
+ * that the players finished on their own.
+ *
+ * `leader-disconnect` is legacy: coordinators used to stop the whole room when
+ * the client that started playback dropped off, which turned a Wi-Fi blip on
+ * the host laptop into a dead stop mid-song. No coordinator emits it any more —
+ * it stays in the union so a client talking to an older coordinator still
+ * understands what it is being told.
+ */
 export type StopReason = "manual" | "auto-duration" | "auto-playback-ended" | "leader-disconnect";
 
 export type SongSourceType = "songsterr" | "musescore" | "other";
@@ -172,20 +183,33 @@ export interface TransportRequest {
   cueAtServerTime?: number;
 }
 
+/** Host actions that may be relayed from a system-wide shortcut listener. */
+export type ExternalHotkeyAction =
+  | "toggle-arm"
+  | "play"
+  | "stop"
+  | "next-song"
+  | "previous-song"
+  | "open-current-song"
+  | "toggle-auto-advance"
+  | "toggle-auto-start";
+
 /**
- * An external cue (a pedal sending BandCue's Play shortcut) captured by an
- * adapter that claimed the combination system-wide, rather than by the host page.
+ * An external hotkey captured by an adapter that claimed the combination
+ * system-wide, rather than by the host page.
  *
  * It is deliberately *not* a `transportRequest`. Who may start playback is a room
- * policy -- in host-only mode nobody but the host may -- and a cue is a pedal
- * press, not a new authority. The coordinator relays this to the host, which then
- * makes its own ordinary play request carrying `cueAtServerTime`, so the pedal
- * behaves exactly like the host's own Play hotkey and every safety rule still
- * applies unchanged.
+ * policy -- in host-only mode nobody but the host may -- and a key press is not a
+ * new authority. The coordinator relays this to the host, which runs the matching
+ * local action. Play becomes the host's ordinary request carrying
+ * `cueAtServerTime`, so every safety rule still applies unchanged. `action` is
+ * optional for compatibility with adapters that predate multi-action global
+ * hotkeys; omitted still means Play.
  */
 export interface ExternalCue {
   type: "externalCue";
-  /** Room time of the cue itself, for anchoring the count-in to the pedal's beat. */
+  action?: ExternalHotkeyAction;
+  /** Room time of the input; Play uses it to anchor the count-in to the pedal's beat. */
   cueAtServerTime: number;
   /** Human-readable origin for host status text, e.g. "Ctrl+Alt+P on MASTASURFACE". */
   source?: string;

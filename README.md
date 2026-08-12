@@ -255,9 +255,14 @@ with a measure jump land within 0–2 ms of the scheduled downbeat, the same as 
 
 Each player counts measures its own way, and each device confirms what it actually did:
 
-- **MuseScore** jumps with its own Find / Go to (Ctrl+F), so any written measure works — but the
-  measure has to be *typed*, so MuseScore must be the front window on that machine. If Windows
-  won't bring it forward, that device starts from the top and says so instead of editing the score.
+- **MuseScore with the BandCue Bridge plugin** parks its cursor on the bar as soon as it knows
+  which one — when the score opens, when you pick the song, when you press **Arm** — so you can see
+  it sitting on the right measure long before anyone presses Play. Nothing has to be typed and
+  MuseScore does not need to be the front window.
+- **MuseScore without the plugin** jumps with its own Find / Go to (Ctrl+F), so any written measure
+  works — but the measure has to be *typed*, so MuseScore must be the front window on that machine.
+  If Windows won't bring it forward, that device starts from the top and says so instead of editing
+  the score.
 - **Songsterr (browser)** clicks the bar under Songsterr's own measure number and then checks
   Songsterr's play cursor really landed there. Some measures can't be jumped to at all: Songsterr
   draws repeated measures only once, and compresses runs of empty ones, and such a measure has no
@@ -307,14 +312,14 @@ host page focused is enough.
 
 If you would rather use MuseScore's window yourself during a song, or keep the host page on a
 phone, start that machine's adapter with **`BandCue MuseScore Bridge - Helix Cue.cmd`** instead of
-the plain Connect launcher. It claims `Ctrl+Alt+P` system-wide, so the cue arrives whatever has
-focus. Use it on exactly one machine per room — it prints `Listening for the Ctrl+Alt+P cue
-system-wide` when it has the hotkey, and says so plainly if another application already owns it. A
-cue captured this way is relayed to the host, which still issues the Play, so `host-only` control
-mode keeps working unchanged.
+the plain Connect launcher. It claims the live controls `Ctrl+Alt+A/P/S/N/B/O` (Arm, Play, Stop,
+Next, Previous, Open) system-wide, so they arrive whatever has focus. Use it on exactly one machine
+per room. The console confirms each shortcut separately and says plainly if another application
+already owns one. Captured actions are relayed to the host, so `host-only` control and the usual
+safety checks keep working unchanged.
 
-To pick a different combination, or to run it by hand, the underlying flag is `--cue-hotkey`
-(`-CueHotkey` on the launcher script) — see
+To pick different combinations, or to run it by hand, use the per-action hotkey flags
+(`-PlayHotkey`/`-CueHotkey`, `-StopHotkey`, and so on in the launcher script) — see
 [Configuration.md](docs/Configuration.md#external-cue-helix-and-other-pedals).
 
 The count-in is measured **from the Helix's cue**, not from when the keystroke finished reaching
