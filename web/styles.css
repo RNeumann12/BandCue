@@ -263,6 +263,10 @@ button:disabled {
   color: white;
 }
 
+.partial-start-toggle {
+  grid-column: 1 / -1;
+}
+
 .auto-run {
   display: grid;
   gap: 7px;

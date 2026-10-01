@@ -76,9 +76,12 @@ import type {
   ExternalHotkeyAction,
   SetlistSong,
   ServerMessage,
+  RoomState,
   TransportAction,
+  TransportCommand,
   TransportStatus
 } from "../shared/protocol.js";
+import { decideTransportReconciliation } from "../shared/transport-reconcile.js";
 
 interface Args {
   room?: string;
@@ -162,6 +165,11 @@ const TRIGGER_RESOLVE_TTL_MS = 10 * 60_000;
 const BRIDGE_PING_INTERVAL_MS = 1000;
 // How long an attached plugin may take to claim a command that is already due.
 const BRIDGE_CLAIM_GRACE_MS = 300;
+// How much longer a command the attached plugin claimed may take to report,
+// after the normal --bridge-fallback-ms, before it is declared failed. The
+// keyboard fallback is never used for a claimed command (see
+// triggerMuseScoreTransport), so this only bounds how long the host waits to hear.
+const BRIDGE_LATE_RESULT_MS = 5000;
 const BRIDGE_SOCKET_SILENCE_MS = 6000;
 // Opening a score through the plugin: it has this long to claim the request
 // (otherwise the adapter opens the score itself), and once claimed, this long to
@@ -323,7 +331,21 @@ let ws: WebSocket | undefined;
 let wsUrl: string | undefined;
 let roomUrl: string | undefined;
 let lastDiscoveryError = "";
-let serverOffsetMs = 0;
+// undefined until the first clockSyncResult of a connection, so blendOffset
+// adopts the first fresh sample as-is instead of slewing up from 0 -- and so
+// nothing is ever scheduled against an offset that was never measured.
+let serverOffsetMs: number | undefined;
+// This helper's id in the room (from serverHello), to find its own manual
+// calibration in roomState when catching up on a missed command.
+let myClientId: string | undefined;
+// Highest transport sequence this helper has acted on, and its action. Lets a
+// roomState catch up on commands broadcast while the socket was down. Survives
+// reconnects on purpose: a Stop missed during a Wi-Fi blip must still stop
+// MuseScore once the socket is back.
+let lastTransportSequenceId = 0;
+let lastTransportAction: TransportAction | undefined;
+let lastServerContactAt = 0;
+let heartbeatTimer: NodeJS.Timeout | undefined;
 let inferredPlayback: AdapterPlaybackState = "unknown";
 let lastMuseScoreStatus: MuseScoreStatus | undefined;
 let currentSong: SetlistSong | undefined;
@@ -446,10 +468,19 @@ async function connect(): Promise<void> {
     return;
   }
 
-  ws = new WebSocket(wsUrl);
+  const socket = new WebSocket(wsUrl);
+  ws = socket;
 
-  ws.on("open", () => {
+  socket.on("open", () => {
     console.log(`Connected to BandCue room at ${roomUrl}`);
+    // Start each connection from a clean clock estimate, like every other
+    // client: pre-disconnect samples may predate a sleep/resume clock step or
+    // belong to a coordinator that has since restarted with a new time anchor,
+    // and the lowest-RTT filter would keep preferring them for a whole window.
+    samples.length = 0;
+    serverOffsetMs = undefined;
+    lastServerContactAt = Date.now();
+    startHeartbeat(socket);
     send({
       type: "clientHello",
       deviceName: args.name,
@@ -460,8 +491,15 @@ async function connect(): Promise<void> {
     pollMuseScore();
   });
 
-  ws.on("message", (raw) => {
-    const message = JSON.parse(raw.toString()) as ServerMessage;
+  socket.on("message", (raw) => {
+    lastServerContactAt = Date.now();
+    let message: ServerMessage;
+    try {
+      message = JSON.parse(raw.toString()) as ServerMessage;
+    } catch {
+      return;
+    }
+
     if (message.type === "clockSyncResult") {
       const sample = calculateClockSample(
         message.clientSentAt,
@@ -485,52 +523,20 @@ async function connect(): Promise<void> {
       return;
     }
 
+    if (message.type === "serverHello") {
+      myClientId = message.clientId;
+      return;
+    }
+
     if (message.type === "transportCommand") {
-      currentSong = message.currentSong?.song;
-      currentSongUpdatedAt = message.currentSong?.updatedAt;
-      const manualOffsetMs = message.manualOffsetMs ?? 0;
-      const dueLocalAt = message.scheduledServerTime + manualOffsetMs - serverOffsetMs;
-      const delayMs = delayUntilServerTime(
-        message.scheduledServerTime + manualOffsetMs,
-        Date.now(),
-        serverOffsetMs
-      );
-      reportCommandStatus({
-        ready: true,
-        action: message.action,
-        sequenceId: message.sequenceId,
-        status: "pending",
-        detail: `MuseScore ${message.action} command scheduled${formatManualOffset(manualOffsetMs)}`,
-        at: Date.now()
-      });
-      queueBridgeCommand({
-        action: message.action,
-        sequenceId: message.sequenceId,
-        dueLocalAt,
-        scheduledServerTime: message.scheduledServerTime + manualOffsetMs,
-        resetBeforePlay: Boolean(message.resetBeforePlay),
-        startMeasure: message.action === "play" && message.resetBeforePlay
-          ? startMeasureForSong(currentSong)
-          : undefined,
-        currentSong,
-        status: "queued",
-        createdAt: Date.now()
-      });
-      const dispatchLeadMs = message.action === "play" && !hasActiveBridge()
-        // Jumping to a measure adds prefix keys, and every prefix key costs a
-        // command gap. Start that much earlier rather than letting the extra
-        // keys push the setup past the lead time and grow it for the whole
-        // session (adjustDispatchLeadForSetupMargin).
-        ? Math.min(museScoreDispatchLeadMs() + gotoMeasureLeadMs(currentSong), delayMs)
-        : 0;
-      setTimeout(() => {
-        void triggerMuseScoreTransport(
-          message.action,
-          message.sequenceId,
-          dueLocalAt,
-          Boolean(message.resetBeforePlay)
-        );
-      }, Math.max(0, delayMs - dispatchLeadMs));
+      if (message.action === "play" && serverOffsetMs === undefined) {
+        // No clock sample yet on this connection, so the downbeat cannot be
+        // placed on this machine's clock. The roomState that follows the first
+        // sample catches up on it (or skips it if too little count-in is left).
+        return;
+      }
+      handleTransportCommand(message);
+      return;
     }
 
     if (message.type === "openSongCommand") {
@@ -574,21 +580,179 @@ async function connect(): Promise<void> {
         prepareBridgeStartMeasure("the song changed");
         void reportMuseScoreStatus();
       }
+      reconcileTransportFromRoomState(message);
       return;
     }
   });
 
-  ws.on("close", () => {
+  socket.on("close", () => {
+    if (ws !== socket) {
+      return;
+    }
     console.log("Disconnected from coordinator; reconnecting in 2s.");
     stopIntervals();
+    stopHeartbeat();
     setTimeout(() => {
       void connect();
     }, 2000);
   });
 
-  ws.on("error", (error) => {
+  socket.on("error", (error) => {
     console.error(error.message);
   });
+}
+
+// The coordinator answers our 1 Hz clockSync, so no server contact for this
+// long means a half-open socket (Wi-Fi drop, coordinator machine asleep) that
+// never produced a close event. Without this the helper could sit on a dead
+// socket for as long as TCP retransmits take to give up, while the room has
+// already dropped it and its Play/Stop commands go nowhere.
+const HEARTBEAT_TIMEOUT_MS = 6000;
+const HEARTBEAT_CHECK_INTERVAL_MS = 2000;
+
+function startHeartbeat(socket: WebSocket): void {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (Date.now() - lastServerContactAt > HEARTBEAT_TIMEOUT_MS) {
+      console.warn(`No word from the coordinator for ${HEARTBEAT_TIMEOUT_MS} ms; reconnecting.`);
+      // terminate() skips the closing handshake a dead peer would never answer
+      // and fires 'close', which schedules the reconnect.
+      socket.terminate();
+    }
+  }, HEARTBEAT_CHECK_INTERVAL_MS);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
+  }
+}
+
+/** Room time minus this machine's clock. Only meaningful once a clock sample exists. */
+function roomOffsetMs(): number {
+  return serverOffsetMs ?? 0;
+}
+
+function handleTransportCommand(message: TransportCommand): void {
+  lastTransportSequenceId = message.sequenceId;
+  lastTransportAction = message.action;
+  currentSong = message.currentSong?.song;
+  currentSongUpdatedAt = message.currentSong?.updatedAt;
+  const manualOffsetMs = message.manualOffsetMs ?? 0;
+  // A Stop is the only command that can arrive before the first clock sample
+  // (Plays wait for one). It is scheduled for "now", so run it now rather than
+  // against an assumed offset of 0.
+  const dueLocalAt = serverOffsetMs === undefined
+    ? Date.now()
+    : message.scheduledServerTime + manualOffsetMs - serverOffsetMs;
+  const delayMs = serverOffsetMs === undefined
+    ? 0
+    : delayUntilServerTime(message.scheduledServerTime + manualOffsetMs, Date.now(), serverOffsetMs);
+  reportCommandStatus({
+    ready: true,
+    action: message.action,
+    sequenceId: message.sequenceId,
+    status: "pending",
+    detail: `MuseScore ${message.action} command scheduled${formatManualOffset(manualOffsetMs)}`,
+    at: Date.now()
+  });
+  queueBridgeCommand({
+    action: message.action,
+    sequenceId: message.sequenceId,
+    dueLocalAt,
+    scheduledServerTime: message.scheduledServerTime + manualOffsetMs,
+    resetBeforePlay: Boolean(message.resetBeforePlay),
+    startMeasure: message.action === "play" && message.resetBeforePlay
+      ? startMeasureForSong(currentSong)
+      : undefined,
+    currentSong,
+    status: "queued",
+    createdAt: Date.now()
+  });
+  const dispatchLeadMs = message.action === "play" && !hasActiveBridge()
+    // Jumping to a measure adds prefix keys, and every prefix key costs a
+    // command gap. Start that much earlier rather than letting the extra
+    // keys push the setup past the lead time and grow it for the whole
+    // session (adjustDispatchLeadForSetupMargin).
+    ? Math.min(museScoreDispatchLeadMs() + gotoMeasureLeadMs(currentSong), delayMs)
+    : 0;
+  setTimeout(() => {
+    void triggerMuseScoreTransport(
+      message.action,
+      message.sequenceId,
+      dueLocalAt,
+      Boolean(message.resetBeforePlay)
+    );
+  }, Math.max(0, delayMs - dispatchLeadMs));
+}
+
+/**
+ * Catches up on a transport command broadcast while this helper was
+ * disconnected. Every roomState carries the authoritative transport, so a Stop
+ * missed during a Wi-Fi blip still stops MuseScore once the socket is back, and
+ * a Play missed early in its count-in still starts on the beat.
+ */
+function reconcileTransportFromRoomState(state: RoomState): void {
+  const transport = state.transport;
+  if (!transport || typeof transport.sequenceId !== "number") {
+    return;
+  }
+
+  const manualOffsetMs = manualOffsetForSelf(state);
+  const playLeadMs = serverOffsetMs === undefined || !transport.scheduledServerTime
+    ? undefined
+    : transport.scheduledServerTime + manualOffsetMs - serverOffsetMs - Date.now();
+  const decision = decideTransportReconciliation({
+    transport,
+    lastSequenceId: lastTransportSequenceId,
+    lastAction: lastTransportAction,
+    playLeadMs
+  });
+
+  switch (decision.kind) {
+    case "reset-tracking":
+      lastTransportSequenceId = transport.sequenceId;
+      lastTransportAction = undefined;
+      return;
+    case "adopt-sequence":
+      lastTransportSequenceId = transport.sequenceId;
+      return;
+    case "schedule-play":
+      console.log(`Catching up on Play #${transport.sequenceId} missed while disconnected.`);
+      handleTransportCommand({
+        type: "transportCommand",
+        action: "play",
+        leaderId: transport.leaderId ?? "",
+        sequenceId: transport.sequenceId,
+        scheduledServerTime: transport.scheduledServerTime ?? 0,
+        manualOffsetMs,
+        resetBeforePlay: true,
+        currentSong: state.currentSong
+      });
+      return;
+    case "execute-stop":
+      console.log(`Catching up on Stop #${transport.sequenceId} missed while disconnected.`);
+      handleTransportCommand({
+        type: "transportCommand",
+        action: "stop",
+        leaderId: transport.leaderId ?? "",
+        sequenceId: transport.sequenceId,
+        scheduledServerTime: transport.scheduledServerTime ?? 0,
+        manualOffsetMs: 0,
+        resetBeforePlay: false,
+        currentSong: state.currentSong
+      });
+      return;
+    case "wait-for-clock":
+    case "none":
+      return;
+  }
+}
+
+function manualOffsetForSelf(state: RoomState): number {
+  const self = myClientId ? state.clients?.find((client) => client.id === myClientId) : undefined;
+  return self?.clock?.manualOffsetMs ?? 0;
 }
 
 async function resolveRoomEndpoint(): Promise<{ roomUrl: string; wsUrl: string }> {
@@ -973,6 +1137,45 @@ async function triggerMuseScoreTransport(
     return;
   }
 
+  // The plugin took the command and is still attached, but its result is late
+  // (MuseScore's UI thread busy at the downbeat). It may well have started or
+  // stopped playback already -- and the keyboard path is a Space *toggle*, so
+  // firing it now would undo exactly what the plugin just did, a second late.
+  // A MuseScore too busy to answer the plugin would not take keystrokes any
+  // sooner either, so keep waiting for the plugin's word instead.
+  if (
+    !bridgeResult &&
+    queuedBridgeCommand?.claimedAt !== undefined &&
+    primaryBridgeSocket?.readyState === WebSocket.OPEN
+  ) {
+    queuedBridgeCommand.status = "claimed";
+    reportCommandStatus({
+      ready: true,
+      action,
+      sequenceId,
+      status: "pending",
+      detail: `MuseScore Bridge accepted ${action} but has not confirmed it yet; not sending keys, which would toggle it back`,
+      controlPath: "musescore-bridge",
+      at: Date.now()
+    });
+    const lateResult = await waitForBridgeResult(sequenceId, BRIDGE_LATE_RESULT_MS);
+    if (lateResult?.status === "succeeded") {
+      applyBridgeCommandResult(action, sequenceId, lateResult);
+      return;
+    }
+    reportCommandStatus({
+      ready: false,
+      action,
+      sequenceId,
+      status: "failed",
+      detail: lateResult?.detail
+        ?? `MuseScore Bridge accepted ${action} but never confirmed it; check MuseScore`,
+      controlPath: lateResult?.controlPath ?? "musescore-bridge",
+      at: Date.now()
+    });
+    return;
+  }
+
   if (bridgeResult?.status === "failed") {
     console.warn(`MuseScore bridge ${action} failed: ${bridgeResult.detail ?? "No detail reported"}`);
     if (bridgeResult.controlPath === "musescore-plugin-failed") {
@@ -1146,7 +1349,7 @@ $firedAtLocal = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       // either land on it or the command failed outright.
       startMeasure: action === "play" && resetBeforePlay ? startMeasure ?? 1 : undefined,
       firedAtServerTime: Number.isFinite(commandResult?.firedAtLocal)
-        ? Math.round((commandResult?.firedAtLocal ?? Date.now()) + serverOffsetMs)
+        ? Math.round((commandResult?.firedAtLocal ?? Date.now()) + roomOffsetMs())
         : undefined,
       at: Date.now()
     });
@@ -1236,7 +1439,7 @@ function forwardHotkey(binding: GlobalHotkeyBinding, inputAtLocalMs: number, age
   send({
     type: "externalCue",
     action: binding.action,
-    cueAtServerTime: Math.round(inputAtLocalMs + serverOffsetMs),
+    cueAtServerTime: Math.round(inputAtLocalMs + roomOffsetMs()),
     source: `${binding.hotkey.label} on ${args.name}`
   });
   console.log(
@@ -1432,7 +1635,7 @@ function applyWarmTriggerSuccess(
     // Same keys as the shell path, so the same measure was reached.
     startMeasure: action === "play" && resetBeforePlay ? startMeasure ?? 1 : undefined,
     firedAtServerTime: Number.isFinite(result.firedAtLocal)
-      ? Math.round((result.firedAtLocal ?? Date.now()) + serverOffsetMs)
+      ? Math.round((result.firedAtLocal ?? Date.now()) + roomOffsetMs())
       : undefined,
     at: Date.now()
   });
@@ -1762,14 +1965,14 @@ function applyBridgeCommandResult(
   // The helper runs on this machine, so its timestamps share this clock: how
   // early the command reached it, and how far from the downbeat it fired.
   const firedAtServerTime = command.helperFiredAt !== undefined
-    ? command.helperFiredAt + serverOffsetMs
+    ? command.helperFiredAt + roomOffsetMs()
     : undefined;
   if (command.helperFiredAt !== undefined) {
     const leadMs = command.helperReceivedAt !== undefined ? Math.round(command.dueLocalAt - command.helperReceivedAt) : undefined;
     console.log(
       `[timing] MuseScore ${action} #${sequenceId} through bridge: fired ${Math.round(command.helperFiredAt - command.dueLocalAt)} ms from the downbeat`
         + (leadMs !== undefined ? `, command arrived ${leadMs} ms ahead` : "")
-        + `, clock offset ${Math.round(serverOffsetMs)} ms`
+        + `, clock offset ${Math.round(roomOffsetMs())} ms`
     );
   }
   reportCommandStatus({

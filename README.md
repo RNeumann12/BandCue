@@ -284,6 +284,13 @@ accepted, preventing accidental double starts. The host picks a control mode:
 - **Leader can stop** — the host starts; the current transport leader or host can stop.
 - **Everyone can stop** — any connected device can stop playback.
 
+**Play waits for every device.** Play (and a setlist auto-start) stays blocked until every device
+that plays the current song is ready *and* has finished syncing its clock — a device that just
+(re)connected needs about a second. A device whose app the song does not use (MuseScore during a
+Songsterr-only song) never blocks. The host warning names the device being waited for. If one
+member's device is broken for the evening, disconnect it or tick **Start without devices that are
+not ready** to start with whoever is ready.
+
 ### Timing Calibration
 
 The host page shows each device's round-trip time, clock offset, jitter, and an overall timing
@@ -450,9 +457,10 @@ popup (or disconnect the extension) so this machine doesn't pop open Songsterr t
 External helpers (a MuseScore plugin or local script) can drive playback through the bridge HTTP
 API on `127.0.0.1:4731`: report status to `POST /status`, poll `GET /commands`, claim/complete
 with `POST /commands/{sequenceId}/claim` and `/result`, and read the privacy-safe local catalog
-from `GET /catalog`. A claimed bridge command gets the fallback window
-(`--bridge-fallback-ms`, default 900 ms after the scheduled time) to report its result; a command
-still unclaimed at the downbeat falls back immediately. Without an active bridge helper, Windows
+from `GET /catalog`. A command still unclaimed at the downbeat falls back to keyboard control
+immediately; a command the attached plugin claimed never does, even when its result is late
+(`--bridge-fallback-ms`, default 900 ms), because the keyboard path is a toggle that could undo a
+start the plugin already made. Without an active bridge helper, Windows
 activation/reset begins during the count-in (`--dispatch-lead-ms`, default 1000 ms) and only the
 final Play key waits for the scheduled instant. The full bridge protocol is in
 [docs/Adapters.md](docs/Adapters.md#musescore-bridge-api).

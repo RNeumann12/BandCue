@@ -40,7 +40,12 @@ npm run check    # type-check only (tsc --noEmit) — fast feedback
 npm test         # run the vitest unit suite once
 npm run verify   # type-check + full Vitest suite (also runs before release packaging)
 npm run build    # emit compiled JS (tsc -p tsconfig.json)
+npm run test:smoke  # build, then start the compiled coordinator and check HTTP, WebSocket join,
+                    # clock sync, and that a malformed frame cannot crash it
 ```
+
+CI runs the smoke test on **Node 18** as well, because the Raspberry Pi coordinator is pinned to
+Node 18 while the development tooling needs Node 20+.
 
 Run a single test file with vitest directly:
 

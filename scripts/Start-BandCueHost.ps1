@@ -74,22 +74,44 @@ $processInfo.UseShellExecute = $false
 $processInfo.RedirectStandardOutput = $true
 $processInfo.RedirectStandardError = $false
 
-$process = [System.Diagnostics.Process]::new()
-$process.StartInfo = $processInfo
 $openedHost = $false
+# If BandCue exits on its own mid-rehearsal (a crash, not Ctrl+C -- Ctrl+C ends
+# this script too), start it again: every device reconnects by itself and the
+# host page republishes the setlist. Give up if it keeps dying right away.
+$recentCrashes = @()
+$process = $null
 
 try {
-  [void]$process.Start()
-  while (-not $process.StandardOutput.EndOfStream) {
-    $line = $process.StandardOutput.ReadLine()
-    Write-Host $line
-    if (-not $openedHost -and $line -match "Host controls:\s+(http://\S+)") {
-      $openedHost = $true
-      Start-Process $Matches[1]
+  while ($true) {
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $processInfo
+    [void]$process.Start()
+    while (-not $process.StandardOutput.EndOfStream) {
+      $line = $process.StandardOutput.ReadLine()
+      Write-Host $line
+      if (-not $openedHost -and $line -match "Host controls:\s+(http://\S+)") {
+        $openedHost = $true
+        Start-Process $Matches[1]
+      }
     }
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    if ($exitCode -eq 0) {
+      exit 0
+    }
+
+    $now = Get-Date
+    $recentCrashes = @($recentCrashes | Where-Object { ($now - $_).TotalSeconds -lt 60 }) + $now
+    if ($recentCrashes.Count -gt 5) {
+      Write-Host ""
+      Write-Host "BandCue keeps stopping (exit code $exitCode); not restarting it again." -ForegroundColor Red
+      exit $exitCode
+    }
+    Write-Host ""
+    Write-Host "BandCue stopped unexpectedly (exit code $exitCode). Restarting in 2 seconds..." -ForegroundColor Yellow
+    Write-Host "Devices reconnect by themselves; keep the host page open." -ForegroundColor Yellow
+    Start-Sleep -Seconds 2
   }
-  $process.WaitForExit()
-  exit $process.ExitCode
 } finally {
   if ($process -and -not $process.HasExited) {
     $process.Kill($true)

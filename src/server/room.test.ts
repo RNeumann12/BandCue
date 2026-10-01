@@ -400,12 +400,32 @@ describe("RoomController", () => {
       capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
     }, 2000);
 
+    // Telemetry carries over, but the sample count restarts: the device is
+    // building a fresh offset estimate and must not look synced yet.
     expect(room.getState(2000).clients.find((client) => client.id === secondConnection.id)?.clock)
       .toEqual({
         rttMs: 12,
         offsetMs: 3,
-        jitterMs: 1
+        jitterMs: 1,
+        sampleCount: 0
       });
+  });
+
+  it("counts a WebSocket pong as proof of life for the idle sweep", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const throttledHost = room.addClient(undefined, {
+      type: "clientHello",
+      deviceName: "Host behind MuseScore",
+      role: "host",
+      capabilities: []
+    }, 1000);
+
+    // No application message for 20 s (page timers throttled), but the
+    // connection keeps answering pings.
+    room.markAlive(throttledHost.id, 18_000);
+    room.sweepIdleClients(21_000);
+
+    expect(room.getState(21_000).clients.map((client) => client.id)).toContain(throttledHost.id);
   });
 
   it("lets the host set manual calibration for a connected device", () => {

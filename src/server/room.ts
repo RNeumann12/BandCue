@@ -136,7 +136,12 @@ export class RoomController {
       connectedAt: now,
       lastSeenAt: now,
       capabilities: hello.capabilities,
-      clock: recentClock,
+      // The path telemetry (RTT, jitter) and the manual calibration carry over,
+      // so a quick reconnect keeps its count-in budget and its nudge. The sample
+      // count does not: every client starts a fresh clock estimate on connect,
+      // and restoring the old count would show the host a device as synced
+      // while it is still measuring its offset.
+      clock: recentClock ? { ...recentClock, sampleCount: 0 } : undefined,
       socket
     };
 
@@ -198,6 +203,18 @@ export class RoomController {
         }
       }
       this.removeClient(id);
+    }
+  }
+
+  /**
+   * Records transport-level proof of life (a WebSocket pong) without any
+   * application message. Keeps the idle sweep from evicting a client whose page
+   * timers are throttled but whose connection is perfectly healthy.
+   */
+  markAlive(clientId: string, now = this.now()): void {
+    const client = this.clients.get(clientId);
+    if (client) {
+      client.lastSeenAt = now;
     }
   }
 

@@ -581,6 +581,23 @@ function recordActionCost(sampleMs) {
   actionCostEstimateMs += ACTION_COST_SMOOTHING * (bounded - actionCostEstimateMs);
 }
 
+function isDocumentHidden() {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
+let unthrottledChannel;
+/** Resolves on the next message-channel task, which hidden-tab throttling does not delay. */
+function yieldUnthrottled() {
+  if (typeof MessageChannel !== "function") {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  unthrottledChannel ??= new MessageChannel();
+  return new Promise((resolve) => {
+    unthrottledChannel.port1.onmessage = () => resolve(undefined);
+    unthrottledChannel.port2.postMessage(undefined);
+  });
+}
+
 /** Waits for the target instant; returns how late the wait actually woke up. */
 async function waitUntilLocalTime(dueLocalAt) {
   if (!dueLocalAt) {
@@ -591,7 +608,17 @@ async function waitUntilLocalTime(dueLocalAt) {
     if (remainingMs <= 0) {
       break;
     }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(remainingMs, MAX_SLEEP_CHUNK_MS)));
+    if (isDocumentHidden()) {
+      // Chrome clamps timers in a hidden tab to at least 1 s (a minute once it
+      // has been hidden for a while), so a setTimeout here could wake up a whole
+      // second past the downbeat. Message-channel tasks are not throttled: yield
+      // through one instead. It polls the clock more often than a timer would,
+      // but only for the last stretch of a count-in, and it keeps the page's
+      // event loop free in between.
+      await yieldUnthrottled();
+    } else {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(remainingMs, MAX_SLEEP_CHUNK_MS)));
+    }
   }
   while (Date.now() < dueLocalAt) {
     // Busy-wait for at most FINAL_SPIN_MS.

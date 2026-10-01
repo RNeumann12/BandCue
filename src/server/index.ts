@@ -188,6 +188,25 @@ wss.on("connection", (socket) => {
     return rateCount > RATE_MAX_MESSAGES;
   };
 
+  // ws emits 'error' for protocol violations (oversized payload, invalid UTF-8,
+  // bad opcode). With no listener, Node turns that into an uncaught exception
+  // and one malformed frame from any device would take the whole room down
+  // mid-song. ws already closes the socket itself; the 'close' handler below
+  // removes the client.
+  socket.on("error", (error) => {
+    console.warn(`WebSocket error from ${clientId ?? "unidentified client"}: ${error.message}`);
+  });
+
+  // Browsers answer server pings from the network stack even when the page's
+  // timers are throttled (a backgrounded or fully covered host window is cut to
+  // one timer wake-up a minute), so a pong is proof of life the idle sweep must
+  // honor -- otherwise it evicts a perfectly connected host.
+  socket.on("pong", () => {
+    if (clientId) {
+      room.markAlive(clientId);
+    }
+  });
+
   const helloTimer = setTimeout(() => {
     socket.close(1008, "clientHello timeout");
   }, HELLO_TIMEOUT_MS);
@@ -293,6 +312,29 @@ function shutdown(signal: string): void {
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+// Last line of defense. Every client message is already fenced in its own
+// try/catch, so anything reaching here comes from a timer or an I/O callback.
+// Exiting would drop every device mid-song and lose the room's in-memory state;
+// the room's state changes are small and self-contained, so logging and staying
+// up is the better failure mode during a rehearsal.
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught exception (coordinator keeps running):", error);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection (coordinator keeps running):", reason);
+});
+
+// A listen failure (port already taken) is the one error that must end the
+// process, with a message instead of a stack trace.
+server.on("error", (error: NodeJS.ErrnoException) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(`Port ${PORT} is already in use. Is another BandCue coordinator running? Set PORT to use a different one.`);
+  } else {
+    console.error("Coordinator HTTP server failed:", error);
+  }
+  process.exit(1);
+});
 
 server.listen(PORT, HOST, () => {
   discoverySocket = startDiscoveryResponder({

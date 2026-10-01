@@ -38,6 +38,25 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
 
+  pi-node18:
+    # The Raspberry Pi coordinator is pinned to Node 18 (Raspbian Buster cannot
+    # run the official Node 20+ armv7l builds), while the dev tooling needs 20+.
+    # Build with a current Node, then run the built coordinator on Node 18.
+    name: Coordinator smoke test (Node 18, Pi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 18
+      - run: node scripts/smoke-coordinator.mjs
+
   android:
     name: Android unit tests
     runs-on: ubuntu-latest

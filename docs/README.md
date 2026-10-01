@@ -14,6 +14,7 @@ Detailed documentation for BandCue, local-first playback sync for band rehearsal
 | [chrome-extension-privacy.md](chrome-extension-privacy.md) | Review the Chrome Web Store privacy policy for the Songsterr adapter. |
 | [chrome-web-store-release.md](chrome-web-store-release.md) | Prepare Chrome Web Store listing text, assets, and reviewer notes. |
 | [Improvements.md](Improvements.md) | See the living tracker of active reliability and workflow work. |
+| [Android-Open-Issues.md](Android-Open-Issues.md) | See the Android adapter's known sync/reliability problems from the 2026-10-01 audit. |
 
 ## Quick map
 

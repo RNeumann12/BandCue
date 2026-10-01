@@ -36,6 +36,7 @@
     "check:extension": "tsc -p extension/songsterr/tsconfig.background.json && tsc -p extension/songsterr/tsconfig.popup.json && tsc -p extension/songsterr/tsconfig.scanner.json && tsc -p extension/songsterr/tsconfig.content.json",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:smoke": "npm run build && node scripts/smoke-coordinator.mjs",
     "verify": "npm run check && npm test",
     "prepackage:release": "npm run verify"
   },

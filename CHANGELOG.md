@@ -15,8 +15,38 @@
   MuseScore once after the first setup). Whenever MuseScore runs without the plugin and nothing is
   playing or armed, the helper closes MuseScore's startup dialogs and presses that shortcut.
   Opt out with `--plugin-setup 0` / `--plugin-autostart 0`.
+- **Play waits for every device.** Play and setlist auto-start stay blocked until every device that
+  plays the current song is ready and has finished syncing its clock, so the band no longer starts
+  with one member silent or a beat off. Devices whose app the song does not use never block. A new
+  host switch, **Start without devices that are not ready**, starts with whoever is ready instead.
+- **The launchers restart BandCue if it crashes.** `BandCue Host.cmd` and `npm run dev:all` restart
+  a coordinator or MuseScore helper that exits unexpectedly (giving up after 5 crashes in a minute).
 
 ### Fixed
+
+- **One malformed message could crash the coordinator mid-song.** Any client sending an oversized or
+  invalid WebSocket frame made the coordinator exit. It now logs the error and drops only that
+  client, and logs (instead of dying on) any other uncaught error.
+- **A host page in the background was dropped from the room.** Chrome throttles a hidden page's
+  timers to one wake-up a minute (a browser window fully covered by MuseScore counts as hidden), so
+  its clock pings stopped and the 12 s idle check removed the host — relayed MuseScore/Helix
+  hotkeys then failed with "no host is connected". WebSocket pongs now count as signs of life, and
+  a pending auto-load keeps advancing on room updates.
+- **A device that reconnected during a count-in started at the wrong time.** The first room state
+  after joining arrives before any clock sample, and the Songsterr extension caught up on a missed
+  Play using an assumed clock offset of 0 (minutes off against a Pi coordinator without internet).
+  Catch-up now waits for the first clock sample, and the coordinator no longer shows a reconnected
+  device as already synced.
+- **The MuseScore helper now recovers like the other adapters.** It catches up on Play/Stop missed
+  while disconnected (a Stop during a Wi-Fi blip used to leave MuseScore playing), detects a dead
+  connection within 6 s instead of waiting for TCP to give up, and rebuilds its clock estimate on
+  every reconnect.
+- **A late MuseScore Bridge reply could stop the song it just started.** When the plugin had taken
+  a command but answered after `--bridge-fallback-ms`, the helper also sent the keyboard Space
+  toggle, undoing the plugin's start. A command the attached plugin claimed now never falls back to
+  keys.
+- **A Songsterr tab in the background started up to a second late.** The final wait before the
+  downbeat no longer depends on timers Chrome throttles in hidden tabs.
 
 - **The plugin launch after a song change failed whenever MuseScore showed a dialog.** Every new
   MuseScore opens with an update notice and a welcome tour, both modal, so the old `Alt+P`, `Down`,

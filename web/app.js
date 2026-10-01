@@ -22,6 +22,8 @@ import {
   getTimingQuality,
   getReadyAdapters,
   canHostPlay,
+  CLOCK_MIN_SAMPLES,
+  startBlockers,
   playBlockedReason,
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
@@ -100,6 +102,7 @@ const elements = {
   autoAdvanceToggle: $input("#autoAdvanceToggle"),
   autoStartToggle: $input("#autoStartToggle"),
   autoRunStatus: $("#autoRunStatus"),
+  partialStartToggle: $input("#partialStartToggle"),
   playButton: $button("#playButton"),
   stopButton: $button("#stopButton"),
   setlistPanel: $("#setlistPanel"),
@@ -140,6 +143,7 @@ const CALIBRATION_STORAGE_KEY = "bandcue:calibration";
 const DEVICE_NAME_STORAGE_KEY = "bandcue:name";
 const HELIX_SETTINGS_STORAGE_KEY = "bandcue:helix-settings";
 const AUTO_RUN_STORAGE_KEY = "bandcue:auto-run";
+const PARTIAL_START_STORAGE_KEY = "bandcue:allow-partial-start";
 const LEGACY_SETLIST_STORAGE_KEY = "playsync:setlist";
 const LEGACY_CALIBRATION_STORAGE_KEY = "playsync:calibration";
 const LEGACY_DEVICE_NAME_STORAGE_KEY = "playsync:name";
@@ -165,6 +169,10 @@ let calibrations = loadCalibrations();
 let appliedCalibrationByClientId = {};
 let transportRequestPending = false;
 let autoRun = loadAutoRunSettings();
+// Off by default: Play waits until every device that should play is ready and
+// clock-synced (see startBlockers). The host can opt into starting with
+// whoever is ready, e.g. when one member's device is broken for the evening.
+let allowPartialStart = loadAllowPartialStart();
 // Auto-runner phase: "idle" | "loading" (a song has been sent to the adapters
 // and we are waiting for it to be loaded enough to play).
 let setlistRunPhase = "idle";
@@ -196,6 +204,9 @@ if (isHost) {
   applyHostHotkeyHints();
   renderGlobalHelixSettings();
   renderAutoRunSettings();
+  if (elements.partialStartToggle) {
+    elements.partialStartToggle.checked = allowPartialStart;
+  }
   document.addEventListener("keydown", handleHostHotkey);
   renderSetlist();
 }
@@ -209,6 +220,17 @@ elements.autoStartToggle?.addEventListener("change", () => {
   setAutoRun({ start: elements.autoStartToggle.checked });
 });
 elements.armButton?.addEventListener("click", toggleArm);
+elements.partialStartToggle?.addEventListener("change", () => {
+  allowPartialStart = elements.partialStartToggle.checked;
+  try {
+    localStorage.setItem(PARTIAL_START_STORAGE_KEY, JSON.stringify(allowPartialStart));
+  } catch {
+    // Storage can be unavailable (private window); the choice still applies now.
+  }
+  if (lastState) {
+    renderHostControls(lastState, getReadyAdapters(lastState));
+  }
+});
 elements.controlModeSelect?.addEventListener("change", () => {
   publishSafety({ controlMode: elements.controlModeSelect.value });
 });
@@ -324,8 +346,8 @@ function requestPlayAtCue(cueAtServerTime) {
     return;
   }
 
-  if (!canHostPlay(lastState)) {
-    setText(elements.hostWarning, playBlockedReason(lastState));
+  if (!canHostPlay(lastState, { allowPartialStart })) {
+    setText(elements.hostWarning, playBlockedReason(lastState, { allowPartialStart }));
     return;
   }
 
@@ -613,6 +635,10 @@ function renderState(state) {
 
 function renderVolatileState(state) {
   scheduleTimingRowsRender(state);
+  // Clock-only updates arrive about once a second and are the one thing that
+  // still runs on time in a backgrounded host page (its timers can be cut to
+  // one wake-up a minute). Let them carry a pending auto-load forward too.
+  tickSetlistLoading();
 }
 
 function scheduleTimingRowsRender(state) {
@@ -669,7 +695,10 @@ function getStableClientSignature(client) {
     role: client.role,
     capabilities: client.capabilities,
     status: client.status,
-    manualOffsetMs: client.clock?.manualOffsetMs
+    manualOffsetMs: client.clock?.manualOffsetMs,
+    // Only the synced/syncing edge, not the live numbers: Play waits for a
+    // freshly connected device to finish syncing and must re-enable when it does.
+    clockSynced: (client.clock?.sampleCount ?? 0) >= CLOCK_MIN_SAMPLES
   };
 }
 
@@ -693,7 +722,7 @@ function renderHostControls(state, readyAdapters) {
     return;
   }
 
-  const playAvailable = canHostPlay(state);
+  const playAvailable = canHostPlay(state, { allowPartialStart });
   elements.playButton.disabled = !playAvailable || transportRequestPending;
   updateStopAvailability(state);
   elements.armButton.disabled = state.transport.status !== "stopped";
@@ -710,7 +739,7 @@ function renderHostControls(state, readyAdapters) {
   } else if (state.transport.status !== "stopped") {
     setText(elements.hostWarning, "Transport is active. Stop before scheduling another play.");
   } else if (!playAvailable) {
-    setText(elements.hostWarning, playBlockedReason(state));
+    setText(elements.hostWarning, playBlockedReason(state, { allowPartialStart }));
   } else {
     setText(elements.hostWarning, "Ready to control: " + readyAdapters.map((device) => device.status.app).join(", "));
   }
@@ -1288,6 +1317,14 @@ function setAutoRun(update) {
   renderAutoRunSettings();
 }
 
+function loadAllowPartialStart() {
+  try {
+    return JSON.parse(localStorage.getItem(PARTIAL_START_STORAGE_KEY) || "false") === true;
+  } catch {
+    return false;
+  }
+}
+
 function loadAutoRunSettings() {
   try {
     return normalizeAutoRunSettings(JSON.parse(localStorage.getItem(AUTO_RUN_STORAGE_KEY) || "{}"));
@@ -1367,11 +1404,15 @@ function driveSetlistRun(state) {
       needsAdapter: isOpenableSong(song),
       elapsedMs: Date.now() - setlistLoadStartedAt,
       settleMs: SETLIST_LOAD_SETTLE_MS,
-      timeoutMs: SETLIST_LOAD_TIMEOUT_MS
+      timeoutMs: SETLIST_LOAD_TIMEOUT_MS,
+      allowPartialStart
     });
 
     if (decision === "timeout") {
-      cancelPendingAutoLoad("Auto-load stopped: no ready adapter for the next song.");
+      const blockers = allowPartialStart ? [] : startBlockers(state);
+      cancelPendingAutoLoad(blockers.length
+        ? `Auto-start stopped: ${blockers[0]}.`
+        : "Auto-load stopped: no ready adapter for the next song.");
     } else if (decision === "play") {
       finishLoadingCurrentSong();
     } else {

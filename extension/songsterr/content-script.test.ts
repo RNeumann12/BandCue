@@ -1536,6 +1536,21 @@ describe("Songsterr downbeat timing", () => {
     expect(latenessMs).toBeGreaterThanOrEqual(200);
   });
 
+  it("does not rely on throttled timers while the tab is hidden", async () => {
+    const { context } = loadContentScript();
+    context.document.visibilityState = "hidden";
+    // A hidden tab's timers are clamped to >= 1 s; model the worst case, a timer
+    // that does not fire within the count-in at all.
+    context.setTimeout = () => 0;
+    context.MessageChannel = MessageChannel;
+
+    const due = Date.now() + 120;
+    const latenessMs = await context.waitUntilLocalTime(due);
+
+    expect(latenessMs).toBeGreaterThanOrEqual(0);
+    expect(latenessMs).toBeLessThan(20);
+  });
+
   it("returns immediately when no downbeat was scheduled", async () => {
     const { context } = loadContentScript();
 

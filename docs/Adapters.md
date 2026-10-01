@@ -399,8 +399,9 @@ and a click in the score between arming and Play cannot move where the song star
 
 These route through the same handlers as the HTTP endpoints, so the two transports cannot drift
 apart. While a bridge is attached the adapter reports **`requiredLeadMs: 0`** — there is no window
-to foreground and no shell to launch — and if the plugin claims a command but reports no result
-within `--bridge-fallback-ms`, keyboard control still runs.
+to foreground and no shell to launch. A command the attached plugin has claimed never falls back to
+keyboard control, even when its result is late: the plugin may already have started or stopped
+playback, and the keyboard path is a Space *toggle* that would undo it.
 
 ### MuseScore Bridge API
 
@@ -433,9 +434,13 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4731/commands/12/result `
   -ContentType application/json
 ```
 
-**Fallback timing.** If a bridge helper claimed a command but no result arrives within
-`--bridge-fallback-ms` (default **900 ms**) after the scheduled time, the Windows keyboard path
-runs. A command still unclaimed at the downbeat falls back immediately. Without an active bridge
+**Fallback timing.** A command still unclaimed at the downbeat falls back to the Windows keyboard
+path immediately. A claimed command gets `--bridge-fallback-ms` (default **900 ms**) after the
+scheduled time to report its result. If the plugin that claimed it is still attached, a late result
+does *not* trigger keyboard control — the plugin may already have acted, and the keyboard path is a
+Space toggle that would undo it — so the adapter reports the command as pending and waits up to 5 s
+more for the plugin's word before declaring it failed. Only a claimed command whose plugin has
+disconnected (or one claimed over the HTTP API) falls back to the keyboard. Without an active bridge
 helper, Windows activation/reset begins during the count-in and only the final Play key waits for
 `dueLocalAt` (`--dispatch-lead-ms`, default **1000 ms**). `open-song` does not use the transport
 queue: an attached plugin gets an `open` and has 2 s to claim it, else the helper opens the score in

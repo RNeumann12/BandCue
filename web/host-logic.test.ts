@@ -34,6 +34,7 @@ import {
   normalizeStoredSong,
   parseDurationInput,
   playBlockedReason,
+  startBlockers,
   previousSongIndex,
   sanitizeDurationMs,
   sanitizeTempoPercent,
@@ -51,6 +52,7 @@ const readyAdapter = (overrides: Record<string, unknown> = {}) => ({
   deviceName: "MuseScore laptop",
   role: "desktop-adapter",
   status: { ready: true, app: "musescore" },
+  clock: { rttMs: 10, offsetMs: 0, jitterMs: 1, sampleCount: 10 },
   ...overrides
 });
 
@@ -359,6 +361,45 @@ describe("transport and safety decisions", () => {
     expect(canHostPlay(undefined)).toBe(false);
   });
 
+  it("waits for every device that plays the song to be ready and clock-synced", () => {
+    const notReady = readyAdapter({
+      id: "a2",
+      deviceName: "Bass iPad",
+      status: { ready: false, app: "songsterr", detail: "No Songsterr tab detected" }
+    });
+    const syncing = readyAdapter({
+      id: "a3",
+      deviceName: "Drums laptop",
+      status: { ready: true, app: "songsterr" },
+      clock: { rttMs: 10, offsetMs: 0, sampleCount: 2 }
+    });
+
+    expect(canHostPlay(armedStoppedState([readyAdapter(), notReady]))).toBe(false);
+    expect(canHostPlay(armedStoppedState([readyAdapter(), syncing]))).toBe(false);
+    expect(playBlockedReason(armedStoppedState([readyAdapter(), notReady, syncing])))
+      .toMatch(/Bass iPad is not ready \(No Songsterr tab detected\) \(\+1 more\)/);
+    expect(startBlockers(armedStoppedState([readyAdapter(), syncing])))
+      .toEqual(["Drums laptop is still syncing its clock"]);
+
+    // The host can explicitly start with whoever is ready.
+    expect(canHostPlay(armedStoppedState([readyAdapter(), notReady]), { allowPartialStart: true })).toBe(true);
+  });
+
+  it("ignores devices whose app the current song does not use", () => {
+    const idleSongsterr = readyAdapter({
+      id: "a2",
+      deviceName: "Guitar tab",
+      status: { ready: false, app: "songsterr" }
+    });
+    const museScoreOnly = {
+      ...armedStoppedState([readyAdapter(), idleSongsterr]),
+      currentSong: { song: { id: "s", title: "Score", sourceType: "musescore", museScoreSource: "score.mscz" } }
+    };
+
+    expect(startBlockers(museScoreOnly)).toEqual([]);
+    expect(canHostPlay(museScoreOnly)).toBe(true);
+  });
+
   it("explains why play is blocked, most-specific first", () => {
     expect(playBlockedReason(undefined)).toMatch(/not ready/);
     expect(playBlockedReason({ transport: { status: "running" }, safety: { armed: true }, clients: [] }))
@@ -641,6 +682,15 @@ describe("setlistLoadDecision", () => {
   it("waits for the settle window once an adapter is ready, then plays", () => {
     expect(setlistLoadDecision(readyState, { ...options, elapsedMs: 1000 })).toBe("wait");
     expect(setlistLoadDecision(readyState, { ...options, elapsedMs: 4500 })).toBe("play");
+
+    // A device still syncing holds the auto-start, and times out like a missing one.
+    const syncingState = {
+      transport: { status: "stopped" },
+      clients: [readyAdapter({ clock: { rttMs: 10, offsetMs: 0, sampleCount: 1 } })]
+    };
+    expect(setlistLoadDecision(syncingState, { ...options, elapsedMs: 4500 })).toBe("wait");
+    expect(setlistLoadDecision(syncingState, { ...options, elapsedMs: 20000 })).toBe("timeout");
+    expect(setlistLoadDecision(syncingState, { ...options, elapsedMs: 4500, allowPartialStart: true })).toBe("play");
   });
 });
 

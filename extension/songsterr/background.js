@@ -524,6 +524,13 @@ async function connect() {
     }
 
     if (message.type === "transportCommand") {
+      if (message.action === "play" && serverOffsetMs === undefined) {
+        // Connected, but no clock sample yet: the downbeat cannot be placed on
+        // this machine's clock. Leave the sequence unhandled -- the roomState
+        // that follows the first clock sample (~400 ms) reconciles it with a
+        // real offset, or skips it if too little count-in is left.
+        return;
+      }
       handleTransportCommand(message);
       return;
     }
@@ -656,8 +663,13 @@ function handleTransportCommand(message) {
   lastTransportAction = message.action;
   const manualOffsetMs = message.manualOffsetMs || 0;
   // The room-time downbeat converted to this machine's clock. The content
-  // script does the final wait against this instant.
-  const dueLocalAt = message.scheduledServerTime + manualOffsetMs - (serverOffsetMs ?? 0);
+  // script does the final wait against this instant. Only a Stop can get here
+  // before the first clock sample (Plays wait for one), and a Stop is scheduled
+  // for "now": run it now rather than against an assumed offset of 0, which on
+  // a coordinator whose clock is minutes off would put it minutes away.
+  const dueLocalAt = serverOffsetMs === undefined
+    ? Date.now()
+    : message.scheduledServerTime + manualOffsetMs - serverOffsetMs;
   const delayMs = Math.max(0, dueLocalAt - Date.now());
   reportCommandStatus({
     action: message.action,
@@ -757,7 +769,9 @@ function describeTiming(timing) {
   if (timing.hidden) {
     // Chrome clamps timers in a hidden tab to >= 1 s; nothing in the extension
     // can work around that, but the member can (keep the tab visible).
-    notes.push("the Songsterr tab was in the background, which throttles its timers -- keep it visible while playing");
+    // The content script's own wait no longer depends on timers there, but
+    // Chrome still deprioritizes everything else in a background tab.
+    notes.push("the Songsterr tab was in the background, which Chrome deprioritizes -- keep it visible while playing");
   }
   return notes.join("; ");
 }
@@ -794,6 +808,14 @@ function reconcileTransportFromRoomState(state) {
     transport.action === "play" &&
     transport.scheduledServerTime
   ) {
+    if (serverOffsetMs === undefined) {
+      // The coordinator sends a roomState the moment we join, before any clock
+      // sample exists. Judging the lead (or scheduling the Play) against an
+      // assumed offset of 0 would start this device off-beat, or never -- the
+      // Pi coordinator's clock can be minutes away from ours. Leave the
+      // sequence unconsumed; the roomState after the first sample retries.
+      return;
+    }
     const manualOffsetMs = manualOffsetForSelf(state);
     const dueLocalAt = transport.scheduledServerTime + manualOffsetMs - (serverOffsetMs ?? 0);
     if (dueLocalAt - Date.now() >= MIN_RECONCILE_LEAD_MS) {

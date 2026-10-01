@@ -527,17 +527,51 @@ export function getReadyAdapters(state) {
   ) ?? [];
 }
 
-export function canHostPlay(state) {
+/**
+ * Devices that should play the current song but cannot be trusted to start on
+ * the beat yet: not ready, or still measuring their clock offset (a device that
+ * just (re)connected). Starting without them is how a band ends up with one
+ * player silent or a beat off, so Play waits for them unless the host
+ * explicitly allows a partial start. A device whose app the current song does
+ * not use (MuseScore during a Songsterr-only song) never blocks.
+ * @returns {string[]} one human-readable reason per blocking device
+ */
+export function startBlockers(state) {
+  const song = state?.currentSong?.song;
+  const blockers = [];
+  for (const device of state?.clients ?? []) {
+    if (device.role !== "desktop-adapter") continue;
+    const transportCapability = (device.capabilities ?? []).find((capability) => capability.canPlay && capability.canStop);
+    const app = device.status?.app ?? transportCapability?.app;
+    if (song && !helixAppAppliesToSong(app, song)) continue;
+    if (!device.status?.ready) {
+      blockers.push(`${device.deviceName} is not ready${device.status?.detail ? ` (${device.status.detail})` : ""}`);
+    } else if ((device.clock?.sampleCount ?? 0) < CLOCK_MIN_SAMPLES) {
+      blockers.push(`${device.deviceName} is still syncing its clock`);
+    }
+  }
+  return blockers;
+}
+
+/**
+ * @param {{ allowPartialStart?: boolean }} [options] allowPartialStart: start
+ * with whichever devices are ready instead of waiting for every one.
+ */
+export function canHostPlay(state, options = {}) {
+  const allowPartialStart = Boolean(options.allowPartialStart);
   return Boolean(
     state &&
       state.safety?.armed &&
       state.transport.status === "stopped" &&
       getReadyAdapters(state).length > 0 &&
-      !tempoBlockedReason(state)
+      !tempoBlockedReason(state) &&
+      (allowPartialStart || !startBlockers(state).length)
   );
 }
 
-export function playBlockedReason(state) {
+/** @param {{ allowPartialStart?: boolean }} [options] */
+export function playBlockedReason(state, options = {}) {
+  const allowPartialStart = Boolean(options.allowPartialStart);
   if (!state) return "Room state is not ready yet.";
   if (state.transport.status !== "stopped") return "Transport is already active.";
   if (!state.safety?.armed) return "Arm playback before pressing Play.";
@@ -545,6 +579,11 @@ export function playBlockedReason(state) {
   if (tempoReason) return tempoReason;
   if (!getReadyAdapters(state).length) {
     return "No ready desktop adapter yet. Connect MuseScore or Songsterr before starting.";
+  }
+  const blockers = allowPartialStart ? [] : startBlockers(state);
+  if (blockers.length) {
+    const more = blockers.length > 1 ? ` (+${blockers.length - 1} more)` : "";
+    return `Waiting for every device: ${blockers[0]}${more}. Disconnect it, or allow starting without it.`;
   }
   return "Play is not available yet.";
 }
@@ -599,7 +638,7 @@ export function describeAutoRun(settings) {
 //   - "timeout": no adapter ever became ready; the caller should abort the run
 // `needsAdapter` is false for songs nothing can open (e.g. plain "other" notes),
 // in which case there is nothing to load and playback can start immediately.
-export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, timeoutMs }) {
+export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, timeoutMs, allowPartialStart = false }) {
   if (state?.transport?.status && state.transport.status !== "stopped") {
     return "wait";
   }
@@ -608,7 +647,9 @@ export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, 
     return "play";
   }
 
-  if (!getReadyAdapters(state).length) {
+  // An auto-started song goes through the same "every device" rule as a
+  // pressed Play, so the band never auto-starts with one member left behind.
+  if (!getReadyAdapters(state).length || (!allowPartialStart && startBlockers(state).length)) {
     return elapsedMs >= timeoutMs ? "timeout" : "wait";
   }
 

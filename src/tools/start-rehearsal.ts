@@ -40,27 +40,77 @@ if (publicHost) {
   console.log(`Pinning advertised LAN address to ${publicHost} (PUBLIC_HOST).`);
 }
 
-coordinator = spawnNpm(["run", "dev"], {
-  stdio: ["inherit", "pipe", "pipe"],
-  env: publicHost ? { ...process.env, PUBLIC_HOST: publicHost } : process.env
-});
+// Set once the user asks BandCue to stop; after that an exiting child is the
+// shutdown, not a crash, and is never restarted.
+let stopping = false;
 
+// A crashed child is restarted after a short pause: a coordinator or helper
+// that dies mid-rehearsal must not end the rehearsal. Every device reconnects
+// by itself and the host page republishes the setlist. A child that keeps
+// dying right away (bad arguments, port taken) is given up on instead of being
+// restarted forever.
+const RESTART_DELAY_MS = 2000;
+const CRASH_WINDOW_MS = 60_000;
+const MAX_CRASHES_PER_WINDOW = 5;
+
+function restartPolicy(label: string, start: () => void): (code: number | null) => void {
+  const crashes: number[] = [];
+  return (code) => {
+    if (stopping) {
+      return;
+    }
+    const now = Date.now();
+    crashes.push(now);
+    while (crashes.length && now - crashes[0]! > CRASH_WINDOW_MS) {
+      crashes.shift();
+    }
+    if (crashes.length > MAX_CRASHES_PER_WINDOW) {
+      console.error(`${label} exited ${crashes.length} times within a minute; not restarting it again.`);
+      if (label === "Coordinator") {
+        stopAll();
+        process.exitCode = code ?? 1;
+      }
+      return;
+    }
+    console.error(`${label} exited unexpectedly (code ${code ?? "none"}); restarting in ${RESTART_DELAY_MS / 1000}s...`);
+    setTimeout(() => {
+      if (!stopping) {
+        start();
+      }
+    }, RESTART_DELAY_MS);
+  };
+}
+
+const onCoordinatorExit = restartPolicy("Coordinator", startCoordinator);
+const onMuseScoreExit = restartPolicy("MuseScore helper", startMuseScore);
+
+startCoordinator();
 startMuseScore();
-
-coordinator.stdout?.on("data", (chunk) => {
-  process.stdout.write(chunk.toString());
-});
-
-coordinator.stderr?.on("data", (chunk) => process.stderr.write(chunk));
-coordinator.on("exit", (code) => {
-  if (museScore && !museScore.killed) {
-    museScore.kill();
-  }
-  process.exitCode = code ?? 0;
-});
 
 process.on("SIGINT", stopAll);
 process.on("SIGTERM", stopAll);
+
+function startCoordinator(): void {
+  const child = spawnNpm(["run", "dev"], {
+    stdio: ["inherit", "pipe", "pipe"],
+    env: publicHost ? { ...process.env, PUBLIC_HOST: publicHost } : process.env
+  });
+  coordinator = child;
+  child.stdout?.on("data", (chunk) => {
+    process.stdout.write(chunk.toString());
+  });
+  child.stderr?.on("data", (chunk) => process.stderr.write(chunk));
+  child.on("exit", (code) => {
+    if (stopping) {
+      if (museScore && !museScore.killed) {
+        museScore.kill();
+      }
+      process.exitCode = code ?? 0;
+      return;
+    }
+    onCoordinatorExit(code);
+  });
+}
 
 function startMuseScore(): void {
   console.log("");
@@ -89,6 +139,7 @@ function startMuseScore(): void {
   ], {
     stdio: "inherit"
   });
+  museScore.on("exit", (code) => onMuseScoreExit(code));
 }
 
 // Spawns npm in a cross-platform safe way. On Windows, npm is `npm.cmd`, and
@@ -164,6 +215,7 @@ function normalizeBridgePort(value: string | undefined): string {
 }
 
 function stopAll(): void {
+  stopping = true;
   if (museScore && !museScore.killed) {
     museScore.kill();
   }

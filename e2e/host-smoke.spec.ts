@@ -27,6 +27,9 @@ async function joinFakeAdapter(name: string): Promise<WebSocket> {
     capabilities: [{ app: "mock", canPlay: true, canStop: true }]
   }));
   adapter.send(JSON.stringify({ type: "adapterStatus", ready: true, app: "mock" }));
+  // A real adapter measures its clock right after joining, and the host holds
+  // Play until every device has (startBlockers). Report a converged estimate.
+  adapter.send(JSON.stringify({ type: "clockStatus", rttMs: 5, offsetMs: 0, jitterMs: 1, sampleCount: 8 }));
   return adapter;
 }
 
@@ -208,5 +211,53 @@ test("auto-load and auto-start carry the setlist into the next song", async ({ p
       .toBe("stopped");
   } finally {
     adapter.close();
+  }
+});
+
+/**
+ * Play waits for every device: a device that has joined but not finished
+ * syncing its clock holds Play, the host is told which device, and the
+ * explicit override starts without it.
+ */
+test("play waits for a device that is still syncing, unless the host overrides", async ({ page }) => {
+  await page.goto(`/host?token=${TOKEN}`);
+  await expect(page.locator("#roomCode")).toHaveText(new RegExp(ROOM_CODE));
+
+  const synced = await joinFakeAdapter("E2E synced adapter");
+  const syncing = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}`);
+  await new Promise<void>((resolve, reject) => {
+    syncing.once("open", () => resolve());
+    syncing.once("error", reject);
+  });
+  syncing.send(JSON.stringify({
+    type: "clientHello",
+    deviceName: "E2E syncing adapter",
+    role: "desktop-adapter",
+    capabilities: [{ app: "mock", canPlay: true, canStop: true }]
+  }));
+  syncing.send(JSON.stringify({ type: "adapterStatus", ready: true, app: "mock" }));
+
+  try {
+    await expect(page.locator("#devices")).toContainText("E2E syncing adapter");
+    await page.click("#armButton");
+
+    await expect(page.locator("#playButton")).toBeDisabled();
+    await expect(page.locator("#hostWarning")).toContainText("E2E syncing adapter is still syncing its clock");
+
+    await page.check("#partialStartToggle");
+    await expect(page.locator("#playButton")).toBeEnabled();
+
+    await page.uncheck("#partialStartToggle");
+    await expect(page.locator("#playButton")).toBeDisabled();
+
+    // Once the device reports a converged clock, Play opens up by itself.
+    syncing.send(JSON.stringify({ type: "clockStatus", rttMs: 5, offsetMs: 0, jitterMs: 1, sampleCount: 6 }));
+    await expect(page.locator("#playButton")).toBeEnabled();
+
+    // Leave the shared room disarmed for any test that follows.
+    await page.click("#armButton");
+  } finally {
+    synced.close();
+    syncing.close();
   }
 });

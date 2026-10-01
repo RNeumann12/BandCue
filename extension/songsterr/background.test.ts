@@ -196,9 +196,24 @@ function loadBackground(
 
   // Connect via an absolute room URL (no network probe) and deliver one server
   // message through the socket the script opens, mirroring a real coordinator.
-  async function deliverServerMessage(message: unknown) {
+  // A live adapter has measured its clock long before any command arrives, so
+  // one zero-offset sample goes first unless a test asks for a cold clock.
+  async function deliverServerMessage(message: unknown, { coldClock = false } = {}) {
     await context.configureConnection("http://127.0.0.1:4173/");
     await flush();
+    const socket = sockets[sockets.length - 1];
+    if (!coldClock) {
+      const now = Date.now();
+      socket.emit("message", {
+        data: JSON.stringify({ type: "clockSyncResult", clientSentAt: now, serverReceivedAt: now, serverSentAt: now })
+      });
+    }
+    socket.emit("message", { data: JSON.stringify(message) });
+    await flush();
+  }
+
+  // Feeds a message to the socket that is already open, without reconnecting.
+  async function emitOnCurrentSocket(message: unknown) {
     const socket = sockets[sockets.length - 1];
     socket.emit("message", { data: JSON.stringify(message) });
     await flush();
@@ -240,6 +255,7 @@ function loadBackground(
     reloadedTabs,
     transportMessages,
     deliverServerMessage,
+    emitOnCurrentSocket,
     sendRuntimeMessage,
     openConnection,
     evaluate
@@ -749,6 +765,52 @@ describe("play count-in pre-opens the tab", () => {
     expect(updated.filter((u) => u.url)).toHaveLength(0);
   });
 
+});
+
+describe("catch-up waits for a measured clock", () => {
+  // The coordinator sends roomState the moment a device joins, before any clock
+  // sample. A Play scheduled from that would be placed with an assumed offset of
+  // 0 -- minutes off against a Pi coordinator with a stale clock.
+  const scheduledRoom = (scheduledServerTime: number) => ({
+    type: "roomState",
+    clients: [],
+    currentSong: { song: { id: "a", title: "Song A", sourceType: "songsterr", songsterrUrl: SONG_A } },
+    transport: { status: "scheduled", action: "play", sequenceId: 7, scheduledServerTime }
+  });
+
+  it("leaves a scheduled play unconsumed until the first clock sample, then catches up", async () => {
+    const { deliverServerMessage, emitOnCurrentSocket, evaluate } = loadBackground([
+      { id: 1, url: SONG_A, windowId: 1 }
+    ]);
+    const downbeat = Date.now() + 1_000_000;
+
+    await deliverServerMessage(scheduledRoom(downbeat), { coldClock: true });
+    expect(evaluate("lastTransportSequenceId")).toBe(0);
+
+    const now = Date.now();
+    await emitOnCurrentSocket({ type: "clockSyncResult", clientSentAt: now, serverReceivedAt: now, serverSentAt: now });
+    await emitOnCurrentSocket(scheduledRoom(downbeat));
+    expect(evaluate("lastTransportSequenceId")).toBe(7);
+    expect(evaluate("lastTransportAction")).toBe("play");
+    evaluate("disconnectByUser()");
+  });
+
+  it("ignores a pushed play that arrives before the first clock sample", async () => {
+    const { deliverServerMessage, evaluate } = loadBackground([{ id: 1, url: SONG_A, windowId: 1 }]);
+
+    await deliverServerMessage({
+      type: "transportCommand",
+      action: "play",
+      sequenceId: 3,
+      leaderId: "host",
+      scheduledServerTime: Date.now() + 1_000_000,
+      resetBeforePlay: true,
+      currentSong: { song: { songsterrUrl: SONG_A } }
+    }, { coldClock: true });
+
+    expect(evaluate("lastTransportSequenceId")).toBe(0);
+    evaluate("disconnectByUser()");
+  });
 });
 
 describe("downbeat never navigates or reloads", () => {

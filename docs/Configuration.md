@@ -124,7 +124,7 @@ than executed with adapter authority, so host-only mode and the usual safety che
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--bridge-port <n>` | unset (off) | Expose the localhost bridge API on this port (e.g. `4731`). |
-| `--bridge-fallback-ms <n>` | **900** | Grace after the scheduled time for an already-claimed bridge command. Unclaimed commands fall back immediately. |
+| `--bridge-fallback-ms <n>` | **900** | Grace after the scheduled time for an already-claimed bridge command to report its result. Unclaimed commands fall back to the keyboard immediately; a command claimed by a still-attached plugin never does (the adapter waits up to 5 s more, then reports it failed). |
 
 ### Local score catalog
 
