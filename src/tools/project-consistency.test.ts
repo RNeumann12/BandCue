@@ -37,21 +37,26 @@ describe("cross-platform project metadata", () => {
       .toEqual(DEFAULT_LAN_SCAN_SUBNETS);
   });
 
-  it("delegates MuseScore song changes to the process-aware Windows helper", () => {
+  // MuseScore closes every dialog when a score closes, so a dialog plugin could
+  // never survive a song change -- which is what made each change a whole new
+  // MuseScore. The bridge only changes songs in place while it has no window,
+  // and it must close the current score first: with one open, MuseScore opens
+  // the next score in a new process instead.
+  it("keeps the MuseScore bridge resident and changing songs in its own window", () => {
     const plugin = read("extension/musescore/bandcue.qml");
-    const openSongBranch = plugin.indexOf('if (message.action === "open-song")');
-    const transportClaim = plugin.indexOf('root.send({ type: "claim"', openSongBranch);
+    const adapter = read("src/adapters/musescore-windows.ts");
 
-    expect(openSongBranch).toBeGreaterThan(-1);
-    expect(transportClaim).toBeGreaterThan(openSongBranch);
-    expect(plugin.slice(openSongBranch, transportClaim)).toContain(
-      'controlPath: "musescore-plugin-delegated"'
-    );
-    expect(plugin).not.toContain("root.readScore(");
-    expect(plugin).toContain('if (message.type === "retire")');
-    expect(plugin).toContain("Qt.quit()");
-    expect(plugin).toContain("root.parent.Window.window");
-    expect(plugin).toContain("pluginWindow.showMinimized()");
+    expect(plugin).not.toMatch(/^\s*pluginType:/mu);
+    const openScore = plugin.indexOf("function openScore(message)");
+    expect(openScore).toBeGreaterThan(-1);
+    expect(plugin.indexOf("closeScore()", openScore)).toBeLessThan(plugin.indexOf("readScore(", openScore));
+    // A retired copy must stay retired, or two plugins would both start playback.
+    expect(plugin).toContain("root.dormant = true");
+    expect(plugin).toContain("running: !root.dormant");
+    // Only the adapter's pings tell the plugin its connection is still alive.
+    expect(adapter).toContain('{ type: "ping", at: now }');
+    expect(adapter).toContain('type: "open",');
+    expect(adapter).not.toContain("SendWait('%p')");
   });
 
   // An attached plugin claims the play command, which suppresses the keyboard

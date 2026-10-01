@@ -7,9 +7,11 @@ rem   Hotkey flags claim BandCue's live host controls system-wide, so Arm, Play,
 rem               Stop, Next, Previous, and Open work whatever window has focus.
 rem   -BridgePort opens the localhost bridge for the "BandCue Bridge" MuseScore
 rem               plugin, which is what starts playback at bar 1 -- keystrokes
-rem               cannot move MuseScore's playback position.
+rem               cannot move MuseScore's playback position -- and changes
+rem               songs inside the running MuseScore.
 rem
-rem Enable the plugin in MuseScore (Home > Plugins) and leave its window open.
+rem The helper installs, enables, and starts the plugin itself; restart
+rem MuseScore once after the very first run so it picks the plugin up.
 rem Use this on one machine per room. Extra arguments are passed through (e.g.
 rem -Room A4DB23), except the hotkeys and -BridgePort which are already set.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Start-BandCueMuseScoreAdapter.ps1" -ArmHotkey "ctrl+alt+a" -CueHotkey "ctrl+alt+p" -StopHotkey "ctrl+alt+s" -NextSongHotkey "ctrl+alt+n" -PreviousSongHotkey "ctrl+alt+b" -OpenSongHotkey "ctrl+alt+o" -BridgePort 4731 %*

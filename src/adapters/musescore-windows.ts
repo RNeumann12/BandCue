@@ -11,9 +11,17 @@ import {
   type Server as HttpServer,
   type ServerResponse
 } from "node:http";
+import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
+import {
+  BRIDGE_PLUGIN_SENDKEYS,
+  BRIDGE_PLUGIN_SHORTCUT,
+  pluginVersion,
+  setUpBridgePlugin
+} from "./musescore-plugin-setup.js";
 import {
   matchMuseScoreSong,
   matchedCatalogEntry,
@@ -94,6 +102,10 @@ interface Args {
   scoreFolders: string[];
   scoreCatalogRecursive: boolean;
   closeOldInstances: boolean;
+  /** Install/refresh the bridge plugin and its MuseScore settings at startup. */
+  pluginSetup: boolean;
+  /** Start the bridge plugin in a running MuseScore when none is attached. */
+  pluginAutostart: boolean;
   globalHotkeys: Record<ExternalHotkeyAction, string | undefined>;
 }
 
@@ -143,6 +155,31 @@ const WARM_TRIGGER_LEAD_MS = 550;
 const MAX_WARM_TRIGGER_LEAD_MS = 1000;
 // How long a resolved MuseScore window stays good before it is looked up again.
 const TRIGGER_RESOLVE_TTL_MS = 10 * 60_000;
+// The plugin reconnects when the adapter goes quiet (MuseScore's socket API has
+// no disconnect callback), so every attached plugin hears from the adapter this
+// often; and a plugin that stops answering for BRIDGE_SOCKET_SILENCE_MS is
+// dropped, because the plugin's own heartbeat runs every 2 s.
+const BRIDGE_PING_INTERVAL_MS = 1000;
+// How long an attached plugin may take to claim a command that is already due.
+const BRIDGE_CLAIM_GRACE_MS = 300;
+const BRIDGE_SOCKET_SILENCE_MS = 6000;
+// Opening a score through the plugin: it has this long to claim the request
+// (otherwise the adapter opens the score itself), and once claimed, this long to
+// finish -- generous, because MuseScore may be asking about unsaved changes.
+const BRIDGE_OPEN_CLAIM_MS = 2000;
+const BRIDGE_OPEN_RESULT_MS = 60_000;
+// Starting the plugin means pressing its shortcut while MuseScore is in front.
+// One launch watches the foreground this long before the next poll starts a
+// fresh watch; a plugin gets this long to attach after the shortcut; and a
+// MuseScore where the shortcut went in but nothing attached is retried a few
+// times before the host is told to start the plugin by hand.
+const BRIDGE_FOCUS_WATCH_MS = 30_000;
+const BRIDGE_LAUNCH_ATTACH_WAIT_MS = 4000;
+const BRIDGE_LAUNCH_RETRY_MS = 10_000;
+const BRIDGE_LAUNCH_IDLE_RETRY_MS = 5000;
+const MAX_BRIDGE_LAUNCHES_PER_PROCESS = 3;
+const BUNDLED_PLUGIN_PATH = fileURLToPath(new URL("../../extension/musescore/bandcue.qml", import.meta.url));
+const BUNDLED_PLUGIN_VERSION = pluginVersion(readOptionalText(BUNDLED_PLUGIN_PATH));
 
 // Shared by every script that activates MuseScore and sends it keystrokes.
 // Declared once so the priming spawn (below) loads exactly what a real
@@ -163,6 +200,52 @@ public static class BandCueWin32 {
   public static extern uint timeBeginPeriod(uint uMilliseconds);
   [DllImport("winmm.dll")]
   public static extern uint timeEndPeriod(uint uMilliseconds);
+}
+"@
+`.trim();
+
+// Window handling for the scripts that start the plugin and close old
+// MuseScores. MuseScore's dialogs are top-level windows *owned* by its main
+// window, which is how they are told apart from it.
+const MUSESCORE_WINDOW_HELPER = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class BandCueWindows {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc proc, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint cmd);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int cmd);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  public static uint OwnerOf(IntPtr hWnd) { uint pid; GetWindowThreadProcessId(hWnd, out pid); return pid; }
+  public static IntPtr OwnerWindow(IntPtr hWnd) { return GetWindow(hWnd, 4); }
+  public static IntPtr FirstDialog(IntPtr main) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      if (h != main && IsWindowVisible(h) && GetWindow(h, 4) == main) { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  public static void CloseDialogs(IntPtr main) {
+    for (int i = 0; i < 5; i++) {
+      IntPtr dialog = FirstDialog(main);
+      if (dialog == IntPtr.Zero) { return; }
+      PostMessage(dialog, 0x0010, IntPtr.Zero, IntPtr.Zero);
+      System.Threading.Thread.Sleep(400);
+    }
+  }
+  // Asks for the foreground and nothing more. No input tricks: anything typed
+  // while Windows keeps another app in front lands in that app.
+  public static void RequestFocus(IntPtr h) {
+    if (IsIconic(h)) { ShowWindow(h, 9); }
+    SetForegroundWindow(h);
+  }
 }
 "@
 `.trim();
@@ -207,6 +290,11 @@ interface BridgeCommand {
   playback?: AdapterPlaybackState;
   title?: string;
   windowTitle?: string;
+  /** A bridge helper's machine-readable failure reason, e.g. "open-elsewhere". */
+  reason?: string;
+  /** When the helper got the command and when it fired it, in this machine's clock. */
+  helperReceivedAt?: number;
+  helperFiredAt?: number;
 }
 
 // This must be initialized before the top-level parseArgs call below. Keeping it
@@ -240,7 +328,11 @@ let inferredPlayback: AdapterPlaybackState = "unknown";
 let lastMuseScoreStatus: MuseScoreStatus | undefined;
 let currentSong: SetlistSong | undefined;
 let currentSongUpdatedAt: number | undefined;
-let bridgeStatus: Partial<MuseScoreStatus> & { playback?: AdapterPlaybackState } = {};
+let bridgeStatus: Partial<MuseScoreStatus> & {
+  playback?: AdapterPlaybackState;
+  /** The plugin's word on whether MuseScore would start playback now (sounds loaded). */
+  playReady?: boolean;
+} = {};
 let bridgeLastSeenAt: number | undefined;
 let scoreCatalog: LocalScoreCatalog = scanMuseScoreCatalog([]);
 let lastPublishedCatalogAt: number | undefined;
@@ -252,9 +344,31 @@ let statusReportInFlight = false;
 let statusReportQueued = false;
 let bridgeServer: HttpServer | undefined;
 let bridgeSocketServer: WebSocketServer | undefined;
-// Attached MuseScore plugins. Normally one; a set so a stale socket during a
-// plugin reload cannot displace the live one.
+// Attached MuseScore plugins. Only the primary one takes commands: MuseScore
+// runs a fresh copy of the plugin every time it is started from the menu or the
+// shortcut, and two copies would both start playback. Later copies are retired
+// the moment they connect.
 const bridgeSockets = new Set<WebSocket>();
+let primaryBridgeSocket: WebSocket | undefined;
+interface BridgeSocketInfo {
+  lastMessageAt: number;
+  version?: string;
+  canOpenScores?: boolean;
+}
+const bridgeSocketInfo = new WeakMap<WebSocket, BridgeSocketInfo>();
+let bridgePingTimer: NodeJS.Timeout | undefined;
+// The one-time plugin start (see ensureBridgeRunning).
+let bridgeLaunchInFlight = false;
+let nextBridgeLaunchAt = 0;
+const bridgeLaunchesByProcess = new Map<number, number>();
+let openSongInFlight = false;
+// MuseScore processes that were running when the plugin setup changed something
+// only a restart picks up; the plugin cannot be started in those.
+const staleMuseScoreProcesses = new Set<number>();
+// What the host should be told while no plugin is attached: that the setup
+// could not run, or why starting the plugin failed.
+let pluginSetupNotice: string | undefined;
+let bridgeLaunchNotice: string | undefined;
 const samples: ClockSample[] = [];
 // Self-adjusting copy of --dispatch-lead-ms: grows when a command's setup
 // (spawn + activate + prefix keys) overruns the lead time and fires the Play
@@ -296,6 +410,9 @@ const trigger = new MuseScoreTrigger(
 
 if (args.bridgePort !== undefined) {
   startBridge(args.bridgePort);
+  if (args.pluginSetup) {
+    void setUpPluginForBridge();
+  }
 }
 refreshScoreCatalog();
 // Start the resident trigger now so its shell launch and assembly load (~1.8 s
@@ -645,6 +762,7 @@ function pollMuseScore(): void {
   void reportMuseScoreStatus();
   pollTimer = setInterval(() => {
     void reportMuseScoreStatus();
+    void ensureBridgeRunning("no BandCue Bridge is attached");
   }, 2000);
 
   if (!catalogTimer) {
@@ -695,7 +813,7 @@ async function reportMuseScoreStatus(): Promise<void> {
       songMatch: match,
       detail: match.status === "missing" || match.status === "ambiguous"
         ? match.detail
-        : mismatch ?? status.detail,
+        : mismatch ?? bridgeNotice() ?? status.detail,
       // A bridge helper drives real playback state and isn't subject to the
       // keyboard fallback's setup latency, so it needs no extra count-in. The
       // resident trigger does its setup before the cue, so it asks for barely
@@ -745,12 +863,37 @@ function stopIntervals(): void {
   }
 }
 
+/**
+ * What the host should know about the bridge plugin, if anything: an attached
+ * plugin older than this checkout's, a restart MuseScore still owes the plugin
+ * setup, or why the plugin could not be started. Undefined when all is well or
+ * the bridge is not in use.
+ */
+function bridgeNotice(): string | undefined {
+  if (args.bridgePort === undefined) {
+    return undefined;
+  }
+  const primary = primaryBridgeSocket ? bridgeSocketInfo.get(primaryBridgeSocket) : undefined;
+  if (primary) {
+    if (BUNDLED_PLUGIN_VERSION && primary.version !== BUNDLED_PLUGIN_VERSION) {
+      return `MuseScore is running BandCue Bridge ${primary.version ?? "1.x"}; restart MuseScore to load ${BUNDLED_PLUGIN_VERSION}, which changes songs without restarting MuseScore`;
+    }
+    return undefined;
+  }
+  return pluginSetupNotice ?? bridgeLaunchNotice;
+}
+
 async function getMuseScoreStatus(): Promise<MuseScoreStatus> {
   if (bridgeStatus.ready !== undefined) {
+    // Not ready while MuseScore is still loading the score's sounds: a Play now
+    // would be dropped by MuseScore, and the host should not offer one.
+    const loading = bridgeStatus.playReady === false && Boolean(bridgeStatus.title);
     return {
-      ready: Boolean(bridgeStatus.ready),
+      ready: Boolean(bridgeStatus.ready) && !loading,
       title: bridgeStatus.title,
-      detail: bridgeStatus.detail || "MuseScore bridge status reported",
+      detail: loading
+        ? `MuseScore is still loading the sounds for ${bridgeStatus.title}`
+        : bridgeStatus.detail || "MuseScore bridge status reported",
       windowTitle: bridgeStatus.windowTitle
     };
   }
@@ -807,6 +950,15 @@ async function triggerMuseScoreTransport(
   resetBeforePlay = false
 ): Promise<void> {
   const queuedBridgeCommand = bridgeCommands.get(sequenceId);
+  // A command with no count-in (Stop) gets here before an attached plugin's
+  // claim can make the round trip; without this short wait the keyboard path
+  // would run instead of the plugin, by a race the plugin usually lost.
+  if (queuedBridgeCommand?.status === "queued" && primaryBridgeSocket) {
+    const claimDeadline = Date.now() + BRIDGE_CLAIM_GRACE_MS;
+    while (queuedBridgeCommand.status === "queued" && Date.now() < claimDeadline) {
+      await sleep(5);
+    }
+  }
   // A helper that claimed the command gets the configured grace period to
   // report its result. An unclaimed command has already had the whole count-in
   // to be noticed, so waiting another 900 ms here only makes fallback late.
@@ -823,6 +975,20 @@ async function triggerMuseScoreTransport(
 
   if (bridgeResult?.status === "failed") {
     console.warn(`MuseScore bridge ${action} failed: ${bridgeResult.detail ?? "No detail reported"}`);
+    if (bridgeResult.controlPath === "musescore-plugin-failed") {
+      // The plugin ran inside MuseScore and MuseScore refused (no score, sounds
+      // still loading). Keystrokes would meet the same MuseScore -- only late.
+      reportCommandStatus({
+        ready: false,
+        action,
+        sequenceId,
+        status: "failed",
+        detail: bridgeResult.detail ?? `MuseScore could not ${action}`,
+        controlPath: bridgeResult.controlPath,
+        at: Date.now()
+      });
+      return;
+    }
   }
 
   const requestedTempo = sanitizeTempoPercent(currentSong?.tempoPercent);
@@ -1370,13 +1536,170 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     return;
   }
 
-  // A score change creates a new MuseScore process. Retire every currently
-  // attached plugin first so an old window that refuses to close (for example
-  // because it has unsaved edits) can never keep receiving Play/Stop too.
-  broadcastBridgeSocket({ type: "retire", reason: "BandCue is opening another score" });
+  openSongInFlight = true;
+  try {
+    // A plugin whose shortcut was just pressed attaches within a second; the
+    // alternative is opening the score in a second MuseScore behind its back.
+    // (A launch still waiting for MuseScore to come to the front is not worth
+    // holding the song for.)
+    const launchDeadline = Date.now() + 3000;
+    while (bridgeLaunchInFlight && !primaryBridgeSocket && Date.now() < launchDeadline) {
+      await sleep(100);
+    }
+    // Preferred: the attached plugin swaps the score inside the MuseScore that
+    // is already running, which takes a second or two and keeps the plugin.
+    if (await openScoreThroughBridge(sequenceId, entry.absolutePath, entry.relativePath)) {
+      return;
+    }
+    await openScoreInNewMuseScore(sequenceId, entry.absolutePath, entry.relativePath);
+  } finally {
+    openSongInFlight = false;
+  }
+}
+
+/**
+ * Asks the attached plugin to open the score in its own MuseScore window.
+ * Returns false when no plugin took the request, so the caller opens the score
+ * itself; true once the plugin claimed it, whatever the outcome -- a claimed
+ * open that fails has already closed or kept the previous score (for example
+ * because MuseScore asked about unsaved changes), and opening a second
+ * MuseScore on top of that would only make it worse.
+ */
+async function openScoreThroughBridge(sequenceId: number, absolutePath: string, relativePath: string): Promise<boolean> {
+  const socket = primaryBridgeSocket;
+  if (!socket || socket.readyState !== WebSocket.OPEN || !bridgeSocketInfo.get(socket)?.canOpenScores) {
+    return false;
+  }
+
+  cleanupBridgeCommands();
+  const command: BridgeCommand = {
+    action: "open-song",
+    sequenceId,
+    dueLocalAt: Date.now(),
+    currentSong,
+    status: "queued",
+    createdAt: Date.now()
+  };
+  bridgeCommands.set(sequenceId, command);
+  sendBridgeSocket(socket, {
+    type: "open",
+    sequenceId,
+    path: resolve(absolutePath),
+    // What MuseScore calls the score once open, so the plugin can tell a score
+    // that is already showing from one it has to load.
+    scoreName: basename(absolutePath, extname(absolutePath)),
+    startMeasure: startMeasureForSong(currentSong),
+    currentSong
+  });
+
+  const claimDeadline = Date.now() + BRIDGE_OPEN_CLAIM_MS;
+  while (command.status === "queued" && Date.now() < claimDeadline) {
+    await sleep(40);
+  }
+  if (command.status === "queued") {
+    command.status = "expired";
+    console.warn("MuseScore Bridge did not take the song change; opening the score in a new MuseScore instead.");
+    return false;
+  }
+
+  const resultDeadline = Date.now() + BRIDGE_OPEN_RESULT_MS;
+  while (command.status === "claimed" && Date.now() < resultDeadline) {
+    await sleep(40);
+  }
+  let succeeded = command.status === "succeeded";
+  if (command.status === "claimed") {
+    command.status = "expired";
+  }
+  // A different score means a different window title to aim keystrokes at.
+  triggerResolvedAt = undefined;
+  if (command.reason === "open-elsewhere") {
+    succeeded = await moveBridgeToScoreWindow(basename(absolutePath, extname(absolutePath)), command);
+  }
+  if (succeeded) {
+    lastMuseScoreStatus = {
+      ready: true,
+      title: command.title ?? basename(absolutePath, extname(absolutePath)),
+      windowTitle: command.title,
+      detail: command.detail
+    };
+    inferredPlayback = "stopped";
+  }
+  const detail = command.detail
+    ?? (succeeded
+      ? `Opened MuseScore score ${relativePath} through MuseScore Bridge`
+      : `MuseScore Bridge did not finish opening ${relativePath} within ${Math.round(BRIDGE_OPEN_RESULT_MS / 1000)} s`);
+  console.log(`MuseScore open-song through bridge ${succeeded ? "succeeded" : "failed"}: ${detail}`);
+  reportCommandStatus({
+    ready: succeeded,
+    action: "open-song",
+    sequenceId,
+    status: succeeded ? "succeeded" : "failed",
+    detail,
+    controlPath: command.controlPath ?? "musescore-plugin-open",
+    at: Date.now()
+  });
+  return true;
+}
+
+/**
+ * Recovers from MuseScore handing the score to another MuseScore window that
+ * already had it open (typically an older instance that ignored a close request).
+ * The bridge's own window is empty by then, so the plugin is retired, the empty
+ * window closed, and the plugin started in the window that shows the score --
+ * which is where the band is now looking anyway. Returns whether that worked,
+ * with the outcome written into `command.detail`.
+ */
+async function moveBridgeToScoreWindow(scoreName: string, command: BridgeCommand): Promise<boolean> {
+  broadcastBridgeSocket({ type: "retire", reason: "the score opened in another MuseScore window" }, true);
+  const retireDeadline = Date.now() + 1500;
+  while (primaryBridgeSocket && Date.now() < retireDeadline) {
+    await sleep(50);
+  }
+
+  // Only windows showing no score at all (MuseScore's Home page) are closed:
+  // there is nothing in them to save, so they cannot ask questions.
+  await runPowerShell(`
+${MUSESCORE_WINDOW_HELPER}
+$processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
+Get-Process | Where-Object {
+  $_.MainWindowHandle -ne 0 -and ($_.ProcessName -match $processMatch) -and ($_.MainWindowTitle -match '^MuseScore( Studio)?$')
+} | ForEach-Object {
+  [BandCueWindows]::CloseDialogs($_.MainWindowHandle)
+  $_.CloseMainWindow() | Out-Null
+  [void]$_.WaitForExit(4000)
+}
+`);
+
+  bridgeLaunchesByProcess.clear();
+  nextBridgeLaunchAt = 0;
+  await ensureBridgeRunning("the score is open in another MuseScore window", true, scoreName);
+  const statusDeadline = Date.now() + 1500;
+  while (primaryBridgeSocket && normalizeTitle(bridgeStatus.title ?? "") !== normalizeTitle(scoreName)
+    && Date.now() < statusDeadline) {
+    await sleep(50);
+  }
+  if (primaryBridgeSocket && normalizeTitle(bridgeStatus.title ?? "") === normalizeTitle(scoreName)) {
+    command.detail = `${scoreName} was already open in another MuseScore window; BandCue Bridge moved there`;
+    command.title = scoreName;
+    return true;
+  }
+  command.detail = `${scoreName} is open in another MuseScore window, and BandCue Bridge could not be started there`;
+  return false;
+}
+
+/**
+ * The fallback when no plugin is attached: open the score the Windows way,
+ * which MuseScore 4 turns into a new MuseScore process, close the old one, and
+ * start the plugin in the new one so the next song change can stay in place.
+ */
+async function openScoreInNewMuseScore(sequenceId: number, absolutePath: string, relativePath: string): Promise<void> {
+  // Retire every attached plugin first so an old window that refuses to close
+  // (for example because it has unsaved edits) can never keep receiving
+  // Play/Stop too.
+  broadcastBridgeSocket({ type: "retire", reason: "BandCue is opening another score" }, true);
   await sleep(250);
 
-  const opened = await openLocalScore(entry.absolutePath, entry.relativePath);
+  const opened = await openLocalScore(absolutePath, relativePath);
   if (opened.opened && opened.windowTitle) {
     lastMuseScoreStatus = {
       ready: true,
@@ -1394,10 +1717,13 @@ async function handleOpenSongCommand(sequenceId: number): Promise<void> {
     controlPath: "local-score-catalog",
     at: Date.now()
   });
-  if (opened.opened) {
-    // Normally the reopened score brings a fresh plugin, which gets the start
-    // measure with its `hello`. This covers a plugin that survived the retire.
-    prepareBridgeStartMeasure("the score was opened");
+  if (opened.opened && args.bridgePort !== undefined) {
+    // The new MuseScore has no plugin yet. Starting it now, while the band is
+    // waiting for the song anyway, means the next change is an in-place one.
+    // The plugin gets the start measure with its `hello`.
+    bridgeLaunchesByProcess.clear();
+    nextBridgeLaunchAt = 0;
+    await ensureBridgeRunning("the score was opened without a plugin", true, basename(absolutePath, extname(absolutePath)));
   }
 }
 
@@ -1433,6 +1759,19 @@ function applyBridgeCommandResult(
 
   const mismatch = scoreMismatchDetail(lastMuseScoreStatus);
   console.log(`MuseScore ${action} completed through bridge.`);
+  // The helper runs on this machine, so its timestamps share this clock: how
+  // early the command reached it, and how far from the downbeat it fired.
+  const firedAtServerTime = command.helperFiredAt !== undefined
+    ? command.helperFiredAt + serverOffsetMs
+    : undefined;
+  if (command.helperFiredAt !== undefined) {
+    const leadMs = command.helperReceivedAt !== undefined ? Math.round(command.dueLocalAt - command.helperReceivedAt) : undefined;
+    console.log(
+      `[timing] MuseScore ${action} #${sequenceId} through bridge: fired ${Math.round(command.helperFiredAt - command.dueLocalAt)} ms from the downbeat`
+        + (leadMs !== undefined ? `, command arrived ${leadMs} ms ahead` : "")
+        + `, clock offset ${Math.round(serverOffsetMs)} ms`
+    );
+  }
   reportCommandStatus({
     ready: true,
     action,
@@ -1446,6 +1785,7 @@ function applyBridgeCommandResult(
     startMeasure: action === "play" && command.resetBeforePlay
       ? command.reachedMeasure ?? 1
       : undefined,
+    firedAtServerTime,
     at: command.completedAt ?? Date.now()
   });
 }
@@ -1597,8 +1937,10 @@ function startBridge(port: number): void {
   bridgeServer = createServer((req, res) => {
     const url = new URL(req.url ?? "/", `http://127.0.0.1:${port || 0}`);
 
+    // Reading status or the catalog does not make anyone a bridge: only a helper
+    // that polls /commands, claims, or reports can take a command, so only those
+    // may drop the keyboard path's count-in (see hasActiveBridge).
     if (req.method === "GET" && url.pathname === "/status") {
-      bridgeLastSeenAt = Date.now();
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
         ok: true,
@@ -1613,7 +1955,6 @@ function startBridge(port: number): void {
     }
 
     if (req.method === "GET" && url.pathname === "/catalog") {
-      bridgeLastSeenAt = Date.now();
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
         entries: publicCatalogEntries(scoreCatalog.entries),
@@ -1749,7 +2090,25 @@ function attachBridgeSocket(server: HttpServer): void {
   bridgeSocketServer = new WebSocketServer({ server });
   bridgeSocketServer.on("connection", (socket) => {
     bridgeSockets.add(socket);
+    bridgeSocketInfo.set(socket, { lastMessageAt: Date.now() });
+    startBridgePings();
+
+    if (primaryBridgeSocket && primaryBridgeSocket.readyState === WebSocket.OPEN) {
+      // A second copy of the plugin: someone ran it again from the menu, or the
+      // shortcut fired twice. The first one keeps the job -- it may be halfway
+      // through a song change -- and this one stands down for good.
+      console.log("A second BandCue Bridge connected; retiring it so only one plugin takes commands.");
+      sendBridgeSocket(socket, { type: "retire", reason: "another BandCue Bridge is already attached" });
+      socket.on("close", () => {
+        bridgeSockets.delete(socket);
+      });
+      socket.on("error", () => bridgeSockets.delete(socket));
+      return;
+    }
+
+    primaryBridgeSocket = socket;
     bridgeLastSeenAt = Date.now();
+    bridgeLaunchNotice = undefined;
     console.log("MuseScore bridge plugin connected.");
     void reportMuseScoreStatus();
 
@@ -1763,6 +2122,13 @@ function attachBridgeSocket(server: HttpServer): void {
     prepareBridgeStartMeasure("the bridge connected");
 
     socket.on("message", (raw) => {
+      const info = bridgeSocketInfo.get(socket);
+      if (info) {
+        info.lastMessageAt = Date.now();
+      }
+      if (socket !== primaryBridgeSocket) {
+        return;
+      }
       bridgeLastSeenAt = Date.now();
       let message: Record<string, unknown> | undefined;
       try {
@@ -1773,16 +2139,53 @@ function attachBridgeSocket(server: HttpServer): void {
       if (!message || typeof message.type !== "string") {
         return;
       }
+      if (message.type === "status" && info) {
+        info.version = typeof message.version === "string" ? message.version : info.version;
+        info.canOpenScores = message.canOpenScores === true;
+      }
       handleBridgeSocketMessage(message);
     });
 
-    socket.on("close", () => {
+    const detach = () => {
       bridgeSockets.delete(socket);
+      if (primaryBridgeSocket !== socket) {
+        return;
+      }
+      primaryBridgeSocket = undefined;
+      // What the plugin last said is no longer true of anything; go back to
+      // looking at MuseScore's window until a plugin attaches again.
+      bridgeStatus = {};
+      bridgeLastSeenAt = undefined;
       console.log("MuseScore bridge plugin disconnected; commands fall back to keyboard control.");
       void reportMuseScoreStatus();
-    });
-    socket.on("error", () => bridgeSockets.delete(socket));
+    };
+    socket.on("close", detach);
+    socket.on("error", detach);
   });
+}
+
+/**
+ * Pings every attached plugin, and drops one that has gone silent. The ping is
+ * what the plugin reconnects on (its socket API reports no disconnects), and the
+ * drop is what lets a new plugin take over from one whose MuseScore hung or was
+ * killed without closing its socket.
+ */
+function startBridgePings(): void {
+  if (bridgePingTimer) {
+    return;
+  }
+  bridgePingTimer = setInterval(() => {
+    const now = Date.now();
+    for (const socket of bridgeSockets) {
+      const info = bridgeSocketInfo.get(socket);
+      if (info && now - info.lastMessageAt > BRIDGE_SOCKET_SILENCE_MS) {
+        console.warn("MuseScore bridge plugin stopped answering; dropping it.");
+        socket.terminate();
+        continue;
+      }
+      sendBridgeSocket(socket, { type: "ping", at: now });
+    }
+  }, BRIDGE_PING_INTERVAL_MS);
 }
 
 function handleBridgeSocketMessage(message: Record<string, unknown>): void {
@@ -1798,9 +2201,40 @@ function handleBridgeSocketMessage(message: Record<string, unknown>): void {
     return;
   }
 
+  if (message.type === "playbackCheck" && sequenceId !== undefined) {
+    applyPlaybackCheck(sequenceId, message);
+    return;
+  }
+
   if (message.type === "status") {
     applyBridgeStatus(message);
   }
+}
+
+/**
+ * The plugin's follow-up on a Play it fired: whether MuseScore's playback
+ * position really started moving. MuseScore starts playback asynchronously and
+ * can drop the request, so the plugin's "succeeded" only means "asked"; a
+ * failed check turns the command into a failure the host shows the band.
+ */
+function applyPlaybackCheck(sequenceId: number, message: Record<string, unknown>): void {
+  const detail = typeof message.detail === "string" ? trimSingleLine(message.detail) : "MuseScore playback check";
+  const started = message.started === true;
+  console.log(`[timing] MuseScore play #${sequenceId}: ${detail}`);
+  if (started) {
+    return;
+  }
+  inferredPlayback = "stopped";
+  bridgeStatus.playback = "stopped";
+  reportCommandStatus({
+    ready: true,
+    action: "play",
+    sequenceId,
+    status: "failed",
+    detail,
+    controlPath: "musescore-plugin-check",
+    at: Date.now()
+  });
 }
 
 function sendBridgeSocket(socket: WebSocket, message: unknown): void {
@@ -1809,7 +2243,17 @@ function sendBridgeSocket(socket: WebSocket, message: unknown): void {
   }
 }
 
-function broadcastBridgeSocket(message: unknown): void {
+/**
+ * Sends to the plugin that takes commands. `everyone` is for the rare message
+ * every copy must hear, which is only ever `retire`.
+ */
+function broadcastBridgeSocket(message: unknown, everyone = false): void {
+  if (!everyone) {
+    if (primaryBridgeSocket) {
+      sendBridgeSocket(primaryBridgeSocket, message);
+    }
+    return;
+  }
   for (const socket of bridgeSockets) {
     sendBridgeSocket(socket, message);
   }
@@ -1827,7 +2271,7 @@ function broadcastBridgeSocket(message: unknown): void {
  * there is still time to do something about it.
  */
 function prepareBridgeStartMeasure(reason: string): void {
-  if (!bridgeSockets.size) {
+  if (!primaryBridgeSocket) {
     return;
   }
 
@@ -1900,7 +2344,9 @@ function applyBridgeStatus(update: Record<string, unknown>): void {
         ? update.title
         : bridgeStatus.windowTitle,
     playback: parsePlayback(update.playback) ?? bridgeStatus.playback,
-    tempo: parseBridgeTempo(update.tempo) ?? bridgeStatus.tempo
+    tempo: parseBridgeTempo(update.tempo) ?? bridgeStatus.tempo,
+    // Older plugins do not say; they are taken at their word that they are ready.
+    playReady: typeof update.playReady === "boolean" ? update.playReady : undefined
   };
   if (bridgeStatus.playback) {
     inferredPlayback = bridgeStatus.playback;
@@ -1988,6 +2434,9 @@ function applyBridgeResultBody(command: BridgeCommand, body: Record<string, unkn
     ? sanitizeStartMeasure(body.startMeasure)
     : undefined;
   command.playback = parsePlayback(body.playback);
+  command.reason = typeof body.reason === "string" && body.reason ? body.reason : undefined;
+  command.helperReceivedAt = typeof body.receivedAt === "number" && body.receivedAt > 0 ? body.receivedAt : undefined;
+  command.helperFiredAt = typeof body.firedAt === "number" && body.firedAt > 0 ? body.firedAt : undefined;
   command.title = typeof body.title === "string" ? body.title : undefined;
   command.windowTitle = typeof body.windowTitle === "string"
     ? body.windowTitle
@@ -2014,6 +2463,7 @@ interface OpenScoreResult {
 // after the new window is confirmed (never before, and never force-killed).
 async function openLocalScore(absolutePath: string, relativePath: string): Promise<OpenScoreResult> {
   const script = `
+${MUSESCORE_WINDOW_HELPER}
 $path = '${escapePowerShellSingleQuoted(resolve(absolutePath))}'
 $processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
 $closeOld = ${args.closeOldInstances ? "$true" : "$false"}
@@ -2021,12 +2471,15 @@ if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { exit 2 }
 $before = @(Get-Process | Where-Object { $_.ProcessName -match $processMatch })
 $beforeIds = @($before | ForEach-Object { $_.Id })
 $oldWindowIds = @($before | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { $_.Id })
-Invoke-Item -LiteralPath $path
 $scoreName = [System.IO.Path]::GetFileNameWithoutExtension($path)
 $scorePattern = '*' + [System.Management.Automation.WildcardPattern]::Escape($scoreName) + '*'
-$deadline = (Get-Date).AddMilliseconds(${OPEN_SCORE_WINDOW_TIMEOUT_MS})
+# Already showing: opening it again would only start a second MuseScore with
+# the same score (MuseScore does not always notice), and close the first.
+$reused = $before | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like $scorePattern } |
+  Sort-Object -Property StartTime -Descending | Select-Object -First 1
+if (-not $reused) { Invoke-Item -LiteralPath $path }
+$deadline = (Get-Date).AddMilliseconds($(if ($reused) { 0 } else { ${OPEN_SCORE_WINDOW_TIMEOUT_MS} }))
 $new = $null
-$reused = $null
 while ((Get-Date) -lt $deadline) {
   $candidates = @(Get-Process | Where-Object {
     $_.MainWindowHandle -ne 0 -and ($_.ProcessName -match $processMatch)
@@ -2055,6 +2508,8 @@ if ($closeOld -and $new) {
     if ($id -eq $new.Id) { continue }
     $old = Get-Process -Id $id -ErrorAction SilentlyContinue
     if (-not $old -or $old.HasExited) { $closed += $id; continue }
+    # A MuseScore still showing its startup dialogs ignores the close request.
+    [BandCueWindows]::CloseDialogs($old.MainWindowHandle)
     $old.CloseMainWindow() | Out-Null
     if ($old.WaitForExit(${OPEN_SCORE_CLOSE_WAIT_MS})) { $closed += $id } else { $lingering += $id }
   }
@@ -2063,28 +2518,13 @@ $active = if ($new) { $new } elseif ($reused) { $reused } else { $null }
 $outcome = if ($new) { 'new-instance' } elseif ($reused) { 'reused-instance' } else { 'no-window' }
 $activeId = $null
 $activeTitle = $null
-$pluginStarted = $false
 if ($active) {
   try { $active.Refresh() } catch {}
   $activeId = $active.Id
   if (-not $active.HasExited) {
     $activeTitle = ($active.MainWindowTitle -replace '\\r|\\n', ' ')
-    try {
-      Add-Type -AssemblyName System.Windows.Forms
-      $shell = New-Object -ComObject WScript.Shell
-      if ($shell.AppActivate([int]$active.Id)) {
-        try { $active.WaitForInputIdle(5000) | Out-Null } catch {}
-        # A freshly created MuseScore window reports its title before the menu
-        # bar is ready to accept keyboard input.
-        Start-Sleep -Milliseconds 1500
-        [System.Windows.Forms.SendKeys]::SendWait('%p')
-        Start-Sleep -Milliseconds 500
-        # Manage Plugins is first; BandCue Bridge is the first enabled command.
-        [System.Windows.Forms.SendKeys]::SendWait('{DOWN}{ENTER}')
-        $pluginStarted = $true
-        Start-Sleep -Milliseconds 1500
-      }
-    } catch {}
+    # The plugin launch that follows types into this window.
+    try { $active.WaitForInputIdle(5000) | Out-Null } catch {}
   }
 }
 [PSCustomObject]@{
@@ -2093,7 +2533,6 @@ if ($active) {
   windowTitle = $activeTitle
   closedOld = $closed
   lingering = $lingering
-  pluginStarted = $pluginStarted
 } | ConvertTo-Json -Compress
 `;
   const result = await runPowerShell(script);
@@ -2117,7 +2556,6 @@ if ($active) {
     windowTitle?: string;
     closedOld?: number[];
     lingering?: number[];
-    pluginStarted?: boolean;
   }>(result.stdout);
   const windowTitle = outcome?.windowTitle?.trim() || undefined;
   const closedCount = outcome?.closedOld?.length ?? 0;
@@ -2128,14 +2566,11 @@ if ($active) {
       ? `${lingeringCount} previous instance${lingeringCount === 1 ? "" : "s"} did not close (unsaved changes?)`
       : ""
   ].filter(Boolean).join("; ");
-  const pluginSummary = outcome?.pluginStarted
-    ? "BandCue Bridge launch requested automatically in the opened score"
-    : "BandCue Bridge could not be started automatically";
 
   if (outcome?.outcome === "new-instance") {
     return {
       opened: true,
-      detail: `Opened MuseScore score ${relativePath} in a new window; ${pluginSummary}${closeSummary ? `; ${closeSummary}` : ""}`,
+      detail: `Opened MuseScore score ${relativePath} in a new window${closeSummary ? `; ${closeSummary}` : ""}`,
       windowTitle
     };
   }
@@ -2143,7 +2578,7 @@ if ($active) {
   if (outcome?.outcome === "reused-instance") {
     return {
       opened: true,
-      detail: `MuseScore loaded score ${relativePath} in an existing window; ${pluginSummary}`,
+      detail: `MuseScore loaded score ${relativePath} in an existing window`,
       windowTitle
     };
   }
@@ -2152,6 +2587,212 @@ if ($active) {
     opened: true,
     detail: `Launched MuseScore score ${relativePath}, but no window appeared within ${Math.round(OPEN_SCORE_WINDOW_TIMEOUT_MS / 1000)} s; previous instances were left open`
   };
+}
+
+/**
+ * Installs the plugin that ships with this checkout and the MuseScore settings
+ * it needs to be started by the adapter (see musescore-plugin-setup.ts). A
+ * MuseScore that is already running only sees those changes after a restart,
+ * which the host is told about until a current plugin attaches.
+ */
+async function setUpPluginForBridge(): Promise<void> {
+  const probe = await runPowerShell(`
+[PSCustomObject]@{
+  documents = [Environment]::GetFolderPath('MyDocuments')
+  running = @(Get-Process | Where-Object { $_.ProcessName -match '${escapePowerShellSingleQuoted(args.processMatch)}' } | ForEach-Object { $_.Id })
+} | ConvertTo-Json -Compress
+`);
+  const found = parsePowerShellJson<{ documents?: string; running?: number[] | number }>(probe.stdout);
+  if (!found?.documents || !process.env.APPDATA || !process.env.LOCALAPPDATA) {
+    console.warn("Could not locate MuseScore's folders; install the BandCue Bridge plugin by hand (see docs/Adapters.md).");
+    return;
+  }
+  const running = ([] as number[]).concat(found.running ?? []);
+
+  const setup = setUpBridgePlugin({
+    bundledPlugin: BUNDLED_PLUGIN_PATH,
+    documentsFolder: found.documents,
+    settingsFile: join(process.env.APPDATA, "MuseScore", "MuseScore4.ini"),
+    appDataFolder: join(process.env.LOCALAPPDATA, "MuseScore", "MuseScore4")
+  }, running.length > 0);
+
+  if (setup.pluginChanged) {
+    console.log(`Installed BandCue Bridge ${BUNDLED_PLUGIN_VERSION ?? ""} to ${setup.pluginFile}.`);
+  }
+  if (setup.shortcutChanged) {
+    console.log(`Bound BandCue Bridge to ${BRIDGE_PLUGIN_SHORTCUT} in MuseScore, so this helper can start it.`);
+  }
+  if (setup.enabledChanged) {
+    console.log("Enabled BandCue Bridge in MuseScore's plugin settings.");
+  }
+  for (const problem of setup.problems) {
+    console.warn(`MuseScore plugin setup: ${problem}`);
+  }
+  if (setup.missingAppData) {
+    pluginSetupNotice = "Start MuseScore once, then restart this helper so it can set up BandCue Bridge";
+  } else if (setup.restartNeeded) {
+    for (const processId of running) {
+      staleMuseScoreProcesses.add(processId);
+    }
+    console.warn(`${MUSESCORE_RESTART_NOTICE}.`);
+  }
+  void reportMuseScoreStatus();
+}
+
+const MUSESCORE_RESTART_NOTICE =
+  "Restart MuseScore once so it loads BandCue Bridge and its shortcut; after that BandCue starts the plugin itself";
+
+/**
+ * Starts the bridge plugin in the running MuseScore when none is attached.
+ *
+ * It is needed once per MuseScore process: the plugin then stays loaded and
+ * changes songs itself. Starting it means pressing the plugin's shortcut in
+ * MuseScore's window -- MuseScore ignores shortcuts posted to a background
+ * window, and 4.7 cannot run plugins automatically. This asks Windows for the
+ * foreground once, and otherwise waits for MuseScore to be in front (a freshly
+ * opened MuseScore comes to the front by itself; a running one when clicked).
+ * It never forces the foreground and never types unless the foreground window
+ * is MuseScore's: while Windows keeps another app in front, anything typed would
+ * land in that app. It only runs while nothing is playing or armed.
+ *
+ * MuseScore opens an update notice and a welcome tour on startup, both modal,
+ * and either swallows the shortcut. They are dismissed with Esc first (the same
+ * as closing them, which leaves them to come back next start).
+ *
+ * `preferTitle` aims at the MuseScore window showing that score, for when
+ * several are open.
+ */
+async function ensureBridgeRunning(reason: string, force = false, preferTitle?: string): Promise<void> {
+  if (force) {
+    // A watch aimed at a MuseScore that was just closed ends within a poll.
+    const busyDeadline = Date.now() + 3000;
+    while (bridgeLaunchInFlight && Date.now() < busyDeadline) {
+      await sleep(100);
+    }
+  }
+  if (args.bridgePort === undefined || !bridgeServer || !args.pluginAutostart || bridgeLaunchInFlight) {
+    return;
+  }
+  if (primaryBridgeSocket || pluginSetupNotice) {
+    return;
+  }
+  const stale = [...staleMuseScoreProcesses].join(",");
+  if (!force && (openSongInFlight || lastArmed || lastTransportStatus !== "stopped" || Date.now() < nextBridgeLaunchAt)) {
+    return;
+  }
+
+  bridgeLaunchInFlight = true;
+  try {
+    const script = `
+Add-Type -AssemblyName System.Windows.Forms
+${MUSESCORE_WINDOW_HELPER}
+$processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
+$preferTitle = '${escapePowerShellSingleQuoted(preferTitle ?? "")}'
+$stale = @(${stale})
+$candidates = @(Get-Process | Where-Object { $_.MainWindowHandle -ne 0 -and $_.ProcessName -match $processMatch } |
+  Sort-Object -Property StartTime -Descending)
+$target = $null
+if ($preferTitle) { $target = $candidates | Where-Object { $_.MainWindowTitle -like "*$preferTitle*" } | Select-Object -First 1 }
+if (-not $target) { $target = $candidates | Select-Object -First 1 }
+if (-not $target) { [PSCustomObject]@{ outcome = 'no-window' } | ConvertTo-Json -Compress; exit 0 }
+if ($stale -contains $target.Id) {
+  [PSCustomObject]@{ outcome = 'needs-restart'; processId = $target.Id } | ConvertTo-Json -Compress
+  exit 0
+}
+$main = $target.MainWindowHandle
+$pid32 = [uint32]$target.Id
+$previous = [BandCueWindows]::GetForegroundWindow()
+# One polite request for the foreground. Windows usually refuses it to a
+# background helper, and then this waits for MuseScore to come to the front on
+# its own -- a MuseScore that was just opened does, and so does one the user
+# clicks. Keys are only ever typed into a window verified to be MuseScore's.
+[BandCueWindows]::RequestFocus($main)
+$requestedAt = Get-Date
+$tookFocus = $false
+$dismissed = 0
+$deadline = $requestedAt.AddMilliseconds(${BRIDGE_FOCUS_WATCH_MS})
+while ((Get-Date) -lt $deadline) {
+  if ($target.HasExited) { break }
+  $front = [BandCueWindows]::GetForegroundWindow()
+  if ([BandCueWindows]::OwnerOf($front) -ne $pid32) { Start-Sleep -Milliseconds 150; continue }
+  if ($front -ne $main) {
+    # A MuseScore dialog: the update notice and the welcome tour open on
+    # startup, and being modal they would swallow the shortcut.
+    if ($dismissed -ge 6) { Start-Sleep -Milliseconds 150; continue }
+    [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+    $dismissed++
+    Start-Sleep -Milliseconds 600
+    continue
+  }
+  if ([BandCueWindows]::FirstDialog($main) -ne [IntPtr]::Zero) { Start-Sleep -Milliseconds 150; continue }
+  if (((Get-Date) - $requestedAt).TotalMilliseconds -lt 1500) { $tookFocus = $true }
+  Start-Sleep -Milliseconds 150
+  if ([BandCueWindows]::GetForegroundWindow() -ne $main) { continue }
+  [System.Windows.Forms.SendKeys]::SendWait('${BRIDGE_PLUGIN_SENDKEYS}')
+  # Hand the foreground back only if it was taken for this, not if the user
+  # brought MuseScore up themselves.
+  if ($tookFocus -and $previous -ne [IntPtr]::Zero -and [BandCueWindows]::OwnerOf($previous) -ne $pid32) {
+    Start-Sleep -Milliseconds 150
+    [void][BandCueWindows]::SetForegroundWindow($previous)
+  }
+  [PSCustomObject]@{ outcome = 'sent'; processId = $target.Id; dismissed = $dismissed; waitedMs = [int]((Get-Date) - $requestedAt).TotalMilliseconds } | ConvertTo-Json -Compress
+  exit 0
+}
+[PSCustomObject]@{ outcome = 'no-focus'; processId = $target.Id; dismissed = $dismissed } | ConvertTo-Json -Compress
+`;
+    const result = await runPowerShell(script);
+    const outcome = parsePowerShellJson<{ outcome?: string; processId?: number; dismissed?: number; waitedMs?: number }>(result.stdout);
+    if (!outcome || outcome.outcome === "no-window") {
+      // Nothing to start it in; look again later without any fuss.
+      nextBridgeLaunchAt = Date.now() + BRIDGE_LAUNCH_IDLE_RETRY_MS;
+      return;
+    }
+    if (outcome.outcome === "needs-restart") {
+      // Without the restart the shortcut does nothing in that MuseScore; wait
+      // for a new one instead of typing into this one.
+      bridgeLaunchNotice = MUSESCORE_RESTART_NOTICE;
+      nextBridgeLaunchAt = Date.now() + BRIDGE_LAUNCH_IDLE_RETRY_MS;
+      void reportMuseScoreStatus();
+      return;
+    }
+
+    if (outcome.outcome === "no-focus") {
+      // Harmless to keep watching: nothing is typed until MuseScore is in front.
+      if (!bridgeLaunchNotice) {
+        bridgeLaunchNotice = `Click into MuseScore once so BandCue can start BandCue Bridge (or press ${BRIDGE_PLUGIN_SHORTCUT} there)`;
+        console.warn(`${bridgeLaunchNotice}.`);
+        void reportMuseScoreStatus();
+      }
+      return;
+    }
+
+    const processId = outcome.processId ?? 0;
+    console.log(`Starting BandCue Bridge in MuseScore (${reason}; MuseScore was in front after ${outcome.waitedMs ?? 0} ms${outcome.dismissed ? `, closed ${outcome.dismissed} MuseScore dialog${outcome.dismissed === 1 ? "" : "s"}` : ""}).`);
+    const deadline = Date.now() + BRIDGE_LAUNCH_ATTACH_WAIT_MS;
+    while (!primaryBridgeSocket && Date.now() < deadline) {
+      await sleep(50);
+    }
+    if (primaryBridgeSocket) {
+      bridgeLaunchesByProcess.delete(processId);
+      return;
+    }
+
+    // The shortcut went into MuseScore and nothing attached: the plugin is not
+    // bound or not enabled in this MuseScore. Pressing it again will not help.
+    const attempts = (bridgeLaunchesByProcess.get(processId) ?? 0) + 1;
+    bridgeLaunchesByProcess.set(processId, attempts);
+    bridgeLaunchNotice = `BandCue Bridge did not start from ${BRIDGE_PLUGIN_SHORTCUT}; restart MuseScore, or run Plug-Ins > BandCue Bridge`;
+    if (attempts >= MAX_BRIDGE_LAUNCHES_PER_PROCESS) {
+      nextBridgeLaunchAt = Number.POSITIVE_INFINITY;
+      console.warn(`${bridgeLaunchNotice}. Giving up on this MuseScore.`);
+    } else {
+      nextBridgeLaunchAt = Date.now() + BRIDGE_LAUNCH_RETRY_MS;
+      console.warn(`${bridgeLaunchNotice}; trying again in ${Math.round(BRIDGE_LAUNCH_RETRY_MS / 1000)} s.`);
+    }
+    void reportMuseScoreStatus();
+  } finally {
+    bridgeLaunchInFlight = false;
+  }
 }
 
 function refreshScoreCatalog(): void {
@@ -2225,6 +2866,14 @@ function writeJson(
 ): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
+}
+
+function readOptionalText(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -2342,6 +2991,8 @@ function parseArgs(raw: string[]): Args {
     scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
     scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0",
     closeOldInstances: process.env.BANDCUE_MUSESCORE_CLOSE_OLD !== "0",
+    pluginSetup: process.env.BANDCUE_MUSESCORE_PLUGIN_SETUP !== "0",
+    pluginAutostart: process.env.BANDCUE_MUSESCORE_PLUGIN_AUTOSTART !== "0",
     globalHotkeys: {
       "toggle-arm": process.env.BANDCUE_ARM_HOTKEY,
       play: process.env.BANDCUE_PLAY_HOTKEY ?? process.env.BANDCUE_CUE_HOTKEY,
@@ -2403,6 +3054,12 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--close-old-instances") {
       parsed.closeOldInstances = parseBooleanFlag(raw[index + 1], parsed.closeOldInstances);
+    }
+    if (value === "--plugin-setup") {
+      parsed.pluginSetup = parseBooleanFlag(raw[index + 1], parsed.pluginSetup);
+    }
+    if (value === "--plugin-autostart") {
+      parsed.pluginAutostart = parseBooleanFlag(raw[index + 1], parsed.pluginAutostart);
     }
   }
 

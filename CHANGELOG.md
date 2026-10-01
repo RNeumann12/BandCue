@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Changed
+
+- **MuseScore changes songs in place, in about a second.** BandCue Bridge 2.0 has no window, so it
+  stays loaded when a score closes, and it switches songs itself: it closes the current score and
+  opens the next one in the same MuseScore window. Every song change used to close MuseScore, start
+  a new one, and start the plugin again through the Plug-Ins menu. Measured on MuseScore 4.7.2:
+  0.8–0.9 s per change. Without an attached plugin the helper still opens the score in a new
+  MuseScore, then starts the plugin there so the next change is an in-place one.
+- **The helper installs and starts the plugin itself.** With `--bridge-port` it copies the current
+  plugin into MuseScore's Plugins folder, enables it, and binds it to Ctrl+Alt+Shift+B (restart
+  MuseScore once after the first setup). Whenever MuseScore runs without the plugin and nothing is
+  playing or armed, the helper closes MuseScore's startup dialogs and presses that shortcut.
+  Opt out with `--plugin-setup 0` / `--plugin-autostart 0`.
+
+### Fixed
+
+- **The plugin launch after a song change failed whenever MuseScore showed a dialog.** Every new
+  MuseScore opens with an update notice and a welcome tour, both modal, so the old `Alt+P`, `Down`,
+  `Enter` launch typed into the dialog instead of the Plug-Ins menu. The launch now closes those
+  dialogs first and uses a shortcut instead of the menu's order. It also no longer types blind: it
+  sends keys only once MuseScore is verifiably the foreground window, so a launch that Windows keeps
+  in the background can no longer land its keystrokes in whatever app is in front.
+- **The plugin reconnects on its own.** MuseScore's plugin socket reports no disconnects, so a
+  restarted helper used to leave the plugin talking to nobody until it was started again. The
+  helper now pings once a second and the plugin reconnects when the pings stop.
+- **MuseScore really starts, on the beat.** Three bugs found by testing end to end through the Helix
+  Cue launcher against a real MuseScore 4.7.2:
+  - The plugin's `play-from-selection` silently did nothing for a score MuseScore had opened at
+    launch, and on repeat plays. The plugin now moves the playback position itself and sends a plain
+    `play`.
+  - Its QML Timer, which runs on Qt Quick's animation clock, fired a Play 866 ms early. Downbeats
+    are now timed by the wall clock: measured 0–1 ms from the scheduled start.
+  - A Stop sometimes went out as keystrokes because the plugin's claim lost a race. The helper now
+    waits up to 300 ms for the claim.
+
+  The plugin also checks that MuseScore's playback position actually moves after a Play, and
+  reports a failure if it doesn't. A song counts as open and ready only once MuseScore has loaded
+  its sounds.
+- **Only one plugin copy takes commands.** Running the plugin twice no longer makes both copies
+  start playback; the helper retires every copy but the first.
+- **A status check no longer disables the keyboard count-in.** Reading the bridge's `GET /status`
+  or `GET /catalog` counted as "a bridge is attached", which set the required lead time to 0 ms
+  even though nothing could take the command.
+
 ### Added
 
 - **MuseScore's Windows bridge can claim the full live-control hotkey set globally.** Arm, Play,

@@ -33,7 +33,7 @@ Windows public-beta launchers:
 | `BandCue Host.cmd` | Checks Node/deps, runs preflight, starts `npm run dev`, and opens the host URL. |
 | `BandCue Host - MuseScore Bridge.cmd` | Same startup flow, but starts `npm run dev:all:bridge`. |
 | `BandCue MuseScore Bridge - Connect.cmd` | Joins a room as this machine's MuseScore adapter. Extra arguments pass through to [`Start-BandCueMuseScoreAdapter.ps1`](../scripts/Start-BandCueMuseScoreAdapter.ps1) (`-Room`, `-Name`, `-CueHotkey`, `-BridgePort`). |
-| `BandCue MuseScore Bridge - Helix Cue.cmd` | The full Helix setup for the machine the pedal is plugged into: the same, plus `-CueHotkey "ctrl+alt+p"` and `-BridgePort 4731`. Enable the **BandCue Bridge** plugin in MuseScore and leave its window open. See [External cue](#external-cue-helix-and-other-pedals) and [Adapters.md](Adapters.md#musescore-plugin-bridge--the-only-way-to-reset-the-playhead). |
+| `BandCue MuseScore Bridge - Helix Cue.cmd` | The full Helix setup for the machine the pedal is plugged into: the same, plus `-CueHotkey "ctrl+alt+p"` and `-BridgePort 4731`. The helper installs and starts the **BandCue Bridge** plugin itself (restart MuseScore once after the first run). See [External cue](#external-cue-helix-and-other-pedals) and [Adapters.md](Adapters.md#musescore-plugin-bridge--the-only-way-to-reset-the-playhead). |
 
 ## Coordinator (`npm run dev`)
 

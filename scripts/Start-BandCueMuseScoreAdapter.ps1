@@ -112,7 +112,7 @@ if ($CueHotkey -or $ArmHotkey -or $StopHotkey -or $NextSongHotkey -or $PreviousS
   Write-Host "Claiming configured BandCue shortcuts system-wide, so they work whatever window has focus." -ForegroundColor Cyan
 }
 if ($BridgePort -gt 0) {
-  Write-Host "Bridge open on 127.0.0.1:$BridgePort - enable the 'BandCue Bridge' plugin in MuseScore and leave its window open." -ForegroundColor Cyan
+  Write-Host "Bridge open on 127.0.0.1:$BridgePort - BandCue installs and starts the 'BandCue Bridge' plugin in MuseScore itself (restart MuseScore once after the first run)." -ForegroundColor Cyan
 }
 Write-Host "This gives the BandCue room full control of MuseScore on this machine. Keep this window open during rehearsal. Press Ctrl+C to stop." -ForegroundColor Cyan
 Write-Host ""

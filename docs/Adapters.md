@@ -245,12 +245,19 @@ npm run dev:musescore -- --score-folder "C:\Users\you\Documents\MuseScore4\Score
 - The host UI shows `matched` / `ambiguous` / `missing` / `not-applicable` and warns when the
   active score title doesn't match the current MuseScore setlist item.
 - Auto-open requires **exactly one** match; ambiguous or missing matches are reported, not opened.
-- MuseScore 4 opens each score in a **new instance**, and keystroke control gets unreliable when
-  several instances are running. After an auto-open, the helper waits for the new window to
-  appear (up to 15 s), starts BandCue Bridge from its Plug-Ins menu, then closes the previous
-  MuseScore instances gracefully (WM_CLOSE — an unsaved-changes prompt keeps the old instance
-  alive and is reported instead of force-killed). Before switching, attached bridge dialogs are
-  retired so a lingering old instance cannot receive play/stop. Disable closing old windows with
+- **With BandCue Bridge attached, a song change stays in the running MuseScore.** The plugin closes
+  the current score and opens the next one in the same window (`closeScore()` / `readScore()`),
+  which measured 0.8–0.9 s against a real MuseScore 4.7 — no new process, no plugin restart. If the
+  current score has unsaved changes, MuseScore asks as usual; keeping it open is reported instead
+  of opening the next score in another window. If MuseScore hands the score to *another* MuseScore
+  window that already had it open, the helper closes the now-empty window and moves the plugin to
+  the one showing the score.
+- **Without a plugin**, the helper opens the score the Windows way. MuseScore 4 turns that into a
+  **new instance**, so the helper waits for the new window (up to 15 s), closes the previous
+  instances gracefully (their startup dialogs first, then WM_CLOSE — an unsaved-changes prompt
+  keeps an old instance alive and is reported instead of force-killed), and starts BandCue Bridge
+  in the new one, so the next change is an in-place one. Attached plugins are retired first so a
+  lingering old instance cannot receive play/stop. Disable closing old windows with
   `--close-old-instances 0`.
 
 ### MuseScore plugin (bridge) — the only way to reset the playhead
@@ -265,33 +272,77 @@ MuseScore rather than of how the keys are delivered:
 | `play-from-selection` | `Shift+Space` | starts at the cursor — but only helps if the cursor is on a note, and `Ctrl+Home` lands on the score's first *element*, typically a title frame |
 
 The plugin at [`extension/musescore/bandcue.qml`](../extension/musescore/bandcue.qml) solves it from
-inside MuseScore, where the cursor API is available:
+inside MuseScore. It moves the **playback position** itself, through MuseScore's playback toolbar
+model, which is the same thing as typing into the toolbar's measure box: first to the top
+(`playPosition = 0`), then to the start measure (`measureNumber`), then to its first beat. MuseScore
+seeks asynchronously and those setters read the current position back, so the plugin takes one
+step at a time and reads each result back before the next. On the downbeat it sends a plain `play`.
 
-```js
-var cursor = curScore.newCursor();
-cursor.rewind(0);                       // start of the score
-curScore.selection.select(cursor.element);  // the first real chord or rest
-cmd("play-from-selection");
-```
+It used to select the first note and send `play-from-selection` instead. Measured on MuseScore
+4.7.2, that silently did nothing whenever the score had been opened by MuseScore at launch, and on
+repeat plays, because a plugin's selection does not reliably reach MuseScore's playback. A plain
+`play` from a position set this way started every time. The plugin still selects the starting
+note, but only so the band can see on screen where the song will start.
 
-That selects a **note**, not a frame, so playback starts at bar 1 every time.
+**The plugin checks that MuseScore really plays.** After a Play it watches the playback position.
+If the position has not moved within 2 s, it sends `playbackCheck { started: false }`, and the
+helper turns the command into a failure the host shows. A play that only *looked* successful can
+no longer go unnoticed. The plugin also reports `playReady` (MuseScore's `isPlayAllowed`). Until
+it is true, the helper reports MuseScore as not ready, and an `open` only finishes once the new
+score's sounds have loaded: measured 0.7–1.1 s after the score opened.
 
-**Install.** Copy the folder into MuseScore's Plugins directory, enable **BandCue Bridge** under
-Home → Plugins, and leave its window open while playing — `pluginType: "dialog"` is what keeps the
-plugin resident, since a plain plugin exits after `onRun` and could never wait for a cue. BandCue
-minimizes that dialog automatically after startup; restoring it is optional and only shows status.
+**Downbeats are timed by the wall clock.** A QML `Timer` runs on Qt Quick's animation clock, and
+inside MuseScore that clock ran up to twice as fast as real time: a Play due in 1.5 s fired after
+0.6 s. The plugin's timer now only decides when to look at `Date.now()`, and it waits out the last
+30 ms exactly. Measured: every Play fired 0–1 ms from the scheduled downbeat. Each result carries
+`receivedAt`/`firedAt`, and the helper logs a `[timing]` line and reports `firedAtServerTime` to the
+room.
 
-Take the Plugins path from **Preferences → Folders** rather than assuming
-`%USERPROFILE%\Documents\MuseScore4\Plugins` — MuseScore resolves it through the Windows *Documents*
-shell folder, which OneDrive commonly redirects to `%USERPROFILE%\OneDrive\Dokumente` (or the
-localized equivalent). A plugin dropped in the literal `Documents` path is then never scanned, and
-MuseScore reports nothing wrong: the plugin simply does not appear under Home → Plugins. To confirm
-what MuseScore actually found, check that `bandcue.qml` is listed in
-`%LOCALAPPDATA%\MuseScore\MuseScore4\extensions\config.json`.
+**The plugin has no window, on purpose.** MuseScore runs a `pluginType: "dialog"` plugin as a
+window and closes every dialog whenever a score closes, so a dialog bridge could never survive a
+song change — which is why earlier versions launched a whole new MuseScore per song and then
+restarted the plugin through the Plug-Ins menu. A plugin without `pluginType` stays loaded for the
+life of the MuseScore process: it keeps its timers and its socket after `onRun`, survives score
+changes, and needs starting only once per MuseScore session. Its status shows on the host page.
+
+**Install and start — automatic.** With `--bridge-port`, the helper sets everything up at startup
+(turn it off with `--plugin-setup 0`):
+
+- copies the current `bandcue.qml` into MuseScore's Plugins folder, taken from **Preferences →
+  Folders** if set there, otherwise from Windows' *Documents* folder — which OneDrive commonly
+  redirects to `%USERPROFILE%\OneDrive\Dokumente`, so the literal `%USERPROFILE%\Documents\
+  MuseScore4\Plugins` is never assumed;
+- enables BandCue Bridge in `%LOCALAPPDATA%\MuseScore\MuseScore4\extensions\config.json`;
+- binds it to **Ctrl+Alt+Shift+B** in `%LOCALAPPDATA%\MuseScore\MuseScore4\shortcuts.xml` (MuseScore
+  merges that file with its defaults, so one added entry is safe).
+
+MuseScore reads all of that when it starts, so after the first setup **restart MuseScore once**;
+the host shows that request until it is done. From then on, whenever MuseScore is running without
+the plugin and nothing is playing or armed, the helper starts it by pressing that shortcut in
+MuseScore's window. It asks Windows for the foreground once; a background helper is usually
+refused, so it then waits until MuseScore is in front — a MuseScore the helper just opened comes to
+the front by itself (measured: 1.1 s, plugin attached 3.3 s after the score opened), and a running
+one when someone clicks it (the host then says *"Click into MuseScore once…"*). It closes
+MuseScore's startup dialogs first with Esc — the update notice and the welcome tour are modal and
+swallow any shortcut — and hands the foreground back if it took it.
+
+**It never types into anything but MuseScore.** Keys are sent only after checking that the
+foreground window belongs to MuseScore, and the foreground is never forced with input tricks (an
+Alt tap, attaching to the foreground thread): while Windows keeps another app in front, anything
+typed lands in *that* app — an Esc into a terminal or chat window interrupts whatever it is doing.
+If the shortcut goes in and no plugin attaches three times, the helper stops and asks on the host
+for a MuseScore restart. Turn the automatic start off with `--plugin-autostart 0` and use
+**Plug-Ins → BandCue Bridge** yourself.
+
+Why a shortcut: MuseScore 4.7's own "run automatically after a score opens" setting fails for every
+plugin (it looks plugins up under an `action://` URI they are not registered under, and logs an
+assertion), MuseScore ignores shortcuts *posted* to a background window, and the old route —
+`Alt+P`, `Down`, `Enter` — depended on the menu's order and landed in whatever dialog was open.
+Running the plugin a second time is harmless: the helper retires every copy but the first.
 
 **Verifying the bridge is really attached.** `GET http://127.0.0.1:<bridge-port>/status` returns
 `{"status":{…}}` filled in from the plugin's own 2 s keep-alive. An empty `"status":{}` means no
-plugin has ever connected — the adapter is running keyboard-only, and every non-100 % song will be
+plugin is connected — the adapter is running keyboard-only, and every non-100 % song will be
 refused with *"MuseScore Bridge must be connected to set N% tempo"* rather than played at the wrong
 speed. The adapter's `tempo.detail` in the room state says the same thing: *"100% tempo uses normal
 MuseScore playback"* is the **no-bridge** wording, while an attached plugin reports *"applied
@@ -303,23 +354,39 @@ as the HTTP API. MuseScore's plugin sandbox has no HTTP client, but it does expo
 adapter accepts the upgrade on any path. Commands are **pushed** rather than polled, so no poll
 interval sits between the count-in and the plugin.
 
+That socket API reports nothing when a connection drops, so the helper **pings** every attached
+plugin once a second and the plugin reconnects after 4 s without hearing from it — restarting the
+helper no longer means restarting the plugin (measured: re-attached 0.34 s after the helper came
+back). The helper in turn drops a plugin silent for 6 s. Only the first plugin to attach takes
+commands; any later copy is sent `retire` at once, so two copies can never both start playback.
+(The plugin could listen instead, but MuseScore's plugin WebSocket *server* binds every network
+interface, which would put score control on the LAN.)
+
 | Direction | Message | Meaning |
 | --- | --- | --- |
 | → plugin | `hello` | `{ fallbackMs, startMeasure, currentSong }` on connect |
+| → plugin | `ping` | once a second; what the plugin's reconnect watches |
 | → plugin | `command` | `{ sequenceId, action, dueLocalAt, resetBeforePlay, startMeasure, currentSong }` |
+| → plugin | `open` | `{ sequenceId, path, scoreName, startMeasure, currentSong }` — change songs in this window |
 | → plugin | `song` | the current song changed: `{ startMeasure, currentSong }` |
 | → plugin | `prepare` | `{ startMeasure, reason, currentSong }` — park the cursor there now, no downbeat involved |
-| → plugin | `retire` | disconnect before the helper opens a score in a new MuseScore process |
-| → adapter | `claim` | stops the keyboard fallback from also firing |
-| → adapter | `result` | `{ sequenceId, status, playback, detail, startMeasure }` |
-| → adapter | `status` | `{ ready, title, playback }`; also the keep-alive, every 2 s |
+| → plugin | `retire` | stop for good: another copy is attached, or the helper is replacing this MuseScore |
+| → adapter | `claim` | stops the keyboard fallback (or, for `open`, the new-MuseScore fallback) from also running |
+| → adapter | `result` | `{ sequenceId, status, playback, detail, startMeasure, reason, receivedAt, firedAt }` |
+| → adapter | `playbackCheck` | `{ sequenceId, started, afterMs, detail }`: whether a Play really started |
+| → adapter | `status` | `{ ready, playReady, title, playback, version, canOpenScores }`; also the keep-alive, every 2 s |
 
 **Start measures belong to the plugin while it is attached.** A claim suppresses the keyboard path,
-including the Find / Go to typing that jumps to a measure — so the plugin does the jump itself:
-`selectStartPoint()` walks the measure chain from `curScore.firstMeasure` and rewinds the cursor to
-that measure's first segment, falling back across tracks when voice 1 of the top staff rests there.
-The measure it actually reached comes back in the `result`, so a score too short for the song shows
-up as a host warning instead of quietly playing the intro.
+including the Find / Go to typing that jumps to a measure, so the plugin does the jump itself. It
+seeks the playback position to the measure (see above), and `selectStartPoint()` additionally walks
+the measure chain from `curScore.firstMeasure` to put the visible selection on that measure's first
+note, falling back across tracks when voice 1 of the top staff rests there. The measure playback
+actually starts from comes back in the `result`, so a score too short for the song shows up as a
+host warning instead of quietly playing the intro.
+
+A command due immediately (a Stop has no count-in) waits up to 300 ms for an attached plugin's
+claim before the keyboard path takes over. Without that wait the round trip of the claim lost the
+race and Stops went out as keystrokes.
 
 The `prepare` message keeps that walk off the critical path. The adapter sends it whenever the
 room's intent is already known and nothing is waiting on a beat — the bridge connected, the score
@@ -370,9 +437,14 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:4731/commands/12/result `
 `--bridge-fallback-ms` (default **900 ms**) after the scheduled time, the Windows keyboard path
 runs. A command still unclaimed at the downbeat falls back immediately. Without an active bridge
 helper, Windows activation/reset begins during the count-in and only the final Play key waits for
-`dueLocalAt` (`--dispatch-lead-ms`, default **1000 ms**). `open-song` is process-aware instead of
-using the transport queue: the Windows helper opens the single matched local score, retires old
-bridge dialogs, and launches BandCue Bridge in the new MuseScore process.
+`dueLocalAt` (`--dispatch-lead-ms`, default **1000 ms**). `open-song` does not use the transport
+queue: an attached plugin gets an `open` and has 2 s to claim it, else the helper opens the score in
+a new MuseScore itself (see *Local score catalog & auto-open*). A claimed `open` is never followed by
+that fallback, because the plugin may already have closed the previous score.
+
+Only helpers that can take a command count as an active bridge: polling `GET /commands`, claiming,
+or reporting. Reading `GET /status` or `GET /catalog` does not, so a status check can no longer drop
+the keyboard path's count-in to zero.
 
 **Resident trigger (the normal path).** Spawning `powershell.exe` and loading the
 `System.Windows.Forms`/`Microsoft.VisualBasic` assemblies costs ~1.8 s, and doing that per command
