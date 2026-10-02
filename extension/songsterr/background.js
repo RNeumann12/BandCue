@@ -32,6 +32,8 @@ let latestCommand;
 // This adapter's id in the room (from serverHello); used to find our own
 // manual calibration offset inside roomState during reconciliation.
 let myClientId;
+// The room this adapter last joined, for the popup ("Connected to 24ACF9").
+let connectedRoomCode = "";
 // Highest transport sequence this adapter has acted on. Lets roomState
 // reconciliation catch commands that were broadcast while we were disconnected
 // without re-running ones the push path already handled. Survives reconnects
@@ -520,6 +522,7 @@ async function connect() {
 
     if (message.type === "serverHello") {
       myClientId = message.clientId;
+      connectedRoomCode = typeof message.roomCode === "string" ? message.roomCode : "";
       return;
     }
 
@@ -2191,6 +2194,8 @@ function getPopupState() {
     // room actually sees, so the popup can show the derived default as a hint.
     deviceName: deviceNameOverride,
     effectiveDeviceName: resolveDeviceName(),
+    roomCode: connectedRoomCode,
+    currentSongTitle: currentRoomSong?.title || "",
     status: lastStatus
   };
 }

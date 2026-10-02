@@ -29,7 +29,10 @@ import {
   hostHotkeyActionForEvent,
   isOpenableSong,
   median,
+  moveSetlistSong,
   nextSongIndex,
+  remapIndexAfterMove,
+  restoreCurrentSongIndex,
   normalizeSong,
   normalizeStoredSong,
   parseDurationInput,
@@ -84,6 +87,46 @@ describe("setlist navigation", () => {
     expect(adjustCurrentIndexAfterRemoval(1, 1)).toBe(-1); // removed the current song
     expect(adjustCurrentIndexAfterRemoval(3, 1)).toBe(2); // removed before current -> shift down
     expect(adjustCurrentIndexAfterRemoval(1, 3)).toBe(1); // removed after current -> unchanged
+  });
+});
+
+describe("setlist reordering", () => {
+  const songs = ["a", "b", "c", "d"].map((id) => ({ id, title: id.toUpperCase() }));
+
+  it("moves a song up or down and leaves the input untouched", () => {
+    expect(moveSetlistSong(songs, 2, 1).map((song) => song.id)).toEqual(["a", "c", "b", "d"]);
+    expect(moveSetlistSong(songs, 0, 3).map((song) => song.id)).toEqual(["b", "c", "d", "a"]);
+    expect(songs.map((song) => song.id)).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("ignores moves past either end", () => {
+    expect(moveSetlistSong(songs, 0, -1)).toBe(songs);
+    expect(moveSetlistSong(songs, 3, 4)).toBe(songs);
+    expect(moveSetlistSong(songs, 1, 1)).toBe(songs);
+  });
+
+  it("keeps the current-song pointer on the same song", () => {
+    for (const [from, to] of [[2, 1], [0, 3], [3, 0], [1, 2]]) {
+      const moved = moveSetlistSong(songs, from, to);
+      for (let index = 0; index < songs.length; index += 1) {
+        expect(moved[remapIndexAfterMove(index, from, to)].id).toBe(songs[index].id);
+      }
+    }
+    expect(remapIndexAfterMove(-1, 0, 2)).toBe(-1);
+  });
+});
+
+describe("restoring the current song after a host reload", () => {
+  const songs = [{ id: "a" }, { id: "b" }, { id: "c" }];
+
+  it("finds the room's current song by id", () => {
+    expect(restoreCurrentSongIndex(songs, { song: { id: "c" }, updatedAt: 0 })).toBe(2);
+  });
+
+  it("returns -1 when the room has no current song or it left the setlist", () => {
+    expect(restoreCurrentSongIndex(songs, undefined)).toBe(-1);
+    expect(restoreCurrentSongIndex(songs, { updatedAt: 0 })).toBe(-1);
+    expect(restoreCurrentSongIndex(songs, { song: { id: "gone" }, updatedAt: 0 })).toBe(-1);
   });
 });
 

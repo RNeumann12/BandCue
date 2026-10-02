@@ -132,6 +132,30 @@ button:disabled {
   color: #07100b;
 }
 
+/* Once connected, Connect is only for switching rooms; keep it from shouting. */
+body[data-connected="true"] #connect {
+  background: #202a24;
+  color: #f6fff2;
+}
+
+.room-summary {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: #c4d0c3;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-summary[hidden] {
+  display: none;
+}
+
+.status-card > div {
+  min-width: 0;
+}
+
 #disconnect {
   border-color: #ff6b5f;
   color: #ffd7d3;
@@ -145,6 +169,11 @@ button:disabled {
 
 .connection-actions {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.connection-actions button {
+  padding-inline: 4px;
+  white-space: nowrap;
 }
 
 .row {

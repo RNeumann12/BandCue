@@ -189,16 +189,23 @@ broadcast/multicast, use the `host:port` or full-URL path. See
 [docs/Networking.md](docs/Networking.md) for the discovery details.
 
 > The **token** is the secret that authorizes a WebSocket connection. The room code is *not*
-> secret — it only helps locate the host. Anyone with the token can join the room.
+> secret — it only helps locate the host. Anyone with the room token can join the room; only the
+> separate **host token** (in the *Host controls* link) can run it.
 
 ## Using the Host Controls
 
-Open the host URL (`/host?token=…`). The host page is the only place the setlist, safety, and
-calibration are edited; its state lives in that browser's local storage.
+Open the **Host controls** link the coordinator prints at startup (`/host?token=…`; the Windows
+launchers open it for you). It carries the host token: keep it to the host device(s) and share the
+companion link or QR code with the band. The join link opened at `/host` only follows the room.
+
+The host page is the only place the setlist, safety, and calibration are edited. The setlist and
+current song live in the room: the coordinator saves them (`.bandcue-room.setlist.json`) and
+restores them after a restart, and a second host page follows every edit made on the first.
 
 ### Setlist Flow
 
-Use the **Setlist** panel to add songs for the rehearsal. Each song can carry a title, a 15–175%
+Use the **Setlist** panel to add songs for the rehearsal (the **Add a song** form folds away once
+the list has songs, so the list sits right under the transport). Each song can carry a title, a 15–175%
 playback tempo, a source
 type, a main Songsterr URL, optional bass/drum Songsterr override URLs, a MuseScore score
 reference, optional notes, and (once known) a duration.
@@ -206,8 +213,12 @@ reference, optional notes, and (once known) a duration.
 - **Start at measure** rehearses a section: leave it empty (or `1`) to start at the top, or set
   e.g. `8` and every device seeks to bar 8 before the downbeat. See
   [Starting at a Later Measure](#starting-at-a-later-measure).
-- **Make Current**, **Previous**, **Next** publish the current song to every companion.
-- **Export** / **Import** move setlists between host browsers (the setlist is stored locally).
+- **Make Current**, **Previous**, **Next** publish the current song to every companion. A host
+  page that is reloaded picks the room's current song back up.
+- **↑** / **↓** reorder songs. **Remove** and an **Import** that replaces the list can be undone
+  from the notice above the list for 15 seconds.
+- **Export** / **Import** move setlists between host browsers (the setlist is stored locally). A
+  host page opened in a new browser with nothing stored adopts the room's setlist.
   See [examples/setlist.example.json](examples/setlist.example.json) for the file format.
 - Tempo is applied and verified while the song loads. A non-100% song cannot start until every
   applicable adapter confirms the exact value. Songsterr playback speed requires Songsterr Plus;
@@ -443,13 +454,15 @@ full local paths stay private. Every CLI flag is documented in
 When you want *this* host to play from MuseScore while the rest of the band uses Songsterr:
 
 ```powershell
-npm run dev:all:bridge
+npm run dev:all
 ```
 
-This is shorthand for `npm run dev:all -- --musescore-bridge`. It launches the coordinator and
-starts the MuseScore helper with `--bridge-port 4731` instead of plain keyboard control. Pass a
-custom port with `--musescore-bridge 5050`, or set `BANDCUE_MUSESCORE_BRIDGE=4731` (or `=1` for
-the default port).
+The MuseScore helper runs in bridge mode by default (`--bridge-port 4731`): it installs and starts
+the BandCue Bridge plugin, which starts MuseScore on the beat and at the right bar and changes songs
+inside the running MuseScore. As soon as the setlist has a MuseScore song, the helper starts
+MuseScore so the plugin is attached before the first song. Pass a custom port with
+`--musescore-bridge 5050`, or fall back to keyboard-only control with `--no-musescore-bridge`
+(`BANDCUE_MUSESCORE_BRIDGE=0`). `npm run dev:all:bridge` still works and means the same.
 
 In bridge mode, also tick **Don't auto-open Songsterr tabs (MuseScore host)** in the extension
 popup (or disconnect the extension) so this machine doesn't pop open Songsterr tabs.

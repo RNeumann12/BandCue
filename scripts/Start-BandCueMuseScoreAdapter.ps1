@@ -12,10 +12,12 @@ param(
   [string]$OpenSongHotkey,
   [string]$AutoAdvanceHotkey,
   [string]$AutoStartHotkey,
-  # Opens the localhost bridge on this port so the BandCue MuseScore plugin can
-  # attach. Without it the plugin has nothing to connect to, and playback falls
-  # back to keystrokes -- which cannot reset the playhead to the start of a score.
-  [int]$BridgePort
+  # The localhost bridge the BandCue MuseScore plugin attaches to is always on
+  # (port 4731); pass this to use another port.
+  [int]$BridgePort,
+  # Keyboard-only control: no plugin. Keystrokes cannot move MuseScore's
+  # playhead or change songs in place, so only use this if the plugin cannot run.
+  [switch]$NoBridge
 )
 
 $ErrorActionPreference = "Stop"
@@ -97,9 +99,12 @@ if ($AutoAdvanceHotkey) {
 if ($AutoStartHotkey) {
   $npmArgs += @("--auto-start-hotkey", $AutoStartHotkey)
 }
-if ($BridgePort -gt 0) {
+if ($NoBridge) {
+  $npmArgs += @("--no-bridge")
+} elseif ($BridgePort -gt 0) {
   $npmArgs += @("--bridge-port", "$BridgePort")
 }
+$effectiveBridgePort = if ($NoBridge) { 0 } elseif ($BridgePort -gt 0) { $BridgePort } else { 4731 }
 
 Write-Host ""
 if ($Room) {
@@ -111,8 +116,8 @@ if ($Room) {
 if ($CueHotkey -or $ArmHotkey -or $StopHotkey -or $NextSongHotkey -or $PreviousSongHotkey -or $OpenSongHotkey -or $AutoAdvanceHotkey -or $AutoStartHotkey) {
   Write-Host "Claiming configured BandCue shortcuts system-wide, so they work whatever window has focus." -ForegroundColor Cyan
 }
-if ($BridgePort -gt 0) {
-  Write-Host "Bridge open on 127.0.0.1:$BridgePort - BandCue installs and starts the 'BandCue Bridge' plugin in MuseScore itself (restart MuseScore once after the first run)." -ForegroundColor Cyan
+if ($effectiveBridgePort -gt 0) {
+  Write-Host "Bridge open on 127.0.0.1:$effectiveBridgePort - BandCue installs and starts the 'BandCue Bridge' plugin in MuseScore itself (restart MuseScore once after the first run)." -ForegroundColor Cyan
 }
 Write-Host "This gives the BandCue room full control of MuseScore on this machine. Keep this window open during rehearsal. Press Ctrl+C to stop." -ForegroundColor Cyan
 Write-Host ""

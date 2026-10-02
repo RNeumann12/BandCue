@@ -10,6 +10,7 @@ import { RoomController } from "./room.js";
 import { startDiscoveryResponder } from "./discovery.js";
 import { startMdnsResponder } from "./mdns.js";
 import { loadOrCreateRoomIdentity } from "./room-identity.js";
+import { createRoomStateWriter, readRoomStateFile, roomStatePathFor } from "./room-state-file.js";
 import { serverNow } from "./server-clock.js";
 import { parsePort } from "./config.js";
 import { selectLanCandidates } from "../shared/lan-address.js";
@@ -27,24 +28,33 @@ const publicDir = join(__dirname, "../../web");
 // Reuse the token and room code across restarts so a coordinator restart
 // mid-rehearsal doesn't invalidate every saved URL and QR code. Delete the
 // state file (or set BANDCUE_TOKEN / BANDCUE_ROOM_CODE) to rotate them.
-const { token: ROOM_TOKEN, roomCode: ROOM_CODE } = loadOrCreateRoomIdentity(
-  process.env.BANDCUE_STATE_FILE ?? join(__dirname, "../../.bandcue-room.json"),
+const IDENTITY_FILE = process.env.BANDCUE_STATE_FILE ?? join(__dirname, "../../.bandcue-room.json");
+const { token: ROOM_TOKEN, hostToken: HOST_TOKEN, roomCode: ROOM_CODE } = loadOrCreateRoomIdentity(
+  IDENTITY_FILE,
   {
     token: process.env.BANDCUE_TOKEN ?? process.env.PLAYSYNC_TOKEN,
+    hostToken: process.env.BANDCUE_HOST_TOKEN,
     roomCode: process.env.BANDCUE_ROOM_CODE
   }
 );
+const ROOM_STATE_FILE = roomStatePathFor(IDENTITY_FILE);
 
 const lanCandidates = selectLanCandidates(networkInterfaces());
 const lanAddress = process.env.PUBLIC_HOST ?? lanCandidates[0] ?? "127.0.0.1";
 const baseUrl = `http://${lanAddress}:${PORT}`;
 const localBaseUrl = `http://127.0.0.1:${PORT}`;
 const companionUrl = `${baseUrl}/?token=${encodeURIComponent(ROOM_TOKEN)}`;
-const hostUrl = `${baseUrl}/host?token=${encodeURIComponent(ROOM_TOKEN)}`;
+const hostUrl = `${baseUrl}/host?token=${encodeURIComponent(HOST_TOKEN)}`;
+const localHostUrl = `${localBaseUrl}/host?token=${encodeURIComponent(HOST_TOKEN)}`;
 const localCompanionUrl = `${localBaseUrl}/?token=${encodeURIComponent(ROOM_TOKEN)}`;
 // Room time comes from the monotonic serverNow so an OS clock step on this
 // machine cannot shift scheduled downbeats mid-rehearsal.
-const room = new RoomController(ROOM_CODE, companionUrl, hostUrl, undefined, serverNow);
+// The room state goes to every device, so it carries the host page's address
+// without the host token.
+const room = new RoomController(ROOM_CODE, companionUrl, `${baseUrl}/host`, undefined, serverNow);
+const restoredSongs = room.restorePersistedState(readRoomStateFile(ROOM_STATE_FILE));
+const roomStateWriter = createRoomStateWriter(ROOM_STATE_FILE);
+room.onPersistedStateChange((state) => roomStateWriter.schedule(state));
 
 function contentType(pathname: string): string {
   if (pathname.endsWith(".css")) return "text/css; charset=utf-8";
@@ -122,18 +132,23 @@ async function handleHttpRequest(
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_MESSAGE_BYTES });
 
-function tokenMatches(candidate: string | null): boolean {
+function tokenMatches(candidate: string | null, token: string): boolean {
   if (typeof candidate !== "string") {
     return false;
   }
-  const expected = Buffer.from(ROOM_TOKEN);
+  const expected = Buffer.from(token);
   const provided = Buffer.from(candidate);
   return expected.length === provided.length && timingSafeEqual(expected, provided);
 }
 
+// Which connections carried the host token: only they may join as the host.
+const hostSockets = new WeakSet<object>();
+
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", baseUrl);
-  if (url.pathname !== "/ws" || !tokenMatches(url.searchParams.get("token"))) {
+  const candidate = url.searchParams.get("token");
+  const isHostToken = tokenMatches(candidate, HOST_TOKEN);
+  if (url.pathname !== "/ws" || !(isHostToken || tokenMatches(candidate, ROOM_TOKEN))) {
     socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
     socket.destroy();
     return;
@@ -146,6 +161,9 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
+    if (isHostToken) {
+      hostSockets.add(ws);
+    }
     wss.emit("connection", ws);
   });
 });
@@ -220,7 +238,7 @@ wss.on("connection", (socket) => {
       return;
     }
 
-    const client = room.addClient(socket, hello);
+    const client = room.addClient(socket, hello, undefined, { canHost: hostSockets.has(socket) });
     clientId = client.id;
 
     socket.on("message", (messageRaw) => {
@@ -293,6 +311,7 @@ function shutdown(signal: string): void {
     }
   }
   room.stopLivenessSweep();
+  roomStateWriter.flush();
   clearInterval(wsPingTimer);
   clearInterval(lanWatchTimer);
   try {
@@ -350,9 +369,14 @@ server.listen(PORT, HOST, () => {
   room.startLivenessSweep();
   console.log("BandCue coordinator running");
   console.log(`Host controls:      ${hostUrl}`);
+  console.log(`Host on this machine: ${localHostUrl}`);
+  console.log("  Keep the host link to yourself: it controls the room. Share the companion link or QR code.");
   console.log(`Companion room:     ${companionUrl}`);
   console.log(`Same-machine room:  ${localCompanionUrl}`);
   console.log(`Room code:          ${ROOM_CODE}`);
+  console.log(restoredSongs
+    ? `Setlist:            ${restoredSongs} song${restoredSongs === 1 ? "" : "s"} restored from ${ROOM_STATE_FILE}`
+    : `Setlist:            saved to ${ROOM_STATE_FILE}`);
   console.log(`WebSocket endpoint: ws://${lanAddress}:${PORT}/ws?token=${ROOM_TOKEN}`);
   const otherLans = lanCandidates.filter((address) => address !== lanAddress);
   if (otherLans.length) {
@@ -367,8 +391,8 @@ server.listen(PORT, HOST, () => {
   console.log("One-command local rehearsal:");
   console.log("npm run dev:all");
   console.log("");
-  console.log("MuseScore on this machine:");
+  console.log("MuseScore on this machine (BandCue Bridge plugin on port 4731):");
   console.log(`npm run dev:musescore -- --port ${PORT} --name "MuseScore laptop"`);
-  console.log("Optional MuseScore bridge API:");
-  console.log(`npm run dev:musescore -- --port ${PORT} --name "MuseScore laptop" --bridge-port 4731`);
+  console.log("Keyboard-only MuseScore control, without the plugin:");
+  console.log(`npm run dev:musescore -- --port ${PORT} --name "MuseScore laptop" --no-bridge`);
 });

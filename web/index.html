@@ -11,6 +11,11 @@
   </head>
   <body>
     <main class="shell">
+      <div class="connection-banner" id="connectionBanner" role="alert" hidden></div>
+      <div class="connection-banner host-denied-banner" id="hostDeniedBanner" role="alert" hidden>
+        This link follows the room but cannot control it. To run the rehearsal, open the
+        <strong>Host controls</strong> link the BandCue coordinator shows when it starts.
+      </div>
       <section class="mast">
         <div>
           <p class="eyebrow">BandCue rehearsal room</p>
@@ -21,7 +26,8 @@
 
       <section class="transport-deck">
         <div class="transport-readout">
-          <p class="label">Now</p>
+          <p class="label" id="readoutLabel">Now</p>
+          <p class="readout-song" id="readoutSong" hidden></p>
           <div class="countdown" id="countdown" aria-hidden="true">--</div>
           <div class="subline" id="subline" aria-live="polite">Waiting for a transport command</div>
         </div>
@@ -119,6 +125,106 @@
       <section class="warnings" id="warnings" hidden></section>
 
       <section class="grid">
+        <article class="panel setlist-panel" id="setlistPanel" hidden>
+          <div class="panel-heading">
+            <h2>Setlist</h2>
+            <span id="setlistCount" class="panel-count">0 songs</span>
+          </div>
+          <div class="setlist-controls">
+            <button class="secondary compact" id="previousSongButton" type="button" data-hotkey-action="previous-song">Previous</button>
+            <button class="secondary compact" id="nextSongButton" type="button" data-hotkey-action="next-song">Next</button>
+            <button class="secondary compact" id="clearSongButton" type="button">Clear Current</button>
+            <button class="secondary compact" id="openSongButton" type="button" data-hotkey-action="open-current-song">Open Current Song</button>
+            <button class="secondary compact" id="exportSetlistButton" type="button">Export</button>
+            <button class="secondary compact" id="importSetlistButton" type="button">Import</button>
+            <input id="importSetlistInput" type="file" accept="application/json,.json" hidden />
+          </div>
+          <details class="song-form-details" id="songFormDetails">
+            <summary id="songFormSummary">Add a song</summary>
+            <form class="setlist-form" id="setlistForm">
+              <label>
+                <span>Title</span>
+                <input id="songTitleInput" name="title" autocomplete="off" required />
+              </label>
+              <label>
+                <span>Source</span>
+                <select id="songSourceTypeInput" name="sourceType">
+                  <option value="songsterr">Songsterr</option>
+                  <option value="musescore">MuseScore</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+              <label class="wide">
+                <span>URL or score name</span>
+                <input id="songSourceInput" name="source" autocomplete="off" />
+              </label>
+              <label class="wide">
+                <span>Songsterr URL (optional)</span>
+                <input id="songSongsterrUrlInput" name="songsterrUrl" autocomplete="off" placeholder="https://www.songsterr.com/..." />
+              </label>
+              <label class="wide">
+                <span>Bass Songsterr URL (optional)</span>
+                <input id="songSongsterrBassUrlInput" name="songsterrBassUrl" autocomplete="off" placeholder="https://www.songsterr.com/..." />
+              </label>
+              <label class="wide">
+                <span>Drums Songsterr URL (optional)</span>
+                <input id="songSongsterrDrumUrlInput" name="songsterrDrumUrl" autocomplete="off" placeholder="https://www.songsterr.com/..." />
+              </label>
+              <label class="wide">
+                <span>MuseScore score (optional)</span>
+                <input id="songMuseScoreSourceInput" name="museScoreSource" autocomplete="off" placeholder="Creep.mscz" />
+              </label>
+              <label>
+                <span>Duration (optional)</span>
+                <input id="songDurationInput" name="duration" autocomplete="off" inputmode="numeric" placeholder="mm:ss" />
+              </label>
+              <label>
+                <span>Tempo %</span>
+                <input id="songTempoInput" name="tempoPercent" autocomplete="off" inputmode="numeric" type="number" min="15" max="175" step="1" value="100" required />
+              </label>
+              <label>
+                <span>Start at measure</span>
+                <input id="songStartMeasureInput" name="startMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="999" step="1" placeholder="1" />
+              </label>
+              <fieldset class="helix-sync wide">
+                <legend>Helix sync</legend>
+                <label class="helix-toggle">
+                  <input id="songHelixSyncInput" name="helixSyncEnabled" type="checkbox" />
+                  <span>Start from Helix</span>
+                </label>
+                <label>
+                  <span>BPM</span>
+                  <input id="songHelixBpmInput" name="helixBpm" autocomplete="off" inputmode="decimal" type="number" min="20" max="400" step="0.01" />
+                </label>
+                <label>
+                  <span>Beats / measure</span>
+                  <input id="songHelixBeatsInput" name="helixBeatsPerMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="16" step="1" value="4" />
+                </label>
+                <label>
+                  <span>Count-in measures</span>
+                  <input id="songHelixTargetMeasureInput" name="helixTargetMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="128" step="1" value="2" />
+                </label>
+                <label>
+                  <span>Song trim ms</span>
+                  <input id="songHelixOffsetInput" name="helixOffsetMs" autocomplete="off" inputmode="numeric" type="number" min="-60000" max="60000" step="1" value="0" />
+                </label>
+              </fieldset>
+              <label class="wide">
+                <span>Notes</span>
+                <input id="songNotesInput" name="notes" autocomplete="off" />
+              </label>
+              <div class="setlist-form-actions">
+                <button class="secondary" id="setlistSubmitButton" type="submit">Add Song</button>
+                <button class="secondary" id="cancelEditButton" type="button" hidden>Cancel</button>
+              </div>
+            </form>
+          </details>
+          <div class="setlist-undo" id="setlistUndo" role="status" hidden>
+            <span id="setlistUndoText"></span>
+            <button class="secondary compact" id="setlistUndoButton" type="button">Undo</button>
+          </div>
+          <div id="setlistItems" class="setlist-items"></div>
+        </article>
         <article class="panel">
           <h2>Join</h2>
           <img class="qr" src="/qr.svg" alt="QR code for companion room" />
@@ -127,10 +233,18 @@
             <strong id="adapterHostPort">Waiting...</strong>
           </div>
           <p id="companionUrl" class="mono"></p>
+          <button class="secondary compact copy-link" id="copyLinkButton" type="button">Copy link</button>
         </article>
 
         <article class="panel">
           <h2>Devices</h2>
+          <form class="device-name-form" id="deviceNameForm">
+            <label>
+              <span>This device's name</span>
+              <input id="deviceNameInput" maxlength="80" autocomplete="off" placeholder="e.g. Drums tablet" />
+            </label>
+            <button class="secondary compact" id="deviceNameSaveButton" type="submit">Rename</button>
+          </form>
           <div id="devices" class="devices"></div>
         </article>
 
@@ -142,99 +256,6 @@
           <div id="timingRows" class="timing-rows"></div>
         </article>
 
-        <article class="panel setlist-panel" id="setlistPanel" hidden>
-          <div class="panel-heading">
-            <h2>Setlist</h2>
-            <span id="setlistCount" class="panel-count">0 songs</span>
-          </div>
-          <form class="setlist-form" id="setlistForm">
-            <label>
-              <span>Title</span>
-              <input id="songTitleInput" name="title" autocomplete="off" required />
-            </label>
-            <label>
-              <span>Source</span>
-              <select id="songSourceTypeInput" name="sourceType">
-                <option value="songsterr">Songsterr</option>
-                <option value="musescore">MuseScore</option>
-                <option value="other">Other</option>
-              </select>
-            </label>
-            <label class="wide">
-              <span>URL or score name</span>
-              <input id="songSourceInput" name="source" autocomplete="off" />
-            </label>
-            <label class="wide">
-              <span>Songsterr URL (optional)</span>
-              <input id="songSongsterrUrlInput" name="songsterrUrl" autocomplete="off" placeholder="https://www.songsterr.com/..." />
-            </label>
-            <label class="wide">
-              <span>Bass Songsterr URL (optional)</span>
-              <input id="songSongsterrBassUrlInput" name="songsterrBassUrl" autocomplete="off" placeholder="https://www.songsterr.com/..." />
-            </label>
-            <label class="wide">
-              <span>Drums Songsterr URL (optional)</span>
-              <input id="songSongsterrDrumUrlInput" name="songsterrDrumUrl" autocomplete="off" placeholder="https://www.songsterr.com/..." />
-            </label>
-            <label class="wide">
-              <span>MuseScore score (optional)</span>
-              <input id="songMuseScoreSourceInput" name="museScoreSource" autocomplete="off" placeholder="Creep.mscz" />
-            </label>
-            <label>
-              <span>Duration (optional)</span>
-              <input id="songDurationInput" name="duration" autocomplete="off" inputmode="numeric" placeholder="mm:ss" />
-            </label>
-            <label>
-              <span>Tempo %</span>
-              <input id="songTempoInput" name="tempoPercent" autocomplete="off" inputmode="numeric" type="number" min="15" max="175" step="1" value="100" required />
-            </label>
-            <label>
-              <span>Start at measure</span>
-              <input id="songStartMeasureInput" name="startMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="999" step="1" placeholder="1" />
-            </label>
-            <fieldset class="helix-sync wide">
-              <legend>Helix sync</legend>
-              <label class="helix-toggle">
-                <input id="songHelixSyncInput" name="helixSyncEnabled" type="checkbox" />
-                <span>Start from Helix</span>
-              </label>
-              <label>
-                <span>BPM</span>
-                <input id="songHelixBpmInput" name="helixBpm" autocomplete="off" inputmode="decimal" type="number" min="20" max="400" step="0.01" />
-              </label>
-              <label>
-                <span>Beats / measure</span>
-                <input id="songHelixBeatsInput" name="helixBeatsPerMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="16" step="1" value="4" />
-              </label>
-              <label>
-                <span>Count-in measures</span>
-                <input id="songHelixTargetMeasureInput" name="helixTargetMeasure" autocomplete="off" inputmode="numeric" type="number" min="1" max="128" step="1" value="2" />
-              </label>
-              <label>
-                <span>Song trim ms</span>
-                <input id="songHelixOffsetInput" name="helixOffsetMs" autocomplete="off" inputmode="numeric" type="number" min="-60000" max="60000" step="1" value="0" />
-              </label>
-            </fieldset>
-            <label class="wide">
-              <span>Notes</span>
-              <input id="songNotesInput" name="notes" autocomplete="off" />
-            </label>
-            <div class="setlist-form-actions">
-              <button class="secondary" id="setlistSubmitButton" type="submit">Add Song</button>
-              <button class="secondary" id="cancelEditButton" type="button" hidden>Cancel</button>
-            </div>
-          </form>
-          <div class="setlist-controls">
-            <button class="secondary compact" id="previousSongButton" type="button" data-hotkey-action="previous-song">Previous</button>
-            <button class="secondary compact" id="nextSongButton" type="button" data-hotkey-action="next-song">Next</button>
-            <button class="secondary compact" id="clearSongButton" type="button">Clear Current</button>
-            <button class="secondary compact" id="openSongButton" type="button" data-hotkey-action="open-current-song">Open Current Song</button>
-            <button class="secondary compact" id="exportSetlistButton" type="button">Export</button>
-            <button class="secondary compact" id="importSetlistButton" type="button">Import</button>
-            <input id="importSetlistInput" type="file" accept="application/json,.json" hidden />
-          </div>
-          <div id="setlistItems" class="setlist-items"></div>
-        </article>
       </section>
     </main>
     <script type="module" src="/app.js"></script>

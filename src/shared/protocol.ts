@@ -92,6 +92,11 @@ export interface ServerHello {
   roomCode: string;
   serverTime: number;
   defaultScheduleDelayMs: number;
+  /**
+   * The role the room actually gave this client. A client that asked to be the
+   * host over a link without the host token joins as a companion instead.
+   */
+  role?: ClientRole;
 }
 
 export interface ClockSyncRequest {
@@ -368,6 +373,7 @@ export interface RoomState {
   setlist: SetlistState;
   safety: SafetyState;
   companionUrl: string;
+  /** The host page's address, without its token (which never leaves the host). */
   hostUrl: string;
 }
 

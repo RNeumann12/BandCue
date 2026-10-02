@@ -13,8 +13,9 @@ android/app/build/
 android/local.properties
 android/release.keystore
 android/keystore.properties
-.bandcue-room.json
-.bandcue-room.e2e.json
+# Room identity (tokens) and the saved setlist, e.g. .bandcue-room.setlist.json.
+.bandcue-room*.json
+.bandcue-room*.json.tmp
 playwright-report/
 test-results/
 .tmp/

@@ -44,7 +44,9 @@ The coordinator is configured entirely through environment variables.
 | `PORT` | **4173** | HTTP + WebSocket port. |
 | `HOST` | **0.0.0.0** | Bind address. |
 | `BANDCUE_DISCOVERY_PORT` | = `PORT` | UDP discovery responder port. |
-| `BANDCUE_TOKEN` (or `PLAYSYNC_TOKEN`) | random `base64url` | The room token. Set it to keep a stable URL across restarts. |
+| `BANDCUE_TOKEN` (or `PLAYSYNC_TOKEN`) | random, saved | The room (join) token in the QR code and companion links. |
+| `BANDCUE_HOST_TOKEN` | random, saved | The host token in the *Host controls* link; the only token that may host. |
+| `BANDCUE_STATE_FILE` | **`.bandcue-room.json`** | Where the tokens and room code are kept. The setlist and current song are saved next to it (`.bandcue-room.setlist.json`) and restored on start. Delete the first to rotate the tokens, the second to start with an empty setlist. |
 | `PUBLIC_HOST` | auto-detected LAN IP | The IP/host advertised in the room URL and QR code. |
 
 The room **code** is always randomly generated (6 hex chars) and can't be pinned.
@@ -57,7 +59,8 @@ coordinator and helper.
 
 | Flag / Env var | Default | Purpose |
 | --- | --- | --- |
-| `--musescore-bridge [port]` / `BANDCUE_MUSESCORE_BRIDGE` | off | Run the helper in bridge mode. Bare flag or `=1`/`true` uses **4731**; pass a port to override. `0`/`false`/`no`/`off` disables. |
+| `--musescore-bridge [port]` / `BANDCUE_MUSESCORE_BRIDGE` | **on (4731)** | The helper runs in bridge mode. Pass a port to use another one. |
+| `--no-musescore-bridge` / `BANDCUE_MUSESCORE_BRIDGE=0` | | Keyboard-only MuseScore control (no plugin). |
 | `--public-host <ip>` / `BANDCUE_PUBLIC_HOST` | unset | Pin the advertised LAN IP (flows to the coordinator as `PUBLIC_HOST`). |
 | `BANDCUE_PORT` (or `PORT`) | **4173** | Coordinator port the helper targets. |
 | `BANDCUE_MUSESCORE_NAME` (or `PLAYSYNC_MUSESCORE_NAME`) | **"MuseScore laptop"** | The helper's device name. |
@@ -123,7 +126,9 @@ than executed with adapter authority, so host-only mode and the usual safety che
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--bridge-port <n>` | unset (off) | Expose the localhost bridge API on this port (e.g. `4731`). |
+| `--bridge-port <n>` / `BANDCUE_MUSESCORE_BRIDGE` | **4731** | The localhost bridge API and plugin socket port. `0` picks a free port. |
+| `--no-bridge` / `BANDCUE_MUSESCORE_BRIDGE=0` | | Keyboard-only control: no plugin, so no reset to bar 1 or later measures and no in-place song changes. |
+| `--warm-up <bool>` / `BANDCUE_MUSESCORE_WARMUP` | **on** (`0` disables) | Start MuseScore (and with it the plugin) as soon as the room's setlist has a MuseScore song, instead of at the first song. Never touches a MuseScore that is already running. |
 | `--bridge-fallback-ms <n>` | **900** | Grace after the scheduled time for an already-claimed bridge command to report its result. Unclaimed commands fall back to the keyboard immediately; a command claimed by a still-attached plugin never does (the adapter waits up to 5 s more, then reports it failed). |
 
 ### Local score catalog

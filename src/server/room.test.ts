@@ -7,6 +7,30 @@ import {
 } from "./room.js";
 
 describe("RoomController", () => {
+  it("lets a client host only over a host-token connection", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const messages: string[] = [];
+    const follower = room.addClient(fakeSocket(messages), {
+      type: "clientHello", deviceName: "Bandmate phone", role: "host", capabilities: []
+    }, 1000, { canHost: false });
+
+    expect(follower.role).toBe("companion");
+    const sent = messages.map((raw) => JSON.parse(raw));
+    expect(sent.find((message) => message.type === "serverHello")?.role).toBe("companion");
+    expect(sent.some((message) => message.type === "error" && message.message.includes("cannot control"))).toBe(true);
+
+    // And so it cannot touch the setlist or the transport.
+    room.handleMessage(follower.id, { type: "setlistUpdate", songs: [{ id: "a", title: "A", sourceType: "other" }], updatedAt: 1010 }, 1010);
+    room.handleMessage(follower.id, { type: "safetyUpdate", armed: true, updatedAt: 1020 }, 1020);
+    expect(room.getState(1020).setlist.songs).toEqual([]);
+    expect(room.getState(1020).safety.armed).toBe(false);
+
+    const host = room.addClient(undefined, {
+      type: "clientHello", deviceName: "Host", role: "host", capabilities: []
+    }, 1030, { canHost: true });
+    expect(host.role).toBe("host");
+  });
+
   it("blocks non-100% play until every applicable adapter confirms tempo", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const hostMessages: string[] = [];

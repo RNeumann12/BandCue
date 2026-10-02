@@ -336,6 +336,55 @@ export function adjustCurrentIndexAfterRemoval(currentIndex, removedIndex) {
   return currentIndex;
 }
 
+// A copy of the setlist with the song at `from` moved to `to`. Out-of-range
+// moves return the list unchanged, so callers can wire "up"/"down" buttons
+// without bounds checks of their own.
+export function moveSetlistSong(songs, from, to) {
+  if (
+    !Array.isArray(songs) ||
+    !Number.isInteger(from) || !Number.isInteger(to) ||
+    from < 0 || from >= songs.length ||
+    to < 0 || to >= songs.length ||
+    from === to
+  ) {
+    return songs;
+  }
+
+  const next = [...songs];
+  const [song] = next.splice(from, 1);
+  next.splice(to, 0, song);
+  return next;
+}
+
+// Where a pointer into the setlist (current song, song being edited) lands
+// after moveSetlistSong(songs, from, to). -1 stays -1.
+export function remapIndexAfterMove(index, from, to) {
+  if (index < 0 || from === to) {
+    return index;
+  }
+  if (index === from) {
+    return to;
+  }
+  if (from < index && index <= to) {
+    return index - 1;
+  }
+  if (to <= index && index < from) {
+    return index + 1;
+  }
+  return index;
+}
+
+// The setlist position of the room's current song, matched by id. A host page
+// that reloads forgets which song it was on while the coordinator still knows,
+// and without this Next would jump back to the top of the setlist.
+export function restoreCurrentSongIndex(songs, roomCurrentSong) {
+  const id = roomCurrentSong?.song?.id;
+  if (!id || !Array.isArray(songs)) {
+    return -1;
+  }
+  return songs.findIndex((song) => song?.id === id);
+}
+
 // --- Per-app source resolution (mirrors src/shared/song-sources.ts) -------
 // A dedicated field wins, otherwise the primary source is used when its type
 // matches.

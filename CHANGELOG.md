@@ -1,5 +1,84 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading
+
+- **Only the new host link controls the room.** The coordinator now keeps a separate host token and
+  prints it as the *Host controls* link (the Windows launchers open it). Links and QR codes already
+  handed out keep working as join links; a saved host bookmark from before this version joins as a
+  follower and says so. Open the new link once and bookmark that. On a headless coordinator (the
+  Pi), the link is in its log (`journalctl -u bandcue | grep "Host controls"`), or build it from
+  `hostToken` in `.bandcue-room.json`.
+
+### Security
+
+- **A bandmate could take over the room from the QR code.** The join link and the host link used
+  the same token, and a device became the host just by asking to, so anyone who scanned the QR
+  code could open `/host` and run the transport and the setlist. Hosting now needs the host token,
+  which never appears in the room state, the QR code, or `/api/room`.
+
+### Fixed
+
+- **The first MuseScore song after MuseScore starts could be lost.** After opening a score in a
+  new MuseScore, the helper reported it ready and then typed the shortcut that starts BandCue
+  Bridge. A Play pressed in that window went out as keystrokes while the plugin was starting, and
+  when the plugin attached it reported MuseScore stopped, so the room ended the song a few seconds
+  in. The device now stays "not ready — starting BandCue Bridge" until the plugin has attached (or
+  the attempt is over), and Play waits for it. Verified against MuseScore 4.7.2 from a cold start:
+  the first song now plays through the plugin 2 ms from the downbeat.
+- **Phones showed the host's controls.** A layout rule overrode the `hidden` attribute, so every
+  companion screen showed Arm / Play / Stop, control mode, setlist automation and Helix settings
+  that did nothing there.
+- **Opening the host page in a new browser emptied the room's setlist.** A host page with nothing
+  stored announced its empty list on joining, wiping the setlist for every other device while
+  still showing the songs itself. It now adopts the room's setlist.
+- **A reloaded host page forgot the current song,** so Next jumped back to the top of the setlist.
+  It now picks the room's current song back up.
+- **The song form overflowed the page** on laptop-width windows (and the Helix fields overlapped
+  Notes once it fit).
+- **A Play or Stop pressed while disconnected** left the buttons stuck as "pending" with no
+  feedback. Transport buttons are now off while the page is offline, and a request that could not
+  be sent says so.
+
+### Changed
+
+- **The coordinator keeps the setlist.** The setlist and current song are saved next to the room
+  identity (`.bandcue-room.setlist.json`) and restored when the coordinator starts, even after a
+  hard kill or power loss. They used to live only in the host browser, so a restart with the host
+  laptop closed left the room without a setlist.
+- **Two host pages no longer overwrite each other.** A host page takes the room's setlist when it
+  joins (keeping its own only for edits made while disconnected, or when the room has none) and
+  follows edits and song changes made on another host page.
+- **MuseScore is ready before the first song.** As soon as the setlist has a MuseScore song, the
+  helper starts MuseScore and BandCue Bridge in it, so the first song opens in place like every
+  other (measured: 1.8 s, down from about 8 s) instead of in a new MuseScore. Opt out with
+  `--warm-up 0`. The host's auto-load now waits up to 45 s instead of 20 s, longer than the slowest
+  legitimate MuseScore start, and says which device it is waiting for.
+- **Bridge mode is the default.** `npm run dev:all`, `npm run dev:musescore` and *BandCue MuseScore
+  Bridge - Connect.cmd* run the MuseScore helper with BandCue Bridge on port 4731. Keyboard-only
+  control is still there with `--no-musescore-bridge` / `--no-bridge` / `-NoBridge` or
+  `BANDCUE_MUSESCORE_BRIDGE=0`.
+- **The host page says when it lost the coordinator.** A banner explains whether the coordinator is
+  unreachable or rejected this room link (a stale link or QR code), and the page reconnects at once
+  when a phone wakes up or the Wi-Fi comes back instead of sitting out its retry backoff.
+- **Setlist editing:** songs can be reordered with ↑ / ↓; Remove and an Import that replaces the
+  list can be undone for 15 seconds; a broken import file is reported. The add-song form folds away
+  once there are songs, and the setlist now sits right under the transport controls.
+- **The big readout names the song** ("Up next · 3 / 8 — Creep", "Playing …"), so band members can
+  see from across the room what is about to start. The browser tab title shows it too.
+- **Device cards only show what a device reports** instead of lines of "not reported".
+- **Name a phone or tablet from its own page** (Devices → *This device's name*), so the host sees
+  "Drums tablet" instead of four "Phone companion"s. The host page joins as "Host" rather than
+  "Browser companion", which is also what the Leader field showed.
+- **Copy link** in the Join panel puts the room link on the clipboard for the band chat (it also
+  works on phones that open the room over plain http, where browsers withhold the clipboard API).
+- The Timing panel and device cards are compact on phones and tablets instead of one value per line.
+- **The Songsterr extension popup** says which room it is connected to and the room's current song,
+  and its Disconnect button no longer overflows.
+- The MuseScore helper describes the Shift+Space play key as such instead of "+".
+- Browser storage failures (blocked site data, full quota) no longer break the host page.
+
 ## 1.7.0 - 2026-10-01
 
 ### Changed

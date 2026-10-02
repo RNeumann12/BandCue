@@ -69,6 +69,7 @@ import {
   type RoomDiscoveryState
 } from "../shared/room-locator.js";
 import { discoverBandCueRooms } from "../shared/lan-discovery.js";
+import { bridgePortFromSetting } from "./musescore-bridge-setting.js";
 import type {
   AdapterPlaybackState,
   AdapterStatus,
@@ -109,6 +110,8 @@ interface Args {
   pluginSetup: boolean;
   /** Start the bridge plugin in a running MuseScore when none is attached. */
   pluginAutostart: boolean;
+  /** Start MuseScore (and with it the plugin) once the setlist needs it. */
+  warmUp: boolean;
   globalHotkeys: Record<ExternalHotkeyAction, string | undefined>;
 }
 
@@ -391,6 +394,12 @@ const staleMuseScoreProcesses = new Set<number>();
 // could not run, or why starting the plugin failed.
 let pluginSetupNotice: string | undefined;
 let bridgeLaunchNotice: string | undefined;
+// Set while a freshly opened MuseScore is getting BandCue Bridge started in it.
+// The launch types a shortcut into MuseScore, and a Play keyed in at the same
+// time used to get lost -- the band started without this device while it
+// reported success. So the device stays "not ready" (with this as the reason)
+// until the plugin has attached or the launch attempt is over.
+let bridgeStartingAfterOpen: string | undefined;
 const samples: ClockSample[] = [];
 // Self-adjusting copy of --dispatch-lead-ms: grows when a command's setup
 // (spawn + activate + prefix keys) overruns the lead time and fires the Play
@@ -551,6 +560,9 @@ async function connect(): Promise<void> {
     }
 
     if (message.type === "roomState") {
+      if (!museScoreWarmUpStarted && (message.setlist?.songs ?? []).some((song) => appliesToMuseScore(song))) {
+        void warmUpMuseScore();
+      }
       const songChanged = message.currentSong?.updatedAt !== currentSongUpdatedAt;
       currentSong = message.currentSong?.song;
       currentSongUpdatedAt = message.currentSong?.updatedAt;
@@ -956,12 +968,13 @@ async function reportMuseScoreStatus(): Promise<void> {
     if (includeCatalog) {
       lastPublishedCatalogAt = scoreCatalog.scannedAt;
     }
+    const ready = status.ready && !bridgeStartingAfterOpen;
     send({
       type: "adapterStatus",
       app: "musescore",
-      ready: status.ready,
+      ready,
       title: status.title,
-      playback: status.ready ? inferredPlayback : "unknown",
+      playback: ready ? inferredPlayback : "unknown",
       playbackDetail: playbackDetail(),
       ...(includeCatalog
         ? {
@@ -977,7 +990,7 @@ async function reportMuseScoreStatus(): Promise<void> {
       songMatch: match,
       detail: match.status === "missing" || match.status === "ambiguous"
         ? match.detail
-        : mismatch ?? bridgeNotice() ?? status.detail,
+        : bridgeStartingAfterOpen ?? mismatch ?? bridgeNotice() ?? status.detail,
       // A bridge helper drives real playback state and isn't subject to the
       // keyboard fallback's setup latency, so it needs no extra count-in. The
       // resident trigger does its setup before the cue, so it asks for barely
@@ -1891,6 +1904,61 @@ Get-Process | Where-Object {
 }
 
 /**
+ * Starts MuseScore as soon as the room's setlist has a MuseScore song in it,
+ * rather than at the first song. Opening a score into a MuseScore that is not
+ * running means a new MuseScore process, its startup dialogs, and starting the
+ * plugin by shortcut -- about 8 s, or longer if MuseScore does not come to the
+ * front -- while every later song changes in place in about 2 s. Warming up
+ * moves that wait to before the band is waiting: by the first song the plugin
+ * is attached (the 2 s status poll starts it) and the open is an in-place one.
+ * Once per helper run, and never over a MuseScore that is already running.
+ */
+let museScoreWarmUpStarted = false;
+
+async function warmUpMuseScore(): Promise<void> {
+  museScoreWarmUpStarted = true;
+  if (args.bridgePort === undefined || !args.pluginAutostart || !args.warmUp || !bridgeServer) {
+    return;
+  }
+
+  const result = await runPowerShell(`
+$processMatch = '${escapePowerShellSingleQuoted(args.processMatch)}'
+if (Get-Process | Where-Object { $_.ProcessName -match $processMatch }) {
+  'running'
+  exit 0
+}
+$exe = $null
+foreach ($root in @('HKCU:', 'HKLM:')) {
+  foreach ($name in @('MuseScore4.exe', 'MuseScoreStudio.exe', 'MuseScore.exe')) {
+    $entry = Get-ItemProperty "$root\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\$name" -ErrorAction SilentlyContinue
+    if ($entry -and $entry.'(default)' -and (Test-Path -LiteralPath $entry.'(default)')) { $exe = $entry.'(default)'; break }
+  }
+  if ($exe) { break }
+}
+if (-not $exe) {
+  # The program .mscz files open with, e.g. "C:\\...\\MuseScore4.exe" "%1".
+  $progId = (Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\\.mscz' -ErrorAction SilentlyContinue).'(default)'
+  if ($progId) {
+    $command = (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\\$progId\\shell\\open\\command" -ErrorAction SilentlyContinue).'(default)'
+    if ($command -match '^\\s*"([^"]+\\.exe)"' -or $command -match '^\\s*(\\S+\\.exe)') { $exe = $Matches[1] }
+  }
+}
+if (-not $exe -or -not (Test-Path -LiteralPath $exe)) {
+  'not-found'
+  exit 0
+}
+Start-Process -FilePath $exe
+'started'
+`);
+  const outcome = result.stdout.trim().split(/\r?\n/).pop();
+  if (outcome === "started") {
+    console.log("Started MuseScore for tonight's setlist, so BandCue Bridge is attached before the first song.");
+  } else if (outcome === "not-found") {
+    console.warn("Could not find MuseScore to start it early; the first MuseScore song will start it instead.");
+  }
+}
+
+/**
  * The fallback when no plugin is attached: open the score the Windows way,
  * which MuseScore 4 turns into a new MuseScore process, close the old one, and
  * start the plugin in the new one so the next song change can stay in place.
@@ -1911,12 +1979,17 @@ async function openScoreInNewMuseScore(sequenceId: number, absolutePath: string,
       detail: opened.detail
     };
   }
+  const startsBridge = opened.opened && args.bridgePort !== undefined && args.pluginAutostart &&
+    Boolean(bridgeServer) && !pluginSetupNotice;
+  if (startsBridge) {
+    bridgeStartingAfterOpen = `Opened ${relativePath}; starting BandCue Bridge in MuseScore`;
+  }
   reportCommandStatus({
-    ready: opened.opened,
+    ready: opened.opened && !startsBridge,
     action: "open-song",
     sequenceId,
     status: opened.opened ? "succeeded" : "failed",
-    detail: opened.detail,
+    detail: bridgeStartingAfterOpen ?? opened.detail,
     controlPath: "local-score-catalog",
     at: Date.now()
   });
@@ -1926,7 +1999,28 @@ async function openScoreInNewMuseScore(sequenceId: number, absolutePath: string,
     // The plugin gets the start measure with its `hello`.
     bridgeLaunchesByProcess.clear();
     nextBridgeLaunchAt = 0;
-    await ensureBridgeRunning("the score was opened without a plugin", true, basename(absolutePath, extname(absolutePath)));
+    try {
+      await ensureBridgeRunning("the score was opened without a plugin", true, basename(absolutePath, extname(absolutePath)));
+    } finally {
+      bridgeStartingAfterOpen = undefined;
+    }
+  }
+  if (startsBridge) {
+    // Ready now on whichever path will carry the Play: the plugin (once it has
+    // loaded the score's sounds) or, if it could not be started, the keys.
+    const status = await getMuseScoreStatus();
+    const attached = Boolean(primaryBridgeSocket);
+    reportCommandStatus({
+      ready: status.ready,
+      action: "open-song",
+      sequenceId,
+      status: "succeeded",
+      detail: attached
+        ? `${opened.detail}; BandCue Bridge attached`
+        : `${opened.detail}; ${bridgeNotice() ?? "BandCue Bridge did not attach, so Play and Stop use the keyboard"}`,
+      controlPath: attached ? "musescore-plugin-open" : "local-score-catalog",
+      at: Date.now()
+    });
   }
 }
 
@@ -3112,6 +3206,10 @@ function describeKey(key: string): string {
     return "Ctrl+Home";
   }
 
+  if (key === "+ ") {
+    return "Shift+Space";
+  }
+
   return key;
 }
 
@@ -3191,11 +3289,15 @@ function parseArgs(raw: string[]): Args {
     commandGapMs: 120,
     dispatchLeadMs: DEFAULT_DISPATCH_LEAD_MS,
     bridgeFallbackMs: 900,
+    // Bridge mode is the default: the plugin starts on the beat and at the
+    // right bar, and changes songs in place, where keystrokes can do neither.
+    bridgePort: bridgePortFromSetting(process.env.BANDCUE_MUSESCORE_BRIDGE),
     scoreFolders: parseScoreFolders(process.env.BANDCUE_MUSESCORE_FOLDERS),
     scoreCatalogRecursive: process.env.BANDCUE_MUSESCORE_RECURSIVE !== "0",
     closeOldInstances: process.env.BANDCUE_MUSESCORE_CLOSE_OLD !== "0",
     pluginSetup: process.env.BANDCUE_MUSESCORE_PLUGIN_SETUP !== "0",
     pluginAutostart: process.env.BANDCUE_MUSESCORE_PLUGIN_AUTOSTART !== "0",
+    warmUp: process.env.BANDCUE_MUSESCORE_WARMUP !== "0",
     globalHotkeys: {
       "toggle-arm": process.env.BANDCUE_ARM_HOTKEY,
       play: process.env.BANDCUE_PLAY_HOTKEY ?? process.env.BANDCUE_CUE_HOTKEY,
@@ -3245,6 +3347,9 @@ function parseArgs(raw: string[]): Args {
     if (value === "--bridge-port") {
       parsed.bridgePort = parseNonNegativeInt(raw[index + 1], 0);
     }
+    if (value === "--no-bridge") {
+      parsed.bridgePort = undefined;
+    }
     if (value === "--bridge-fallback-ms") {
       parsed.bridgeFallbackMs = parsePositiveInt(raw[index + 1], parsed.bridgeFallbackMs);
     }
@@ -3260,6 +3365,9 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--plugin-setup") {
       parsed.pluginSetup = parseBooleanFlag(raw[index + 1], parsed.pluginSetup);
+    }
+    if (value === "--warm-up") {
+      parsed.warmUp = parseBooleanFlag(raw[index + 1], parsed.warmUp);
     }
     if (value === "--plugin-autostart") {
       parsed.pluginAutostart = parseBooleanFlag(raw[index + 1], parsed.pluginAutostart);

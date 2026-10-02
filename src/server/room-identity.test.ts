@@ -31,7 +31,27 @@ describe("loadOrCreateRoomIdentity", () => {
     const first = loadOrCreateRoomIdentity(statePath);
     const second = loadOrCreateRoomIdentity(statePath);
 
-    expect(second).toEqual({ token: first.token, roomCode: first.roomCode });
+    expect(second).toEqual(first);
+  });
+
+  it("keeps a separate host token that never equals the join token", () => {
+    const identity = loadOrCreateRoomIdentity(statePath);
+
+    expect(identity.hostToken).toMatch(/^[A-Za-z0-9_-]{8,}$/);
+    expect(identity.hostToken).not.toBe(identity.token);
+    expect(JSON.parse(readFileSync(statePath, "utf8")).hostToken).toBe(identity.hostToken);
+    expect(loadOrCreateRoomIdentity(statePath, { hostToken: "my-host-token" }).hostToken).toBe("my-host-token");
+  });
+
+  it("upgrades a state file from before host tokens without turning shared links into host links", () => {
+    writeFileSync(statePath, JSON.stringify({ token: "old-shared-token", roomCode: "ABC123" }));
+    const identity = loadOrCreateRoomIdentity(statePath);
+
+    // Links already handed out keep working, as join links.
+    expect(identity.token).toBe("old-shared-token");
+    expect(identity.roomCode).toBe("ABC123");
+    expect(identity.hostToken).not.toBe("old-shared-token");
+    expect(loadOrCreateRoomIdentity(statePath).hostToken).toBe(identity.hostToken);
   });
 
   it("prefers explicit overrides and writes them back", () => {

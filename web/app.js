@@ -5,6 +5,9 @@ import {
   nextSongIndex,
   previousSongIndex,
   adjustCurrentIndexAfterRemoval,
+  moveSetlistSong,
+  remapIndexAfterMove,
+  restoreCurrentSongIndex,
   appliesToMuseScore,
   appliesToSongsterr,
   getSongsterrUrl,
@@ -76,6 +79,10 @@ const $form = (selector) => /** @type {HTMLFormElement} */ (document.querySelect
 const $$ = (root, selector) => /** @type {HTMLElement[]} */ ([...root.querySelectorAll(selector)]);
 
 const elements = {
+  connectionBanner: $("#connectionBanner"),
+  hostDeniedBanner: $("#hostDeniedBanner"),
+  readoutLabel: $("#readoutLabel"),
+  readoutSong: $("#readoutSong"),
   roomCode: $("#roomCode"),
   transportBadge: $("#transportBadge"),
   countdown: $("#countdown"),
@@ -87,7 +94,10 @@ const elements = {
   currentSongMeta: $("#currentSongMeta"),
   warnings: $("#warnings"),
   devices: $("#devices"),
+  deviceNameForm: $form("#deviceNameForm"),
+  deviceNameInput: $input("#deviceNameInput"),
   companionUrl: $("#companionUrl"),
+  copyLinkButton: $button("#copyLinkButton"),
   adapterHostPort: $("#adapterHostPort"),
   hostPanel: $("#hostPanel"),
   hostWarning: $("#hostWarning"),
@@ -107,6 +117,11 @@ const elements = {
   stopButton: $button("#stopButton"),
   setlistPanel: $("#setlistPanel"),
   setlistForm: $form("#setlistForm"),
+  songFormDetails: /** @type {HTMLDetailsElement} */ (document.querySelector("#songFormDetails")),
+  songFormSummary: $("#songFormSummary"),
+  setlistUndo: $("#setlistUndo"),
+  setlistUndoText: $("#setlistUndoText"),
+  setlistUndoButton: $button("#setlistUndoButton"),
   setlistSubmitButton: $button("#setlistSubmitButton"),
   cancelEditButton: $button("#cancelEditButton"),
   setlistCount: $("#setlistCount"),
@@ -154,6 +169,20 @@ let reconnectTimer;
 let heartbeatTimer;
 let lastServerContactAt = 0;
 let reconnectAttempts = 0;
+// "connecting" before the first socket opens, "open" while in the room, and
+// "offline" after a connection dropped or never came up. Drives the banner and
+// keeps the host's transport buttons off while nothing they send can arrive.
+let connectionState = "connecting";
+// A host page opened with a plain join link: the room let it in as a
+// companion, so it shows the room but none of the host controls.
+let hostDenied = false;
+// Set on every (re)join until the first room state has been reconciled with
+// this page's setlist (see syncWithRoom).
+let roomSyncPending = true;
+// Setlist or current-song changes that could not be sent (made while offline).
+let setlistUnsent = false;
+let everConnected = false;
+let connectionProblem = "";
 // undefined until the first clockSyncResult so blendOffset adopts the first
 // fresh sample as-is; seeding with 0 would slew a real offset from zero and
 // leave a residual timing error after the warm-up burst.
@@ -188,13 +217,27 @@ const TIMING_RENDER_INTERVAL_MS = 1200;
 // Auto-load: how long to let the next song's tab/score settle before starting,
 // and how long to wait for a ready adapter before giving up on the load.
 const SETLIST_LOAD_SETTLE_MS = 4500;
-const SETLIST_LOAD_TIMEOUT_MS = 20000;
+// Longer than the slowest legitimate load: a MuseScore that is not running yet
+// opens the score in a new window and then starts BandCue Bridge in it, which
+// can wait up to 30 s for MuseScore to come to the front plus 4 s for the
+// plugin to attach (BRIDGE_FOCUS_WATCH_MS / BRIDGE_LAUNCH_ATTACH_WAIT_MS in
+// src/adapters/musescore-windows.ts). The device says why it is not ready all
+// along, and Stop calls the song off at any point.
+const SETLIST_LOAD_TIMEOUT_MS = 45000;
 
 if (!token) {
   setText(elements.roomCode, "Missing token");
   setText(elements.subline, "Open the room URL printed by the coordinator.");
 } else {
   connect();
+  // A phone that wakes up, or a laptop whose Wi-Fi comes back, should not sit
+  // out the rest of a long reconnect backoff before rejoining the room.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      reconnectNow();
+    }
+  });
+  window.addEventListener("online", reconnectNow);
 }
 
 if (isHost) {
@@ -222,11 +265,7 @@ elements.autoStartToggle?.addEventListener("change", () => {
 elements.armButton?.addEventListener("click", toggleArm);
 elements.partialStartToggle?.addEventListener("change", () => {
   allowPartialStart = elements.partialStartToggle.checked;
-  try {
-    localStorage.setItem(PARTIAL_START_STORAGE_KEY, JSON.stringify(allowPartialStart));
-  } catch {
-    // Storage can be unavailable (private window); the choice still applies now.
-  }
+  writeStorage(PARTIAL_START_STORAGE_KEY, JSON.stringify(allowPartialStart));
   if (lastState) {
     renderHostControls(lastState, getReadyAdapters(lastState));
   }
@@ -277,7 +316,17 @@ elements.setlistItems?.addEventListener("click", (event) => {
   if (button.dataset.setlistAction === "remove") {
     removeSetlistSong(index);
   }
+
+  if (button.dataset.setlistAction === "move-up") {
+    moveSong(index, index - 1);
+  }
+
+  if (button.dataset.setlistAction === "move-down") {
+    moveSong(index, index + 1);
+  }
 });
+
+elements.setlistUndoButton?.addEventListener("click", undoSetlistChange);
 
 elements.previousSongButton?.addEventListener("click", selectPreviousSong);
 elements.nextSongButton?.addEventListener("click", selectNextSong);
@@ -289,6 +338,36 @@ elements.clearSongButton?.addEventListener("click", () => {
 });
 
 elements.openSongButton?.addEventListener("click", openCurrentSong);
+
+elements.copyLinkButton?.addEventListener("click", async () => {
+  const link = lastState?.companionUrl;
+  if (!link) {
+    return;
+  }
+  const copied = await copyText(link);
+  setText(elements.copyLinkButton, copied ? "Copied" : "Copy failed");
+  setTimeout(() => setText(elements.copyLinkButton, "Copy link"), 1800);
+});
+
+if (elements.deviceNameInput) {
+  elements.deviceNameInput.value = storedDeviceName();
+  elements.deviceNameInput.placeholder = defaultDeviceName();
+}
+
+// The room only reads a device's name when it joins, so a rename rejoins.
+elements.deviceNameForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const name = elements.deviceNameInput.value.trim().slice(0, 80);
+  if (name === storedDeviceName()) {
+    return;
+  }
+  writeStorage(DEVICE_NAME_STORAGE_KEY, name);
+  elements.deviceNameInput.value = name;
+  if (socket?.readyState === WebSocket.OPEN) {
+    socket.close();
+    connect();
+  }
+});
 
 elements.exportSetlistButton?.addEventListener("click", () => {
   exportSetlist();
@@ -351,13 +430,23 @@ function requestPlayAtCue(cueAtServerTime) {
     return;
   }
 
-  transportRequestPending = true;
-  send({
+  transportRequestPending = sendTransportRequest({
     type: "transportRequest",
     action: "play",
     requestedAt: Date.now(),
     cueAtServerTime
   });
+}
+
+// Sends a transport request and reports whether it went out. A request that
+// never left must not hold the buttons in their "pending" state until some
+// later room update happens to clear it.
+function sendTransportRequest(message) {
+  if (send(message)) {
+    return true;
+  }
+  setText(elements.hostWarning, `Not connected to the coordinator; ${message.action} was not sent.`);
+  return false;
 }
 
 function cueServerTimeForEvent(event) {
@@ -385,8 +474,7 @@ function requestStop() {
     return;
   }
 
-  transportRequestPending = true;
-  send({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
+  transportRequestPending = sendTransportRequest({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
 }
 
 function toggleArm() {
@@ -413,6 +501,9 @@ function toggleAutoStart() {
 }
 
 function handleHostHotkey(event) {
+  if (hostDenied) {
+    return;
+  }
   const action = hostHotkeyActionForEvent(event);
   if (!action) {
     return;
@@ -471,11 +562,21 @@ function connect() {
     clearInterval(heartbeatTimer);
     heartbeatTimer = undefined;
   }
-  socket = new WebSocket(wsUrl);
+  const ws = new WebSocket(wsUrl);
+  socket = ws;
+  let opened = false;
 
-  socket.addEventListener("open", () => {
+  ws.addEventListener("open", () => {
     reconnectAttempts = 0;
     lastServerContactAt = Date.now();
+    opened = true;
+    everConnected = true;
+    roomSyncPending = true;
+    // Force the next room state through a full render: it may well match the
+    // last one seen before the drop, and the volatile path would then leave
+    // the offline badge and disabled buttons in place.
+    lastStableRoomSignature = "";
+    setConnectionState("open");
     // Start each connection from a clean clock estimate. Stale pre-disconnect
     // samples are dangerous after a sleep/resume, where the machine clock may
     // have just stepped; the warm-up burst rebuilds the offset from scratch.
@@ -489,9 +590,7 @@ function connect() {
     }, HEARTBEAT_CHECK_INTERVAL_MS);
     send({
       type: "clientHello",
-      deviceName: localStorage.getItem(DEVICE_NAME_STORAGE_KEY)
-        || localStorage.getItem(LEGACY_DEVICE_NAME_STORAGE_KEY)
-        || defaultDeviceName(),
+      deviceName: storedDeviceName() || defaultDeviceName(),
       role: isHost ? "host" : "companion",
       capabilities: []
     });
@@ -512,18 +611,21 @@ function connect() {
     }, CLOCK_WARMUP_INTERVAL_MS);
   });
 
-  socket.addEventListener("message", (event) => {
+  ws.addEventListener("message", (event) => {
+    if (ws !== socket) {
+      return;
+    }
     lastServerContactAt = Date.now();
     const message = JSON.parse(event.data);
 
     if (message.type === "serverHello") {
       clientId = message.clientId;
-      if (isHost) {
-        publishSetlist();
+      if (isHost && message.role && message.role !== "host") {
+        denyHostControls();
       }
-      if (isHost && currentSongIndex >= 0) {
-        publishCurrentSong();
-      }
+      // The setlist is reconciled with the room state that follows (see
+      // syncWithRoom); announcing this page's copy here would overwrite the
+      // room's, e.g. with the empty list of a browser that has nothing stored.
       return;
     }
 
@@ -577,7 +679,12 @@ function connect() {
     }
   });
 
-  socket.addEventListener("close", () => {
+  ws.addEventListener("close", () => {
+    // A socket this page replaced on purpose (a rename rejoins the room) has
+    // nothing left to clean up or reconnect.
+    if (ws !== socket) {
+      return;
+    }
     if (clockTimer) {
       clearInterval(clockTimer);
       clockTimer = undefined;
@@ -587,16 +694,107 @@ function connect() {
       heartbeatTimer = undefined;
     }
     transportRequestPending = false;
-    setText(elements.subline, "Disconnected. Reconnecting...");
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
     reconnectAttempts += 1;
+    setConnectionState("offline");
+    if (!opened) {
+      diagnoseConnectionProblem();
+    }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = undefined;
       connect();
     }, reconnectDelayMs(reconnectAttempts));
   });
+}
+
+function denyHostControls() {
+  if (hostDenied) {
+    return;
+  }
+  hostDenied = true;
+  elements.hostPanel.hidden = true;
+  elements.setlistPanel.hidden = true;
+  elements.timingPanel.hidden = true;
+  if (elements.hostDeniedBanner) {
+    elements.hostDeniedBanner.hidden = false;
+  }
+}
+
+function reconnectNow() {
+  if (!token || !socket || socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+    return;
+  }
+  connect();
+}
+
+function setConnectionState(next) {
+  connectionState = next;
+  if (next === "open") {
+    connectionProblem = "";
+  }
+  renderConnectionState();
+}
+
+function renderConnectionState() {
+  document.body.dataset.connection = connectionState;
+  const banner = elements.connectionBanner;
+  if (!banner) {
+    return;
+  }
+
+  if (connectionState !== "offline") {
+    banner.hidden = true;
+    return;
+  }
+
+  const where = location.host;
+  const lead = everConnected
+    ? `Lost the connection to the BandCue coordinator at ${where}.`
+    : `Can't reach the BandCue coordinator at ${where}.`;
+  const hint = connectionProblem
+    || (everConnected
+      ? "Devices that already have a start keep it. Reconnecting..."
+      : "Check that it is running and that this device is on the rehearsal Wi-Fi. Retrying...");
+  setText(banner, `${lead} ${hint}`);
+  banner.hidden = false;
+  setText(elements.transportBadge, "Offline");
+  if (isHost) {
+    elements.playButton.disabled = true;
+    elements.stopButton.disabled = true;
+    elements.armButton.disabled = true;
+  }
+}
+
+// A refused WebSocket looks the same as an unreachable one from the page. The
+// room's discovery endpoint answers without a token, so if it is up, the
+// coordinator is fine and it is this page's room link it turned away.
+let diagnosingConnection = false;
+
+async function diagnoseConnectionProblem() {
+  if (diagnosingConnection) {
+    return;
+  }
+
+  diagnosingConnection = true;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const response = await fetch("/api/room", { cache: "no-store", signal: controller.signal });
+    clearTimeout(timer);
+    connectionProblem = response.ok
+      ? "The coordinator is running but did not accept this room link. Open the link or QR code it shows now."
+      : "";
+  } catch {
+    // Unreachable: the generic message says so.
+    connectionProblem = "";
+  } finally {
+    if (connectionState === "offline") {
+      renderConnectionState();
+    }
+    diagnosingConnection = false;
+  }
 }
 
 function renderState(state) {
@@ -622,8 +820,10 @@ function renderState(state) {
   setText(elements.leaderName, leader ? leader.deviceName : "None");
   setText(elements.readySummary, `${readyAdapters.length} / ${desktopAdapters.length}`);
   renderCurrentSong(state.currentSong);
+  renderReadout(state);
+  renderDocumentTitle(state);
   renderDevices(state.clients);
-  hydrateSetlistFromRoom(state.setlist);
+  syncWithRoom(state);
   applySavedCalibrations(state);
   renderTimingRows(state);
   renderWarnings(warnings);
@@ -717,15 +917,37 @@ function renderCurrentSong(currentSong) {
   ));
 }
 
+// The big readout is what band members glance at from across the room, so it
+// names the song as well as counting it in.
+function renderReadout(state) {
+  const song = state.currentSong?.song;
+  const status = state.transport.status;
+  const position = song && state.currentSong.index && state.currentSong.total
+    ? ` · ${state.currentSong.index} / ${state.currentSong.total}`
+    : "";
+  const label = status === "scheduled" ? "Starting" : status === "running" ? "Playing" : song ? "Up next" : "Now";
+  setText(elements.readoutLabel, `${label}${position}`);
+  setText(elements.readoutSong, song?.title ?? "");
+  elements.readoutSong.hidden = !song;
+}
+
+function renderDocumentTitle(state) {
+  const song = state.currentSong?.song?.title;
+  const status = state.transport.status;
+  const prefix = status === "running" ? "▶ " : status === "scheduled" ? "… " : "";
+  document.title = `${prefix}${song ? `${song} · ` : ""}BandCue ${state.roomCode}`;
+}
+
 function renderHostControls(state, readyAdapters) {
   if (!isHost) {
     return;
   }
 
-  const playAvailable = canHostPlay(state, { allowPartialStart });
+  const online = connectionState === "open";
+  const playAvailable = online && canHostPlay(state, { allowPartialStart });
   elements.playButton.disabled = !playAvailable || transportRequestPending;
   updateStopAvailability(state);
-  elements.armButton.disabled = state.transport.status !== "stopped";
+  elements.armButton.disabled = !online || state.transport.status !== "stopped";
   elements.armButton.setAttribute("aria-pressed", String(Boolean(state.safety?.armed)));
   setText(elements.armButton, state.safety?.armed ? "Disarm" : "Arm");
   elements.controlModeSelect.value = state.safety?.controlMode || "host-only";
@@ -825,29 +1047,42 @@ function updateDeviceCard(card, device) {
   const ready = Boolean(status?.ready);
   const state = status?.state || (ready ? "ready" : "not-ready");
   const badge = getDeviceBadge(device, state);
-  const title = status?.title || status?.detail || "No adapter status";
+  const isAdapter = device.role === "desktop-adapter";
+  // Companions and hosts report nothing but their clock; only an adapter's
+  // missing reports are worth calling out, and only the ones it should send.
+  const title = status?.title || status?.detail || (isAdapter ? "No adapter status yet" : "");
   const playback = status?.playback
     ? `${status.playback}${status.playbackDetail ? ` - ${status.playbackDetail}` : ""}`
-    : "playback not reported";
-  const command = status?.lastCommand ? renderCommand(status.lastCommand) : "No command feedback yet";
-  const tempo = renderTempoStatus(status?.tempo);
+    : "";
+  const command = status?.lastCommand ? renderCommand(status.lastCommand) : "";
+  const tempo = status?.tempo ? renderTempoStatus(status.tempo) : "";
+  const catalog = status?.catalog || status?.songMatch ? renderCatalogMatch(status) : "";
   const clock = renderClock(device.clock);
-  const self = device.id === clientId ? "you" : device.role;
+  const self = device.id === clientId ? "this page" : device.role;
 
   card.className = `device ${state}`;
   setText(card.querySelector("[data-device-name]"), device.deviceName);
   setText(card.querySelector("[data-device-self]"), self);
   setText(card.querySelector("[data-device-capabilities]"), formatCapabilities(device));
-  setText(card.querySelector("[data-device-title]"), title);
-  setText(card.querySelector("[data-device-catalog]"), renderCatalogMatch(status));
-  setText(card.querySelector("[data-device-playback]"), playback);
-  setText(card.querySelector("[data-device-tempo]"), tempo);
-  setText(card.querySelector("[data-device-command]"), command);
-  setText(card.querySelector("[data-device-clock]"), clock);
+  setDeviceLine(card, "[data-device-title]", title);
+  setDeviceLine(card, "[data-device-catalog]", catalog);
+  setDeviceLine(card, "[data-device-playback]", playback);
+  setDeviceLine(card, "[data-device-tempo]", tempo);
+  setDeviceLine(card, "[data-device-command]", command);
+  setDeviceLine(card, "[data-device-clock]", clock);
 
   const badgeElement = card.querySelector("[data-device-badge]");
   setText(badgeElement, badge.label);
   badgeElement.className = `pill ${badge.className}`;
+}
+
+function setDeviceLine(card, selector, text) {
+  const line = /** @type {HTMLElement | null} */ (card.querySelector(selector));
+  if (!line) {
+    return;
+  }
+  setText(line, text);
+  line.hidden = !text;
 }
 
 function getDeviceCardByKey(key) {
@@ -889,39 +1124,6 @@ function getBaseDeviceKey(device) {
     getCalibrationKey(device),
     device.status?.app || formatCapabilities(device)
   ].join(":");
-}
-
-function renderDevice(device) {
-  const status = device.status;
-  const ready = Boolean(status?.ready);
-  const state = status?.state || (ready ? "ready" : "not-ready");
-  const badge = getDeviceBadge(device, state);
-  const title = status?.title || status?.detail || "No adapter status";
-  const playback = status?.playback
-    ? `${status.playback}${status.playbackDetail ? ` - ${status.playbackDetail}` : ""}`
-    : "playback not reported";
-  const command = status?.lastCommand ? renderCommand(status.lastCommand) : "No command feedback yet";
-  const clock = renderClock(device.clock);
-  const self = device.id === clientId ? "you" : device.role;
-
-  return `
-    <div class="device ${state}">
-      <div class="device-head">
-        <strong>${escapeHtml(device.deviceName)}</strong>
-        <span class="pill ${badge.className}">${escapeHtml(badge.label)}</span>
-      </div>
-      <div class="device-meta">
-        <span>${escapeHtml(self)}</span>
-        <span>${escapeHtml(formatCapabilities(device))}</span>
-      </div>
-      <span class="small">${escapeHtml(title)}</span>
-      <span class="small">${escapeHtml(renderCatalogMatch(status))}</span>
-      <span class="small">${escapeHtml(playback)}</span>
-      <span class="small">${escapeHtml(renderTempoStatus(status?.tempo))}</span>
-      <span class="small">${escapeHtml(command)}</span>
-      <span class="small">${escapeHtml(clock)}</span>
-    </div>
-  `;
 }
 
 function applySavedCalibrations(state) {
@@ -1164,7 +1366,9 @@ function startEditSong(index) {
   setText(elements.setlistSubmitButton, "Save Changes");
   elements.cancelEditButton.hidden = false;
   renderSetlist();
-  elements.songTitleInput.focus();
+  elements.songFormDetails.open = true;
+  elements.songFormDetails.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  elements.songTitleInput.focus({ preventScroll: true });
 }
 
 function saveEditedSong() {
@@ -1202,6 +1406,24 @@ function resetEditState() {
   resetHelixFormDefaults();
   setText(elements.setlistSubmitButton, "Add Song");
   elements.cancelEditButton.hidden = true;
+}
+
+// The add/edit form is folded away once there are songs to rehearse, so the
+// list -- what the host actually works from during a rehearsal -- sits right
+// under the transport. It opens for an empty setlist and while editing.
+function renderSongFormState() {
+  if (!elements.songFormDetails) {
+    return;
+  }
+
+  const editing = editingSongIndex >= 0;
+  setText(
+    elements.songFormSummary,
+    editing ? `Edit song: ${setlist[editingSongIndex]?.title ?? ""}` : "Add a song"
+  );
+  if (editing || !setlist.length) {
+    elements.songFormDetails.open = true;
+  }
 }
 
 function resetHelixFormDefaults() {
@@ -1307,7 +1529,7 @@ function selectCurrentSong(index) {
 
 function setAutoRun(update) {
   autoRun = normalizeAutoRunSettings({ ...autoRun, ...update });
-  localStorage.setItem(AUTO_RUN_STORAGE_KEY, JSON.stringify(autoRun));
+  writeStorage(AUTO_RUN_STORAGE_KEY, JSON.stringify(autoRun));
 
   // A pending load only exists because auto-load put it there.
   if (!autoRun.advance) {
@@ -1319,7 +1541,7 @@ function setAutoRun(update) {
 
 function loadAllowPartialStart() {
   try {
-    return JSON.parse(localStorage.getItem(PARTIAL_START_STORAGE_KEY) || "false") === true;
+    return JSON.parse(readStorage(PARTIAL_START_STORAGE_KEY) || "false") === true;
   } catch {
     return false;
   }
@@ -1327,7 +1549,7 @@ function loadAllowPartialStart() {
 
 function loadAutoRunSettings() {
   try {
-    return normalizeAutoRunSettings(JSON.parse(localStorage.getItem(AUTO_RUN_STORAGE_KEY) || "{}"));
+    return normalizeAutoRunSettings(JSON.parse(readStorage(AUTO_RUN_STORAGE_KEY) || "{}"));
   } catch {
     return normalizeAutoRunSettings({});
   }
@@ -1359,6 +1581,7 @@ function updateStopAvailability(state = lastState) {
 
   const stopped = (state?.transport?.status ?? "stopped") === "stopped";
   elements.stopButton.disabled = transportRequestPending
+    || (connectionState !== "open" && !stopped)
     || (stopped && !(setlistRunPhase === "loading" && autoRun.start));
 }
 
@@ -1416,7 +1639,10 @@ function driveSetlistRun(state) {
     } else if (decision === "play") {
       finishLoadingCurrentSong();
     } else {
-      setAutoRunStatus(`Loading ${currentSongLabel()}...`);
+      const blockers = allowPartialStart ? [] : startBlockers(state);
+      setAutoRunStatus(blockers.length
+        ? `Loading ${currentSongLabel()}: waiting for ${blockers[0]}...`
+        : `Loading ${currentSongLabel()}...`);
     }
     return;
   }
@@ -1449,9 +1675,8 @@ function playCurrentSongForRun() {
 
   // Arm and play in the same tick: the server processes the safety update before
   // the transport request, so play is accepted without waiting a round trip.
-  transportRequestPending = true;
   publishSafety({ armed: true });
-  send({ type: "transportRequest", action: "play", requestedAt: Date.now() });
+  transportRequestPending = sendTransportRequest({ type: "transportRequest", action: "play", requestedAt: Date.now() });
 
   // Auto-advance can come from a known duration or from adapters naturally
   // reporting stopped after playback.
@@ -1492,6 +1717,7 @@ function removeSetlistSong(index) {
     return;
   }
 
+  offerSetlistUndo(`Removed ${setlist[index].title}.`);
   setlist.splice(index, 1);
   currentSongIndex = adjustCurrentIndexAfterRemoval(currentSongIndex, index);
 
@@ -1507,31 +1733,109 @@ function removeSetlistSong(index) {
   renderSetlist();
 }
 
-function publishSetlist() {
-  if (!isHost) {
+function moveSong(from, to) {
+  const moved = moveSetlistSong(setlist, from, to);
+  if (moved === setlist) {
     return;
   }
 
-  send({
+  setlist = moved;
+  currentSongIndex = remapIndexAfterMove(currentSongIndex, from, to);
+  editingSongIndex = remapIndexAfterMove(editingSongIndex, from, to);
+  persistSetlist();
+  publishSetlist();
+  // The room re-derives the current song's position from the new order, but it
+  // swaps in the bare setlist entry; re-send it so the global Helix settings
+  // still apply to it.
+  publishCurrentSong();
+  renderSetlist();
+  // Keep keyboard focus on the moved song's button so repeated presses keep
+  // moving the same song.
+  const direction = to < from ? "move-up" : "move-down";
+  /** @type {HTMLButtonElement | null} */ (
+    elements.setlistItems.querySelector(`button[data-setlist-action="${direction}"][data-index="${to}"]`)
+  )?.focus();
+}
+
+// A notice bar above the setlist. It also carries one level of undo for the
+// edits that lose work -- removing a song and replacing the whole list with an
+// import -- for a while, after which the change sticks.
+const SETLIST_NOTICE_MS = 15000;
+let setlistUndoSnapshot;
+let setlistUndoTimer;
+
+function offerSetlistUndo(message) {
+  showSetlistNotice(message);
+  setlistUndoSnapshot = {
+    setlist: setlist.map((song) => ({ ...song })),
+    currentSongIndex
+  };
+  elements.setlistUndoButton.hidden = false;
+}
+
+function showSetlistNotice(message) {
+  setlistUndoSnapshot = undefined;
+  elements.setlistUndoButton.hidden = true;
+  setText(elements.setlistUndoText, message);
+  elements.setlistUndo.hidden = false;
+  clearTimeout(setlistUndoTimer);
+  setlistUndoTimer = setTimeout(dismissSetlistUndo, SETLIST_NOTICE_MS);
+}
+
+function dismissSetlistUndo() {
+  clearTimeout(setlistUndoTimer);
+  setlistUndoTimer = undefined;
+  setlistUndoSnapshot = undefined;
+  if (elements.setlistUndo) {
+    elements.setlistUndo.hidden = true;
+  }
+}
+
+function undoSetlistChange() {
+  const snapshot = setlistUndoSnapshot;
+  dismissSetlistUndo();
+  if (!snapshot) {
+    return;
+  }
+
+  if (editingSongIndex >= 0) {
+    resetEditState();
+  }
+  setlist = snapshot.setlist;
+  currentSongIndex = snapshot.currentSongIndex;
+  persistSetlist();
+  publishSetlist();
+  publishCurrentSong();
+  renderSetlist();
+}
+
+function publishSetlist() {
+  if (!isHost || hostDenied) {
+    return;
+  }
+
+  const sent = send({
     type: "setlistUpdate",
     songs: setlist.map(normalizeSong),
     updatedAt: Date.now()
   });
+  setlistUnsent = setlistUnsent || !sent;
 }
 
 function publishCurrentSong() {
-  if (!isHost) {
+  if (!isHost || hostDenied) {
     return;
   }
 
   const song = currentSongIndex >= 0 ? effectiveHelixSong(setlist[currentSongIndex]) : undefined;
-  send({
+  const sent = send({
     type: "currentSongUpdate",
     song,
     index: song ? currentSongIndex + 1 : undefined,
     total: setlist.length,
     updatedAt: Date.now()
   });
+  setlistUnsent = setlistUnsent || !sent;
 }
 
 function effectiveHelixSong(song) {
@@ -1544,13 +1848,14 @@ function renderSetlist() {
   }
 
   setText(elements.setlistCount, `${setlist.length} ${setlist.length === 1 ? "song" : "songs"}`);
+  renderSongFormState();
   elements.previousSongButton.disabled = setlist.length < 2;
   elements.nextSongButton.disabled = setlist.length < 1;
   elements.clearSongButton.disabled = currentSongIndex < 0;
   elements.openSongButton.disabled = !getCurrentOpenableSong();
 
   if (!setlist.length) {
-    elements.setlistItems.innerHTML = '<p class="small">No songs added yet.</p>';
+    elements.setlistItems.innerHTML = '<p class="small">No songs yet. Add one above, or import a setlist you exported earlier.</p>';
     return;
   }
 
@@ -1559,14 +1864,67 @@ function renderSetlist() {
     .join("");
 }
 
-function hydrateSetlistFromRoom(roomSetlist) {
-  if (!isHost || !roomSetlist?.songs?.length || setlist.length) {
+// The room is where the setlist and the current song live: the coordinator
+// keeps them across its own restarts, and every host page reads them from it.
+// This page's copy (also cached in local storage) is a working copy.
+//
+// On (re)joining, the page takes the room's list -- unless the room has none
+// (a coordinator without a saved setlist) or this page holds edits that never
+// reached it (made while disconnected); then the page's list is the one to
+// keep and goes to the room. Afterwards, an edit made by another host page
+// replaces this page's copy too, so two host pages never fight over the list.
+function syncWithRoom(state) {
+  if (!isHost || hostDenied || !clientId) {
     return;
   }
 
-  setlist = roomSetlist.songs.map(normalizeStoredSong).filter(Boolean);
+  const roomSongs = state.setlist?.songs ?? [];
+  if (roomSyncPending) {
+    roomSyncPending = false;
+    if (setlistUnsent || !roomSongs.length) {
+      setlistUnsent = false;
+      if (setlist.length) {
+        publishSetlist();
+      }
+      if (currentSongIndex >= 0) {
+        publishCurrentSong();
+      }
+      return;
+    }
+    adoptRoomSetlist(state);
+    return;
+  }
+
+  const fromOtherHost = (leaderId) => Boolean(leaderId) && leaderId !== clientId;
+  if (fromOtherHost(state.setlist?.leaderId) && !sameSongs(roomSongs, setlist)) {
+    adoptRoomSetlist(state);
+  } else if (fromOtherHost(state.currentSong?.leaderId)) {
+    const index = restoreCurrentSongIndex(setlist, state.currentSong);
+    if (index !== currentSongIndex) {
+      currentSongIndex = index;
+      renderSetlist();
+    }
+  }
+}
+
+function adoptRoomSetlist(state) {
+  const editingId = editingSongIndex >= 0 ? setlist[editingSongIndex]?.id : undefined;
+  setlist = (state.setlist?.songs ?? []).map(normalizeStoredSong).filter(Boolean);
+  currentSongIndex = restoreCurrentSongIndex(setlist, state.currentSong);
   persistSetlist();
+  if (editingId) {
+    const index = setlist.findIndex((song) => song.id === editingId);
+    if (index < 0) {
+      resetEditState();
+    } else {
+      editingSongIndex = index;
+    }
+  }
   renderSetlist();
+}
+
+function sameSongs(a, b) {
+  return JSON.stringify(a.map(normalizeStoredSong)) === JSON.stringify(b.map(normalizeStoredSong));
 }
 
 function publishSafety(update) {
@@ -1665,14 +2023,29 @@ function importSetlist(file) {
         throw new Error(`${label} has an invalid tempo; use a whole percentage from 15 to 175.`);
       }
 
-      setlist = songs.map(normalizeStoredSong).filter(Boolean);
-      currentSongIndex = setlist.length ? 0 : -1;
+      const imported = songs.map(normalizeStoredSong).filter(Boolean);
+      if (!imported.length) {
+        throw new Error("The file has no songs with a title.");
+      }
+
+      const importedLabel = `${imported.length} ${imported.length === 1 ? "song" : "songs"}`;
+      if (setlist.length) {
+        offerSetlistUndo(`Imported ${importedLabel} from ${file.name}, replacing ${setlist.length}.`);
+      } else {
+        showSetlistNotice(`Imported ${importedLabel} from ${file.name}.`);
+      }
+      if (editingSongIndex >= 0) {
+        resetEditState();
+      }
+      setlist = imported;
+      currentSongIndex = 0;
       persistSetlist();
       publishSetlist();
       publishCurrentSong();
       renderSetlist();
     } catch (error) {
-      setText(elements.hostWarning, `Setlist import failed: ${error.message}`);
+      const reason = error instanceof SyntaxError ? "the file is not valid JSON." : error.message;
+      showSetlistNotice(`Setlist import failed: ${reason}`);
     }
   });
   reader.readAsText(file);
@@ -1684,12 +2057,17 @@ function renderSetlistItem(song, index) {
   const meta = formatSongMeta(song, index + 1, setlist.length);
   const notes = song.notes ? `<span class="small">${escapeHtml(song.notes)}</span>` : "";
 
+  const title = escapeHtml(song.title);
   return `
-    <div class="setlist-item ${isCurrent ? "current" : ""} ${isEditing ? "editing" : ""}">
+    <div class="setlist-item ${isCurrent ? "current" : ""} ${isEditing ? "editing" : ""}"${isCurrent ? ' aria-current="true"' : ""}>
       <div class="setlist-item-head">
-        <strong class="setlist-item-title">${escapeHtml(song.title)}</strong>
+        <strong class="setlist-item-title">${title}</strong>
         <div class="setlist-item-actions">
-          <button class="link-button" type="button" data-setlist-action="select" data-index="${index}">
+          <button class="link-button move-button" type="button" data-setlist-action="move-up" data-index="${index}"
+            aria-label="Move ${title} up" title="Move up"${index === 0 ? " disabled" : ""}>&uarr;</button>
+          <button class="link-button move-button" type="button" data-setlist-action="move-down" data-index="${index}"
+            aria-label="Move ${title} down" title="Move down"${index === setlist.length - 1 ? " disabled" : ""}>&darr;</button>
+          <button class="link-button" type="button" data-setlist-action="select" data-index="${index}"${isCurrent ? " disabled" : ""}>
             ${isCurrent ? "Current" : "Make Current"}
           </button>
           <button class="link-button" type="button" data-setlist-action="edit" data-index="${index}">
@@ -1861,14 +2239,21 @@ function send(message) {
   return false;
 }
 
+function storedDeviceName() {
+  return (readStorage(DEVICE_NAME_STORAGE_KEY) || readStorage(LEGACY_DEVICE_NAME_STORAGE_KEY) || "").trim();
+}
+
 function defaultDeviceName() {
+  if (isHost) {
+    return "Host";
+  }
   const mobile = matchMedia("(pointer: coarse)").matches ? "Phone" : "Browser";
   return `${mobile} companion`;
 }
 
 function loadSetlist() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(SETLIST_STORAGE_KEY) || "[]");
+    const parsed = JSON.parse(readStorage(SETLIST_STORAGE_KEY) || "[]");
     if (!Array.isArray(parsed)) {
       return [];
     }
@@ -1883,7 +2268,7 @@ function loadSetlist() {
 
 function loadGlobalHelixSettings() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(HELIX_SETTINGS_STORAGE_KEY) || "{}");
+    const parsed = JSON.parse(readStorage(HELIX_SETTINGS_STORAGE_KEY) || "{}");
     return {
       // Enabled by default so existing per-song Helix configuration keeps its
       // behavior until the host explicitly switches the global master off.
@@ -1896,7 +2281,7 @@ function loadGlobalHelixSettings() {
 }
 
 function persistGlobalHelixSettings() {
-  localStorage.setItem(HELIX_SETTINGS_STORAGE_KEY, JSON.stringify(globalHelixSettings));
+  writeStorage(HELIX_SETTINGS_STORAGE_KEY, JSON.stringify(globalHelixSettings));
 }
 
 function migrateLegacyStorage() {
@@ -1905,19 +2290,20 @@ function migrateLegacyStorage() {
     [LEGACY_CALIBRATION_STORAGE_KEY, CALIBRATION_STORAGE_KEY],
     [LEGACY_DEVICE_NAME_STORAGE_KEY, DEVICE_NAME_STORAGE_KEY]
   ]) {
-    if (localStorage.getItem(nextKey) === null && localStorage.getItem(legacyKey) !== null) {
-      localStorage.setItem(nextKey, localStorage.getItem(legacyKey));
+    const legacyValue = readStorage(legacyKey);
+    if (readStorage(nextKey) === null && legacyValue !== null) {
+      writeStorage(nextKey, legacyValue);
     }
   }
 }
 
 function persistSetlist() {
-  localStorage.setItem(SETLIST_STORAGE_KEY, JSON.stringify(setlist.map(normalizeSong)));
+  writeStorage(SETLIST_STORAGE_KEY, JSON.stringify(setlist.map(normalizeSong)));
 }
 
 function loadCalibrations() {
   try {
-    const parsed = JSON.parse(localStorage.getItem(CALIBRATION_STORAGE_KEY) || "{}");
+    const parsed = JSON.parse(readStorage(CALIBRATION_STORAGE_KEY) || "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {};
     }
@@ -1950,7 +2336,55 @@ function setDeviceCalibration(targetClientId, deviceName, manualOffsetMs) {
 }
 
 function persistCalibrations() {
-  localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(calibrations));
+  writeStorage(CALIBRATION_STORAGE_KEY, JSON.stringify(calibrations));
+}
+
+// The Clipboard API only exists on secure origins, and a phone opening the room
+// at http://192.168.x.x is not one -- fall back to the old copy command there.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path.
+  }
+
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  area.remove();
+  return copied;
+}
+
+// Storage can throw (blocked site data, some private windows, a full quota).
+// Everything stored here is a convenience -- the room still works without it --
+// so a failure must never take the page down with it.
+function readStorage(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Keep running on in-memory state.
+  }
 }
 
 function escapeHtml(value) {

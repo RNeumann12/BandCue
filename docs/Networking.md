@@ -101,18 +101,23 @@ Other detected LAN IPs are printed at startup so you know the alternatives.
 
 ## The Token & Security Model
 
-- The **room token** (`ROOM_TOKEN`) is the WebSocket credential. It's a random `base64url` string
-  generated at startup (or set via `BANDCUE_TOKEN`). A WebSocket upgrade to `/ws` is **rejected
-  with HTTP 401** unless `?token=` matches. Anyone with the token can join and (subject to safety
-  rules) control transport.
+- The **room token** (`ROOM_TOKEN`) is the WebSocket credential for joining. It's a random
+  `base64url` string kept in the state file (or set via `BANDCUE_TOKEN`). A WebSocket upgrade to
+  `/ws` is **rejected with HTTP 401** unless `?token=` matches the room token or the host token.
+  The room token is in the QR code and every companion link: it lets a device follow the room and,
+  as an adapter, play — but not host it.
+- The **host token** (`HOST_TOKEN`, `BANDCUE_HOST_TOKEN`) is the only credential that may join with
+  `role: "host"`, i.e. run the transport, safety, setlist, and calibration. It is printed as the
+  *Host controls* link and never appears in the room state, the QR code, or `/api/room`. A client
+  that asks to host with the room token joins as a companion, and `serverHello.role` tells it so.
+  Keep the host link to the host device(s); share only the companion link or QR code.
 - The **room code** (`ROOM_CODE`) is **not** secret — it's a 6-hex-char locator that helps find the
   host. In the current convenience-first discovery flow, a client that can reach `/api/room` on
   the rehearsal LAN can obtain the token-bearing companion URL after matching the room code.
 - The full room URL embeds the token, so treat the URL and QR code like a shared password for the
   rehearsal.
-- BandCue assumes a trusted rehearsal LAN. There is no per-user auth or TLS, and host privileges
-  are based on the connected client's declared role after it has joined with the room token. It is
-  not designed to be exposed to the public internet. Keep it on the local network.
+- BandCue assumes a trusted rehearsal LAN. There is no per-user auth or TLS. It is not designed to
+  be exposed to the public internet. Keep it on the local network.
 
 ## Default Ports
 

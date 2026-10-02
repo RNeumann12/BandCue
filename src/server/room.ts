@@ -83,6 +83,17 @@ const AUTO_STOP_RECHECK_MS = 2_000;
 const LIVENESS_SWEEP_INTERVAL_MS = 4_000;
 export const MAX_SETLIST_SONGS = 500;
 
+/**
+ * What the coordinator keeps across restarts: the setlist and the current song.
+ * The room is the one place every host page and device reads them from, so a
+ * coordinator restart must not leave it empty until some host browser happens
+ * to republish its copy.
+ */
+export interface PersistedRoomState {
+  setlist: SetlistState;
+  currentSong?: CurrentSongState;
+}
+
 export class RoomController {
   private readonly clients = new Map<string, RoomClient>();
   private readonly recentClockByClientKey = new Map<string, RecentClock>();
@@ -115,6 +126,7 @@ export class RoomController {
   // Last logged "<sequence>:<firedAt>" per client, to keep the per-play timing
   // log to one line per executed command.
   private readonly lastTimingLogByClientId = new Map<string, string>();
+  private persistedStateListener?: (state: PersistedRoomState) => void;
 
   constructor(
     private readonly roomCode: string,
@@ -127,12 +139,24 @@ export class RoomController {
     private readonly now: () => number = () => Date.now()
   ) {}
 
-  addClient(socket: WebSocket | undefined, hello: ClientHello, now = this.now()): RoomClient {
-    const recentClock = this.getRecentClock(clientKeyFromHello(hello), now);
+  /**
+   * @param options.canHost whether this connection carried the host token. A
+   * client asking to be the host without it joins as a companion: it still sees
+   * the room, but cannot run the transport or change the setlist.
+   */
+  addClient(
+    socket: WebSocket | undefined,
+    hello: ClientHello,
+    now = this.now(),
+    options: { canHost?: boolean } = {}
+  ): RoomClient {
+    const deniedHost = hello.role === "host" && options.canHost === false;
+    const role = deniedHost ? "companion" : hello.role;
+    const recentClock = this.getRecentClock(clientKeyFromHello({ ...hello, role }), now);
     const client: RoomClient = {
       id: randomUUID(),
       deviceName: hello.deviceName,
-      role: hello.role,
+      role,
       connectedAt: now,
       lastSeenAt: now,
       capabilities: hello.capabilities,
@@ -151,8 +175,15 @@ export class RoomController {
       clientId: client.id,
       roomCode: this.roomCode,
       serverTime: now,
-      defaultScheduleDelayMs: this.scheduleDelayMs
+      defaultScheduleDelayMs: this.scheduleDelayMs,
+      role
     });
+    if (deniedHost) {
+      this.send(client, {
+        type: "error",
+        message: "This link joins the room but cannot control it. Open the host link the coordinator prints (\"Host controls\")."
+      });
+    }
     this.broadcastState();
 
     return client;
@@ -354,6 +385,62 @@ export class RoomController {
     this.scheduleClockBroadcast();
   }
 
+  /** Called with the setlist and current song whenever either changes. */
+  onPersistedStateChange(listener: (state: PersistedRoomState) => void): void {
+    this.persistedStateListener = listener;
+  }
+
+  /**
+   * Restores a saved setlist and current song (see PersistedRoomState). The data
+   * comes from a file, so it goes through the same sanitizing as a host's
+   * update; anything unusable is dropped. Returns how many songs were restored.
+   */
+  restorePersistedState(saved: unknown): number {
+    if (!saved || typeof saved !== "object") {
+      return 0;
+    }
+
+    const { setlist, currentSong } = saved as { setlist?: unknown; currentSong?: unknown };
+    const rawSongs = (setlist as { songs?: unknown } | undefined)?.songs;
+    const songs = (Array.isArray(rawSongs) ? rawSongs : [])
+      .slice(0, MAX_SETLIST_SONGS)
+      .filter((song): song is SetlistSong => isSongLike(song))
+      .map(sanitizeSong)
+      .filter((song): song is SetlistSong => Boolean(song));
+    if (!songs.length) {
+      return 0;
+    }
+
+    const updatedAt = Number((setlist as { updatedAt?: unknown }).updatedAt);
+    this.setlist = { songs, updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0 };
+
+    const current = currentSong as { song?: unknown; updatedAt?: unknown } | undefined;
+    const currentSaved = isSongLike(current?.song) ? sanitizeSong(current.song) : undefined;
+    const index = currentSaved ? songs.findIndex((song) => song.id === currentSaved.id) : -1;
+    if (currentSaved && index >= 0) {
+      // The saved copy, not the setlist entry: it carries the host's global
+      // Helix settings, which the setlist entry does not.
+      this.currentSong = {
+        song: currentSaved,
+        index: index + 1,
+        total: songs.length,
+        updatedAt: Number.isFinite(Number(current?.updatedAt)) ? Number(current?.updatedAt) : 0
+      };
+    }
+    return songs.length;
+  }
+
+  private notifyPersistedStateChange(): void {
+    if (!this.persistedStateListener) {
+      return;
+    }
+    const currentSong = this.currentSong ? { ...this.currentSong, leaderId: undefined } : undefined;
+    this.persistedStateListener({
+      setlist: { songs: this.setlist.songs, updatedAt: this.setlist.updatedAt },
+      currentSong
+    });
+  }
+
   getState(now = this.now()): RoomState {
     return {
       type: "roomState",
@@ -459,6 +546,7 @@ export class RoomController {
       updatedAt: update.updatedAt || now
     };
     this.scheduleAutoStopForCurrentSong();
+    this.notifyPersistedStateChange();
     this.broadcastState();
   }
 
@@ -502,6 +590,7 @@ export class RoomController {
       this.scheduleAutoStopForCurrentSong();
     }
 
+    this.notifyPersistedStateChange();
     this.broadcastState();
   }
 
@@ -963,6 +1052,7 @@ export class RoomController {
       };
     }
 
+    this.notifyPersistedStateChange();
     return true;
   }
 
@@ -1080,6 +1170,10 @@ function clampManualOffset(value: number): number {
   }
 
   return Math.max(-MANUAL_OFFSET_LIMIT_MS, Math.min(MANUAL_OFFSET_LIMIT_MS, Math.round(value)));
+}
+
+function isSongLike(value: unknown): value is SetlistSong {
+  return Boolean(value) && typeof value === "object" && typeof (value as { title?: unknown }).title === "string";
 }
 
 function sanitizeSong(song: SetlistSong): SetlistSong | undefined {

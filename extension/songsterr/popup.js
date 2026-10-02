@@ -19,6 +19,7 @@ const deviceName = /** @type {HTMLInputElement} */ (document.querySelector("#dev
 const statusEl = /** @type {HTMLElement} */ (document.querySelector("#status"));
 const connectionState = /** @type {HTMLElement} */ (document.querySelector("#connectionState"));
 const connectionDot = /** @type {HTMLElement} */ (document.querySelector("#connectionDot"));
+const roomSummary = /** @type {HTMLElement} */ (document.querySelector("#roomSummary"));
 const adapterState = /** @type {HTMLElement} */ (document.querySelector("#adapterState"));
 const commandState = /** @type {HTMLElement} */ (document.querySelector("#commandState"));
 
@@ -125,7 +126,14 @@ function renderState(state) {
     : "";
   const disconnectedByUser = state?.connectionState === "disconnected-by-user";
 
-  connectionState.textContent = formatConnectionState(stateLabel);
+  connectionState.textContent = connected && state?.roomCode
+    ? `Connected to ${state.roomCode}`
+    : formatConnectionState(stateLabel);
+  // What the room is on right now, so a member can tell at a glance that this
+  // browser follows the same song as the band.
+  roomSummary.textContent = connected && state?.currentSongTitle ? `Song: ${state.currentSongTitle}` : "";
+  roomSummary.hidden = !roomSummary.textContent;
+  document.body.dataset.connected = String(Boolean(connected));
   connectionDot.dataset.state = connected ? "connected" : disconnectedByUser ? "off" : stateLabel;
   adapterState.textContent = adapter;
   statusEl.textContent = detail || "No connection detail yet.";
