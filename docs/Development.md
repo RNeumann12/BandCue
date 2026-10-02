@@ -41,11 +41,25 @@ npm test         # run the vitest unit suite once
 npm run verify   # type-check + full Vitest suite (also runs before release packaging)
 npm run build    # emit compiled JS (tsc -p tsconfig.json)
 npm run test:smoke  # build, then start the compiled coordinator and check HTTP, WebSocket join,
-                    # clock sync, and that a malformed frame cannot crash it
+                    # clock sync, that a malformed frame cannot crash it, that only the host
+                    # token can host, and that the setlist survives a hard kill and restart
 ```
 
 CI runs the smoke test on **Node 18** as well, because the Raspberry Pi coordinator is pinned to
 Node 18 while the development tooling needs Node 20+.
+
+### Deploying the coordinator to the Raspberry Pi
+
+```bash
+bash scripts/deploy-pi.sh
+```
+
+Run it from the repo root in Git Bash. It builds here, ships only `dist/server`, `dist/shared`,
+`web`, and the package manifests, runs `npm ci --omit=dev` on the Pi (no build tooling on a 1 GB
+box), restarts the `bandcue` service, and waits for `/api/room` to answer. The Pi's
+`.bandcue-room.json` (tokens, room code) and `.bandcue-room.setlist.json` (saved setlist) are never
+shipped, so links, the QR code, and the setlist survive a redeploy. `PI`, `APP_DIR`, and
+`NODE_BIN` override the SSH alias (`bandcue-pi-mdns`), install directory, and Node location.
 
 Run a single test file with vitest directly:
 

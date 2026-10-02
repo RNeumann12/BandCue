@@ -20,9 +20,13 @@
 #     APP_DIR  install dir in the Pi's home    (default: bandcue)
 #     NODE_BIN Node bin dir on the Pi          (default: ~/.local/node/bin)
 #
-# The room token and code live in ~/APP_DIR/.bandcue-room.json on the Pi. That
-# file is NOT shipped by this script, so redeploys keep the same host URL and QR
-# code. Delete it on the Pi to rotate the token.
+# The room identity (join token, host token, room code) lives in
+# ~/APP_DIR/.bandcue-room.json on the Pi, and the saved setlist and current song
+# in ~/APP_DIR/.bandcue-room.setlist.json next to it. Neither file is shipped by
+# this script, so redeploys keep the same links, QR code, and setlist. Delete
+# the first on the Pi to rotate the tokens, the second to start with an empty
+# setlist. The host link is in the service log:
+#     ssh bandcue-pi-mdns 'journalctl -u bandcue | grep "Host controls" | tail -1'
 set -euo pipefail
 
 PI="${PI:-bandcue-pi-mdns}"
