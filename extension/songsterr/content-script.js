@@ -63,6 +63,11 @@ let audioArmingInstalled = false;
 // Forces the first readiness publish through even though `false` is already the
 // current value, so the very first status report carries the arm state.
 let audioArmStateReported = false;
+// See enforceSynthOnLoad: how long after a load the source toggle is watched
+// and put back to Synth. (Declared up here because the bootstrap calls it.)
+const SYNTH_ENFORCE_WINDOW_MS = 10000;
+const SYNTH_ENFORCE_POLL_MS = 500;
+let synthEnforceTimer;
 
 // The "audio, video" selector guarantees media elements, but querySelectorAll
 // types them as bare Elements; centralize the JSDoc cast (tsconfig.web.json).
@@ -214,9 +219,14 @@ async function setSongsterrTempo(value) {
       "Songsterr's playback speed control is not available (changing speed needs Songsterr Plus)"
     );
   }
+  const dialogsBefore = new Set(document.querySelectorAll("[role='dialog']"));
   /** @type {HTMLElement} */ (speedControl).click();
   const speedDialog = await waitForSpeedDialog();
   if (!speedDialog) {
+    // Without Plus -- and on an iPad, where Songsterr sells it through the App
+    // Store ("Playback Speed -- Subscribe in app") -- the click opens an upsell
+    // popup instead. Close it again rather than leave it over the player.
+    closeDialogsOpenedSince(dialogsBefore);
     return tempoWithoutUsableControl(
       requestedPercent,
       visiblePercent,
@@ -300,6 +310,16 @@ async function waitForSpeedDialog() {
     await delay(40);
   }
   return undefined;
+}
+
+function closeDialogsOpenedSince(dialogsBefore) {
+  for (const dialog of document.querySelectorAll("[role='dialog']")) {
+    if (dialogsBefore.has(dialog)) continue;
+    const close = [...dialog.querySelectorAll("button")].find((button) =>
+      /close/i.test(`${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""} ${button.getAttribute("class") || ""}`)
+    );
+    /** @type {HTMLElement | undefined} */ (close)?.click();
+  }
 }
 
 function setSongsterrDesktopSlider(slider, requestedPercent) {
@@ -773,6 +793,16 @@ function inferPlaybackState(mediaElements = queryMediaElements()) {
     return "playing";
   }
 
+  // Songsterr's own transport says it outright, in any UI language. Its title
+  // ("Play ((Space))" / "Pause ((Space))") is not reliable: Songsterr strips it
+  // once its custom tooltip has shown -- after a hover or a tap -- and the
+  // label scan below then only saw "Play current track solo" and reported a
+  // running song as stopped, so Stop became a no-op.
+  const playControlState = readPlayControlState();
+  if (playControlState) {
+    return playControlState;
+  }
+
   if (mediaElements.length) {
     return "stopped";
   }
@@ -780,7 +810,7 @@ function inferPlaybackState(mediaElements = queryMediaElements()) {
   const visibleControls = [...document.querySelectorAll("button, [role='button']")]
     .filter(isVisible)
     .map(getControlLabel)
-    .filter(Boolean);
+    .filter((label) => label && !NON_TRANSPORT_LABEL.test(label));
   if (visibleControls.some((label) => /\b(pause|stop)\b/i.test(label))) {
     return "playing";
   }
@@ -964,6 +994,19 @@ function ensureSynthPlaybackMode() {
     return "";
   }
 
+  // Songsterr's current player: the source is a single toggle button that
+  // carries its state in data-value ("original" | "synth"), with no radios at
+  // all. Original is the default for a fresh visitor, so this is what every
+  // freshly loaded iPad starts on.
+  const toggleState = sourceToggleState(sourceControl);
+  if (toggleState === "synth") {
+    return "";
+  }
+  if (toggleState === "original") {
+    /** @type {HTMLElement} */ (sourceControl).click();
+    return "Switched Songsterr playback source to Synth";
+  }
+
   const radios = [...sourceControl.querySelectorAll("input[type='radio'], [role='radio']")];
   const synthRadio = radios.find(isSynthSource);
   const originalRadio = radios.find(isOriginalSource);
@@ -979,9 +1022,11 @@ function ensureSynthPlaybackMode() {
 
   // The Synth radio could not be identified by label. Only fall back to
   // Songsterr's "v" source toggle when we are confident the Original source is
-  // currently active, so we never accidentally toggle away from Synth.
-  const originalActive = (originalRadio && isRadioChecked(originalRadio)) || hasOriginalAudioSource();
-  if (originalActive && dispatchKeyShortcut("v")) {
+  // currently active, so we never accidentally toggle away from Synth. (This
+  // used to also trust "a YouTube iframe exists" as proof of Original, but the
+  // iframe stays in the DOM after switching to Synth -- so every second Play
+  // toggled the source straight back to Original.)
+  if (originalRadio && isRadioChecked(originalRadio) && dispatchKeyShortcut("v")) {
     return "Toggled Songsterr playback source toward Synth";
   }
 
@@ -992,6 +1037,12 @@ function findSourceControl() {
   return document.querySelector(
     ".control-source, #control-source, [class*='control-source'], [data-testid*='control-source']"
   );
+}
+
+/** "original" | "synth" for Songsterr's toggle-button source control, else undefined. */
+function sourceToggleState(sourceControl) {
+  const value = String(sourceControl.getAttribute?.("data-value") || "").trim().toLowerCase();
+  return value === "original" || value === "synth" ? value : undefined;
 }
 
 function isSynthSource(radio) {
@@ -1055,24 +1106,24 @@ function findLabelFor(radio) {
   return null;
 }
 
-function hasOriginalAudioSource() {
-  return Boolean(
-    document.querySelector("iframe[src*='youtube'], iframe[src*='youtu.be'], iframe[src*='ytimg']")
-  );
-}
-
-function enforceSynthOnLoad(attemptsLeft = 12) {
-  const detail = ensureSynthPlaybackMode();
-  if (detail) {
-    lastControlDetail = detail;
-    scheduleStatusReport(0);
-    return;
+// Songsterr server-renders its source toggle as "synth" and flips it to its
+// real default ("original") only once the page has hydrated -- after this
+// script has already looked -- so enforceSynthOnLoad keeps watching for a while.
+function enforceSynthOnLoad(deadline = Date.now() + SYNTH_ENFORCE_WINDOW_MS) {
+  clearTimeout(synthEnforceTimer);
+  synthEnforceTimer = undefined;
+  // A switch mid-song would change what the band hears; the play prep forces
+  // Synth for the next start anyway.
+  if (!transportCommandPending && !bandcuePlaybackActive) {
+    const detail = ensureSynthPlaybackMode();
+    if (detail) {
+      lastControlDetail = detail;
+      scheduleStatusReport(0);
+    }
   }
 
-  // Keep retrying briefly while the player is still mounting and the source
-  // control has not rendered yet.
-  if (!findSourceControl() && attemptsLeft > 0) {
-    setTimeout(() => enforceSynthOnLoad(attemptsLeft - 1), 750);
+  if (Date.now() < deadline) {
+    synthEnforceTimer = setTimeout(() => enforceSynthOnLoad(deadline), SYNTH_ENFORCE_POLL_MS);
   }
 }
 
@@ -1380,7 +1431,34 @@ function clickStaffAt(x, y) {
   return true;
 }
 
+// Songsterr's play/pause toggle, by id.
+const PLAY_CONTROL_SELECTOR = "#control-play";
+// Buttons whose labels contain a transport word without being the transport:
+// "Play current track solo ((M))", "Mute current track", ...
+const NON_TRANSPORT_LABEL = /\b(solo|mute|metronome|count[\s-]?in|loop)\b/i;
+
+function findPlayControl() {
+  const element = document.querySelector(PLAY_CONTROL_SELECTOR);
+  return element && isVisible(element) ? element : undefined;
+}
+
+/** "playing" | "stopped" from Songsterr's own play toggle, or undefined. */
+function readPlayControlState() {
+  const pressed = document.querySelector(PLAY_CONTROL_SELECTOR)?.getAttribute("aria-pressed");
+  if (pressed === "true") return "playing";
+  if (pressed === "false") return "stopped";
+  return undefined;
+}
+
 function findTransportButton(action, playbackState) {
+  // The player's own toggle first: it is a toggle, so only when pressing it
+  // moves playback the way we want.
+  const playControl = findPlayControl();
+  const toggleHelps = action === "play" ? playbackState !== "playing" : playbackState === "playing";
+  if (playControl && toggleHelps) {
+    return { element: playControl, label: getControlLabel(playControl) || "Songsterr play toggle" };
+  }
+
   const words = action === "play"
     ? ["play", "resume", "start"]
     : ["pause", "stop"];
@@ -1460,7 +1538,11 @@ function scoreTransportCandidate(element, words) {
   const label = getControlLabel(element);
   const lowerLabel = label.toLowerCase();
 
-  if (!label || /\b(tab|tabs|chord|favorite|print|settings|search|sign|login|upgrade)\b/i.test(label)) {
+  if (
+    !label ||
+    NON_TRANSPORT_LABEL.test(label) ||
+    /\b(tab|tabs|chord|favorite|print|settings|search|sign|login|upgrade)\b/i.test(label)
+  ) {
     return 0;
   }
 
@@ -2201,9 +2283,13 @@ function isTransportGestureTarget(target) {
     return false;
   }
 
+  if (element.id === "control-play") {
+    return true;
+  }
+  const label = getControlLabel(element);
   return (
     classTokens(element).some((token) => TRANSPORT_TOGGLE_CLASS.test(token)) ||
-    /\b(play|pause|stop|resume|start)\b/i.test(getControlLabel(element))
+    (/\b(play|pause|stop|resume|start)\b/i.test(label) && !NON_TRANSPORT_LABEL.test(label))
   );
 }
 

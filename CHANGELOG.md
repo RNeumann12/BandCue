@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.8.1 - 2026-10-11
+
+### Fixed
+
+- **Songsterr played the YouTube recording instead of the synth, and on iPad mostly nothing at
+  all.** Songsterr replaced its Original/Synth radio buttons with a single toggle button and now
+  defaults every fresh visitor to Original. The extension found no radios, guessed the source from
+  whether a YouTube player existed — which stays in the page after switching — and so left the
+  first Play on Original and flipped every second Play back to it. Songsterr also only switches to
+  Original once the page has hydrated, after the extension had already looked. It now reads the
+  toggle's state directly and keeps putting Synth back for the first seconds after a load. On an
+  iPad this also means the one-tap audio priming starts Songsterr's synth engine rather than the
+  YouTube player, which is why starts there stayed silent.
+- **Stop could do nothing while Songsterr was playing.** Songsterr drops its play button's title
+  once its tooltip has shown, and a new "Play current track solo" button sits next to it, so the
+  extension could read a running song as stopped and treat Stop as a no-op (and a priming blip on
+  iPad could keep playing). It now reads the play button's own pressed state and never mistakes
+  the solo button for the transport.
+- **The "Playback Speed — Subscribe in app" popup stayed open** over the player on iPad (or the
+  Plus upsell on a free account) after the extension had checked the tempo. It is closed again.
+
 ## 1.8.0 - 2026-10-02
 
 ### Upgrading

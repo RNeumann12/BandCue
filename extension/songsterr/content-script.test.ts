@@ -321,7 +321,7 @@ function loadContentScript({
 }: {
   elements?: FakeElement[];
   media?: FakeMediaElement[];
-  sourceControl?: FakeSourceControl | null;
+  sourceControl?: FakeSourceControl | FakeElement | null;
   ipad?: boolean;
   webAudio?: boolean;
   desktopSafari?: boolean;
@@ -352,6 +352,9 @@ function loadContentScript({
     querySelector(selector: string) {
       if (sourceControl && /control-source/.test(selector)) {
         return sourceControl;
+      }
+      if (selector === "#control-play") {
+        return elements.find((element) => element.getAttribute("id") === "control-play") ?? null;
       }
       if (/#c-speed button|#control-speed/.test(selector)) {
         return elements.find((element) => element.getAttribute("data-speed-control") === "true") ?? null;
@@ -751,6 +754,50 @@ describe("Songsterr synth playback mode", () => {
 
     expect(context.ensureSynthPlaybackMode()).toBe("");
   });
+
+  // Songsterr's current player (verified live 2026-10-11): one toggle button,
+  // state in data-value, no radios -- and Original is the default for a fresh
+  // visitor, i.e. for every iPad after a reload.
+  function sourceToggle(value: "original" | "synth") {
+    return new FakeElement("Orig.Synth", { id: "control-source", "data-value": value });
+  }
+
+  it("clicks Songsterr's source toggle over to Synth when it shows Original", () => {
+    const toggle = sourceToggle("original");
+    const { context } = loadContentScript({ sourceControl: toggle });
+
+    // Already enforced once on load.
+    expect(toggle.clicks).toBe(1);
+    toggle.clicks = 0;
+
+    expect(context.ensureSynthPlaybackMode()).toBe("Switched Songsterr playback source to Synth");
+    expect(toggle.clicks).toBe(1);
+  });
+
+  it("puts Synth back when Songsterr flips its toggle to Original after hydrating", async () => {
+    // Server-rendered as "synth"; the real default ("original") only appears
+    // once the page has hydrated -- after the content script's first look.
+    const toggle = sourceToggle("synth");
+    loadContentScript({ sourceControl: toggle });
+    expect(toggle.clicks).toBe(0);
+
+    toggle.setAttribute("data-value", "original");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    expect(toggle.clicks).toBe(1);
+  });
+
+  it("leaves the source toggle alone once it shows Synth, YouTube iframe or not", () => {
+    // The YouTube iframe stays in the DOM after switching to Synth; treating it
+    // as proof of Original pressed V on every second Play and flipped the
+    // source straight back.
+    const toggle = sourceToggle("synth");
+    const { context, keysPressed } = loadContentScript({ sourceControl: toggle });
+
+    expect(context.ensureSynthPlaybackMode()).toBe("");
+    expect(toggle.clicks).toBe(0);
+    expect(keysPressed).not.toContain("v");
+  });
 });
 
 describe("Songsterr transport control resolution", () => {
@@ -844,6 +891,50 @@ describe("Songsterr transport control resolution", () => {
     expect(stale.clicks).toBe(0);
     expect(fresh.clicks).toBe(1);
     expect(result).toMatchObject({ ok: true, controlPath: "player-button" });
+  });
+
+  // Songsterr's current markup: #control-play with aria-pressed, a title that
+  // Songsterr strips once its tooltip has shown, and a "Play current track
+  // solo" button right next to it.
+  function songsterrPlayControl(pressed: boolean, title: string | null = null) {
+    const attributes: Record<string, string> = {
+      id: "control-play",
+      "aria-pressed": pressed ? "true" : "false",
+      class: "_8e144G_button _8e144G_play undefined"
+    };
+    if (title) attributes.title = title;
+    return new FakeElement("", attributes);
+  }
+  const soloButton = () => new FakeElement("", { title: "Play current track solo ((Opt+M))", class: "_8e144G_button" });
+
+  it("reads playback state from the play toggle, not from the solo button's label", () => {
+    const { context } = loadContentScript({ elements: [songsterrPlayControl(true), soloButton()] });
+
+    expect(context.inferPlaybackState([])).toBe("playing");
+  });
+
+  it("reads a stopped player from the play toggle too", () => {
+    const { context } = loadContentScript({ elements: [songsterrPlayControl(false), soloButton()] });
+
+    expect(context.inferPlaybackState([])).toBe("stopped");
+  });
+
+  it("never mistakes the solo button for Play", () => {
+    const play = songsterrPlayControl(false);
+    const solo = soloButton();
+    const { context } = loadContentScript({ elements: [solo, play] });
+
+    expect(context.findTransportButton("play", "stopped")?.element).toBe(play);
+  });
+
+  it("stops through the play toggle once its title is gone", () => {
+    const play = songsterrPlayControl(true);
+    const { context } = loadContentScript({ elements: [soloButton(), play] });
+
+    const control = context.resolveTransportControl("stop", [], context.inferPlaybackState([]));
+
+    expect(control.kind).toBe("button");
+    expect(control.element).toBe(play);
   });
 
   it("falls back to the Space shortcut when no play control can be identified", async () => {
