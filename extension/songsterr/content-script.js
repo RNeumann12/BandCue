@@ -234,6 +234,16 @@ async function setSongsterrTempo(value) {
     );
   }
 
+  try {
+    return await applyTempoInSpeedDialog(speedDialog, requestedPercent, visiblePercent);
+  } finally {
+    // Songsterr leaves its speed panel open over the tab (on an iPad, over most
+    // of the screen) until something closes it; we opened it, so we close it.
+    closeDialogsOpenedSince(dialogsBefore);
+  }
+}
+
+async function applyTempoInSpeedDialog(speedDialog, requestedPercent, visiblePercent) {
   const exactOption = [...speedDialog.querySelectorAll("button, [role='button'], [role='option']")]
     .find((element) => normalizedControlText(element) === `${requestedPercent}%`);
   if (exactOption) {
@@ -246,10 +256,13 @@ async function setSongsterrTempo(value) {
         return { ok: false, requestedPercent, detail: sliderResult.detail };
       }
     } else {
+      // Only an input on Songsterr's own percent scale (15-175). The fine-tuning
+      // section also has a range input, but it is in BPM (15%-175% of the
+      // song's tempo), so writing a percentage into it sets the wrong speed.
       const input = [...speedDialog.querySelectorAll("input")].find((candidate) => {
         const min = Number(candidate.min || 15);
         const max = Number(candidate.max || 175);
-        return (candidate.type === "range" || candidate.type === "number") && min <= requestedPercent && max >= requestedPercent;
+        return (candidate.type === "range" || candidate.type === "number") && min === 15 && max === 175;
       });
       if (input) {
         const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -356,8 +369,13 @@ async function setSongsterrCompactFineTempo(speedDialog, requestedPercent) {
   let current = readTempoPercentFrom(speedDialog);
   if (current === requestedPercent) return true;
 
+  // The button reads "- | +" in every language; its aria-label is localized
+  // ("Feineinstellung"), so it must not be part of the comparison.
   const fineTuning = [...speedDialog.querySelectorAll("button")]
-    .find((button) => /fine tuning/i.test(button.getAttribute("aria-label") || "") || normalizedControlText(button) === "- | +");
+    .find((button) =>
+      /fine tuning/i.test(button.getAttribute("aria-label") || "") ||
+      String(button.textContent || "").replace(/\s+/g, " ").trim() === "- | +"
+    );
   if (fineTuning) {
     /** @type {HTMLElement} */ (fineTuning).click();
     await delay(60);

@@ -20,6 +20,11 @@
   the solo button for the transport.
 - **The "Playback Speed — Subscribe in app" popup stayed open** over the player on iPad (or the
   Plus upsell on a free account) after the extension had checked the tempo. It is closed again.
+- **With Songsterr Plus, tempos between the presets failed on a non-English UI.** A song at, say,
+  92% needs Songsterr's fine tuning, and the extension recognised its "- | +" button only with the
+  English label — on a German Songsterr ("Feineinstellung") it gave up. It now matches the button
+  itself, never writes a percentage into the fine-tuning slider (that one is in BPM), and closes
+  the speed panel again once the tempo is set.
 
 ## 1.8.0 - 2026-10-02
 
