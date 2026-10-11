@@ -844,6 +844,34 @@ describe("downbeat never navigates or reloads", () => {
   });
 });
 
+describe("a Stop during the count-in", () => {
+  // On an iPad the dispatch lead grows to 2.5 s, so a count-in lasts seconds and
+  // a host's Stop often lands inside it. The Play must not be sent afterwards.
+  it("cancels the Play that has not been handed to the tab yet", async () => {
+    const { evaluate, transportMessages } = loadBackground([{ id: 1, url: SONG_A, windowId: 1 }]);
+    evaluate("serverOffsetMs = 0");
+
+    evaluate(`handleTransportCommand({ action: "play", sequenceId: 1, scheduledServerTime: Date.now() + 700,
+      resetBeforePlay: true, currentSong: { song: { songsterrUrl: ${JSON.stringify(SONG_A)} } } })`);
+    evaluate(`handleTransportCommand({ action: "stop", sequenceId: 2, scheduledServerTime: Date.now(),
+      currentSong: { song: { songsterrUrl: ${JSON.stringify(SONG_A)} } } })`);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    expect(transportMessages.map((message) => message.action)).toEqual(["stop"]);
+  });
+
+  it("keeps the newer command's status when an overruled one answers late", async () => {
+    const { evaluate } = loadBackground([{ id: 1, url: SONG_A, windowId: 1 }]);
+    evaluate("lastTransportSequenceId = 2");
+    evaluate(`reportCommandStatus({ action: "stop", sequenceId: 2, status: "succeeded", detail: "stopped", at: Date.now() })`);
+    evaluate(`sendMessageToSongsterrTab = async () => ({ ok: false, superseded: true, detail: "cancelled" })`);
+
+    await evaluate(`sendTransportToSongsterr("play", 1, { songsterrUrl: ${JSON.stringify(SONG_A)} })`);
+
+    expect(evaluate("latestCommand.action")).toBe("stop");
+  });
+});
+
 describe("start measure hand-off", () => {
   it("tells the content script which measure this song starts from", async () => {
     const { context, transportMessages } = loadBackground([{ id: 1, url: SONG_A, windowId: 1 }]);

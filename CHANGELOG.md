@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.2 - 2026-10-11
+
+### Fixed
+
+- **A Stop pressed during the count-in was ignored, and the song started anyway.** The Stop found
+  nothing playing yet and did nothing, and the Play it was meant to cancel still went out on the
+  downbeat. On an iPad the count-in can last several seconds (the extension lengthens it for slow
+  devices), so this was easy to hit. A newer command now cancels a Play that is still counting in,
+  both before it is handed to the Songsterr tab and while the tab waits for the downbeat.
+- **With Songsterr Plus, raising the tempo through fine tuning clicked "Back to presets"** instead
+  of "+", and lowering it could overshoot (a 92% song ended up at 88% on an iPad). Fine tuning now
+  uses the two buttons right beside the value and steps one percent at a time, reading the value
+  back after each step until it reaches the song's tempo.
+
 ## 1.8.1 - 2026-10-11
 
 ### Fixed

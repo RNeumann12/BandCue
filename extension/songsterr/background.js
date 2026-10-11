@@ -39,6 +39,10 @@ let connectedRoomCode = "";
 // without re-running ones the push path already handled. Survives reconnects
 // on purpose: a missed Stop must still be caught after the socket comes back.
 let lastTransportSequenceId = 0;
+// The hand-off of the latest transport command to the content script, still
+// waiting for its dispatch lead. A newer command cancels it: a Stop pressed
+// during a Play's count-in must keep that Play from being sent at all.
+let pendingTransportDispatch;
 let lastTransportAction;
 let tabStatusTimer;
 let tabStatusInFlight = false;
@@ -708,7 +712,9 @@ function handleTransportCommand(message) {
   // against dueLocalAt, so an earlier hand-off cannot start anything sooner --
   // it only buys the seek room away from the downbeat.
   const leadMs = adaptiveDispatchLeadMs + (startMeasure > 1 ? MEASURE_SEEK_LEAD_MS : 0);
-  setTimeout(() => {
+  clearTimeout(pendingTransportDispatch);
+  pendingTransportDispatch = setTimeout(() => {
+    pendingTransportDispatch = undefined;
     sendTransportToSongsterr(
       message.action,
       message.sequenceId,
@@ -930,6 +936,13 @@ async function sendTransportToSongsterr(
           }))
       )
   );
+
+  // Overruled during its count-in by a newer command (see transportGeneration
+  // in the content script). The newer command reports for itself; a late
+  // "failed" here would overwrite its status on the host.
+  if (sequenceId !== lastTransportSequenceId && results.every((result) => result?.superseded)) {
+    return;
+  }
 
   const success = results.find((result) => result?.ok);
   const failure = results.find((result) => result && !result.ok);

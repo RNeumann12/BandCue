@@ -937,6 +937,21 @@ describe("Songsterr transport control resolution", () => {
     expect(control.element).toBe(play);
   });
 
+  it("never fires a Play that a Stop overruled during its count-in", async () => {
+    const play = songsterrPlayControl(false);
+    const { context } = loadContentScript({ elements: [play] });
+    const send = (message: object) => new Promise<any>((resolve) =>
+      context.chrome.runtime.onMessage.listener({ type: "bandcueTransport", ...message }, {}, resolve));
+
+    const pendingPlay = send({ action: "play", resetBeforePlay: true, tempoPercent: 100, dueLocalAt: Date.now() + 300 });
+    const stop = await send({ action: "stop", dueLocalAt: Date.now() });
+    const playResult = await pendingPlay;
+
+    expect(stop.controlPath).toBe("no-op");
+    expect(playResult).toMatchObject({ ok: false, superseded: true });
+    expect(play.clicks).toBe(0);
+  });
+
   it("falls back to the Space shortcut when no play control can be identified", async () => {
     const { context } = loadContentScript({ elements: [] });
 

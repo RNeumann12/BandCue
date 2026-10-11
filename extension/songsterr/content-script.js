@@ -57,6 +57,15 @@ let postSwitchPrimeTimer;
 // and (for play) until the matching stop. Priming must never touch the transport
 // inside that window.
 let transportCommandPending = false;
+// How many transport commands are between arrival and their answer. Two can
+// overlap (a Stop pressed during a Play's count-in), so a single flag cleared by
+// whichever finishes first would report "nothing pending" while one still waits.
+let transportCommandsInFlight = 0;
+// Bumped by every transport command. A command still waiting out its count-in
+// when a newer one arrives has been overruled: a Stop pressed during a Play's
+// count-in must stop that Play from firing afterwards, which it used to do --
+// the Stop found nothing playing (a no-op) and the band's song started anyway.
+let transportGeneration = 0;
 let bandcuePlaybackActive = false;
 let audioArmOverlay;
 let audioArmingInstalled = false;
@@ -160,9 +169,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === "bandcueTransport") {
     // Synchronously, before any awaiting: a priming play/stop cycle must never
     // still be running into a real downbeat.
+    transportCommandsInFlight += 1;
     transportCommandPending = true;
+    transportGeneration += 1;
     cancelAudioPrime();
-    runScheduledTransport(message)
+    runScheduledTransport(message, transportGeneration)
       // A command that throws must still clear the pending flag below -- leaving
       // it set would block audio priming for the rest of the session -- and the
       // background gets a reason instead of a channel that simply closes.
@@ -172,7 +183,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         controlPath: "content-script"
       }))
       .then((result) => {
-        transportCommandPending = false;
+        transportCommandsInFlight = Math.max(0, transportCommandsInFlight - 1);
+        transportCommandPending = transportCommandsInFlight > 0;
         reportStatus();
         sendResponse(result);
       });
@@ -365,39 +377,80 @@ function setSongsterrDesktopSlider(slider, requestedPercent) {
   return { ok: true };
 }
 
+// Songsterr's fine tuning: "-" button, the value ("92%"), "+" button, and then
+// -- in the same section -- a "Back to presets" button. Each step is 1%.
+const FINE_TEMPO_MAX_STEPS = 200;
+const FINE_TEMPO_STEP_TIMEOUT_MS = 600;
+
 async function setSongsterrCompactFineTempo(speedDialog, requestedPercent) {
-  let current = readTempoPercentFrom(speedDialog);
-  if (current === requestedPercent) return true;
-
-  // The button reads "- | +" in every language; its aria-label is localized
-  // ("Feineinstellung"), so it must not be part of the comparison.
-  const fineTuning = [...speedDialog.querySelectorAll("button")]
-    .find((button) =>
-      /fine tuning/i.test(button.getAttribute("aria-label") || "") ||
-      String(button.textContent || "").replace(/\s+/g, " ").trim() === "- | +"
-    );
-  if (fineTuning) {
+  if (!findFineTempoControls(speedDialog)) {
+    // The button reads "- | +" in every language; its aria-label is localized
+    // ("Feineinstellung"), so it must not be part of the comparison.
+    const fineTuning = [...speedDialog.querySelectorAll("button")]
+      .find((button) =>
+        /fine tuning/i.test(button.getAttribute("aria-label") || "") ||
+        String(button.textContent || "").replace(/\s+/g, " ").trim() === "- | +"
+      );
+    if (!fineTuning) return false;
     /** @type {HTMLElement} */ (fineTuning).click();
-    await delay(60);
+    // An iPad can take well over a frame to render the section.
+    const deadline = Date.now() + 1000;
+    while (!findFineTempoControls(speedDialog) && Date.now() < deadline) {
+      await delay(30);
+    }
   }
 
-  current = readTempoPercentFrom(speedDialog);
-  if (current === undefined) return false;
-  const valueElement = [...speedDialog.querySelectorAll("*")]
-    .find((element) => normalizedControlText(element) === `${current}%`);
-  const fineSection = valueElement?.closest?.("section");
-  const buttons = fineSection ? [...fineSection.querySelectorAll("button")] : [];
-  if (buttons.length < 2) return false;
-
-  const directionButton = requestedPercent < current ? buttons[0] : buttons[buttons.length - 1];
-  const clickCount = Math.abs(requestedPercent - current);
-  for (let click = 0; click < clickCount; click += 1) {
-    /** @type {HTMLElement} */ (directionButton).click();
-    // React must commit each one-percent state update before the next click;
-    // otherwise batched synthetic clicks can all calculate from one stale value.
-    await delay(12);
+  // Step and read back, one percent at a time, instead of clicking a computed
+  // number of times: on a real iPad the panel did not always start from the
+  // value it showed, and a blind count overshot (100% -> 88% for a 92% song).
+  for (let step = 0; step < FINE_TEMPO_MAX_STEPS; step += 1) {
+    const controls = findFineTempoControls(speedDialog);
+    if (!controls) return false;
+    if (controls.percent === requestedPercent) return true;
+    const button = requestedPercent < controls.percent ? controls.minus : controls.plus;
+    if (/** @type {HTMLButtonElement} */ (button).disabled) return false;
+    /** @type {HTMLElement} */ (button).click();
+    await waitForFineTempoChange(speedDialog, controls.percent);
   }
-  return true;
+  return false;
+}
+
+/**
+ * The fine-tuning value and the "-" / "+" buttons right beside it. Found by
+ * position, not by label: the labels are localized, and the section's *last*
+ * button is "Back to presets", which a "first and last button" guess clicked
+ * for every increase. Undefined while the presets are showing.
+ */
+function findFineTempoControls(speedDialog) {
+  const value = [...speedDialog.querySelectorAll("*")].find((element) =>
+    !element.children?.length &&
+    !element.closest?.("button") &&
+    /^\d{1,3}\s*%$/.test(String(element.textContent || "").trim())
+  );
+  if (!value) return undefined;
+
+  for (let container = value.parentElement; container && container !== speedDialog.parentElement; container = container.parentElement) {
+    const buttons = [...container.querySelectorAll("button")];
+    const before = buttons.filter((button) => button.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const after = buttons.filter((button) => button.compareDocumentPosition(value) & Node.DOCUMENT_POSITION_PRECEDING);
+    if (before.length && after.length) {
+      return {
+        percent: Number(String(value.textContent).trim().replace(/\s*%$/, "")),
+        minus: before[before.length - 1],
+        plus: after[0]
+      };
+    }
+  }
+  return undefined;
+}
+
+async function waitForFineTempoChange(speedDialog, previousPercent) {
+  const deadline = Date.now() + FINE_TEMPO_STEP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await delay(15);
+    const percent = findFineTempoControls(speedDialog)?.percent;
+    if (percent !== undefined && percent !== previousPercent) return;
+  }
 }
 
 async function waitForTempoPercent(requestedPercent) {
@@ -461,19 +514,6 @@ function percentFromTempoText(text) {
   return match ? Number(match[1]) : undefined;
 }
 
-function readTempoPercentFrom(root) {
-  const slider = root.querySelector?.("[role='slider'][aria-valuenow]");
-  if (slider) {
-    const value = Number(slider.getAttribute("aria-valuenow"));
-    if (Number.isFinite(value)) return Math.round(value);
-  }
-  for (const element of root.querySelectorAll?.("*") ?? []) {
-    const match = normalizedControlText(element).match(/^(\d{1,3})%$/);
-    if (match) return Number(match[1]);
-  }
-  return undefined;
-}
-
 function normalizedControlText(element) {
   return `${element.getAttribute?.("aria-label") || ""} ${element.getAttribute?.("title") || ""} ${element.textContent || ""}`
     .replace(/\s+/g, " ").trim();
@@ -524,7 +564,7 @@ function handleRuntimeMessageError(error) {
 // cost two document-wide button scans with a forced layout each, measured at
 // ~5 ms apiece on a real Songsterr page and scaling with DOM size and CPU --
 // i.e. a per-device head start that no clock sync can compensate for.
-async function runScheduledTransport(message) {
+async function runScheduledTransport(message, generation = transportGeneration) {
   if (message.action === "play") {
     const requestedTempo = Math.max(15, Math.min(175, Math.round(Number(message.tempoPercent) || 100)));
     if (tempoStatus.state !== "applied" || tempoStatus.appliedPercent !== requestedTempo) {
@@ -559,6 +599,9 @@ async function runScheduledTransport(message) {
   // there. The estimate is measured, not guessed (see recordActionCost).
   const aimMs = prepared ? actionCostEstimateMs : 0;
   const wakeLatenessMs = await waitUntilLocalTime(dueLocalAt - aimMs);
+  if (generation !== transportGeneration) {
+    return supersededTransportResult(action);
+  }
   const result = await controlSongsterr(action, resetBeforePlay, prepared, startMeasure);
   // Stamped after the control action has run, so it marks the moment playback
   // was actually triggered. The background converts this to server time for the
@@ -591,6 +634,19 @@ async function runScheduledTransport(message) {
     hidden: typeof document.visibilityState === "string" && document.visibilityState === "hidden"
   };
   return result;
+}
+
+/**
+ * The answer for a command a newer one overruled while it waited for its
+ * downbeat. Not a failure of this device: the band asked for something else.
+ */
+function supersededTransportResult(action) {
+  return {
+    ok: false,
+    superseded: true,
+    detail: `Songsterr ${action} was cancelled by a newer command during its count-in`,
+    controlPath: "superseded"
+  };
 }
 
 // setTimeout alone can fire several ms late (far more when Chrome throttles a
