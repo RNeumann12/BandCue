@@ -1991,6 +1991,18 @@ describe("RoomController Songsterr import requests", () => {
     expect(room.getState(1020).scoreImportJobs?.[0]?.devices[0]).toMatchObject({ state: "failed", detail: expect.stringContaining("left") });
   });
 
+  it("takes progress from the same browser after it rejoined mid-import", () => {
+    const { room, host, plus } = setup();
+    room.handleMessage(host.id, { type: "scoreImportRequest", songId: "zombie" }, 1010);
+    room.removeClient(plus.id);
+    const rejoined = room.addClient(fakeSocket([]), {
+      type: "clientHello", deviceName: "My Chrome", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canImportScores: true }]
+    }, 1020);
+    room.handleMessage(rejoined.id, { type: "scoreImportProgress", requestId: 1, state: "done", detail: "main tab: imported" }, 1030);
+    expect(room.getState(1030).scoreImportJobs?.[0]?.devices[0]).toMatchObject({ clientId: rejoined.id, state: "done" });
+  });
+
   it("refuses non-hosts, songs without Songsterr URLs, and rooms without an importer", () => {
     const { room, host, plus, free, hostMessages, freeMessages } = setup();
     room.handleMessage(free.id, { type: "scoreImportRequest", songId: "zombie" }, 1010);

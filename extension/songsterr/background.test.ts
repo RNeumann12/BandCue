@@ -1096,3 +1096,26 @@ describe("Songsterr score import", () => {
     expect(state.scoreImport.detail).toMatch(/no Songsterr URL/);
   });
 });
+
+describe("Songsterr import queue", () => {
+  it("runs imports one after another and never stays busy after a failure", async () => {
+    const { context } = loadBackground([]);
+    const order: string[] = [];
+    context.runScoreImport = async (song: { id: string }) => {
+      order.push(`start ${song.id}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      order.push(`end ${song.id}`);
+      if (song.id === "a") throw new Error("boom");
+    };
+    const first = context.importScoresForSong({ id: "a" }).catch(() => undefined);
+    const second = context.importScoresForSong({ id: "b" });
+    await Promise.all([first, second]);
+    expect(order).toEqual(["start a", "end a", "start b", "end b"]);
+  });
+
+  it("gives up on a step that hangs", async () => {
+    const { context } = loadBackground([]);
+    await expect(context.withTimeout(new Promise(() => undefined), 20, "too slow")).rejects.toThrow("too slow");
+    await expect(context.withTimeout(Promise.resolve(7), 20, "too slow")).resolves.toBe(7);
+  });
+});

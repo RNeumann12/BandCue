@@ -1611,19 +1611,42 @@ function importScoresForCurrentSong() {
  * Imports every Songsterr page of a song. `requestId` is set when the room
  * asked (the host's import button); progress then goes back to the room too.
  */
-async function importScoresForSong(song, requestId) {
+// Imports run one after another: a request that arrives while one runs (the
+// host pressing Import on several songs) waits its turn instead of failing.
+let scoreImportChain = Promise.resolve();
+let scoreImportsWaiting = 0;
+
+function importScoresForSong(song, requestId) {
+  if (requestId !== undefined && scoreImportStatus.running) {
+    send({ type: "scoreImportProgress", requestId, state: "running", detail: "Waiting for this browser's current import…" });
+  }
+  scoreImportsWaiting += 1;
+  const run = scoreImportChain.then(() => {
+    scoreImportsWaiting -= 1;
+    return runScoreImport(song, requestId);
+  });
+  scoreImportChain = run.catch(() => undefined);
+  return run;
+}
+
+/** Rejects when `promise` takes longer than `ms` (`message` says what took too long). */
+function withTimeout(promise, ms, message) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), ms);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function runScoreImport(song, requestId) {
   const report = (state, detail) => {
-    scoreImportStatus = { running: state === "running", detail };
+    scoreImportStatus = { running: state === "running" || scoreImportsWaiting > 0, detail };
     if (requestId !== undefined) {
       send({ type: "scoreImportProgress", requestId, state, detail });
     }
   };
-  if (scoreImportStatus.running) {
-    if (requestId !== undefined) {
-      send({ type: "scoreImportProgress", requestId, state: "failed", detail: "This browser is already importing." });
-    }
-    return;
-  }
   const targets = scoreImportTargets(song);
   if (!song || !targets.length) {
     report("failed", "The song has no Songsterr URL.");
@@ -1641,7 +1664,10 @@ async function importScoresForSong(song, requestId) {
     const label = target.roles.filter((role) => role !== "main").join("/") || "main tab";
     report("running", `Fetching the ${label} from Songsterr…`);
     try {
-      const file = await fetchGuitarProFromSongsterr(target.url);
+      // Every step has a deadline, so a page or network that hangs can never
+      // leave this browser stuck "importing".
+      const file = await withTimeout(fetchGuitarProFromSongsterr(target.url), 90_000,
+        "Songsterr did not hand over the file within 90 s.");
       report("running", `Sending the ${label} to BandCue…`);
       await postScoreImport(song.id, target.key, file);
       imported += 1;
@@ -1703,14 +1729,22 @@ async function postScoreImport(songId, key, file) {
     key,
     revision: file.revision
   });
-  const response = await fetch(
-    `${endpoint.protocol === "wss:" ? "https:" : "http:"}//${endpoint.host}/api/score-imports?${params}`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/octet-stream", "x-bandcue-client-id": myClientId },
-      body: file.bytes
-    }
-  );
+  let response;
+  try {
+    response = await fetch(
+      `${endpoint.protocol === "wss:" ? "https:" : "http:"}//${endpoint.host}/api/score-imports?${params}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream", "x-bandcue-client-id": myClientId },
+        body: file.bytes,
+        signal: AbortSignal.timeout(60_000)
+      }
+    );
+  } catch (error) {
+    throw new Error(error?.name === "TimeoutError"
+      ? "BandCue did not take the file within 60 s."
+      : `Could not reach BandCue: ${error?.message || error}`);
+  }
   if (!response.ok) {
     const reason = await response.json().then((body) => body?.error).catch(() => "");
     throw new Error(reason || `BandCue refused the import (HTTP ${response.status}).`);

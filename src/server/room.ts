@@ -1063,10 +1063,14 @@ export class RoomController {
 
   private handleScoreImportProgress(client: RoomClientSummary, progress: ScoreImportProgress): void {
     const job = [...this.scoreImportJobs.values()].find((candidate) => candidate.requestId === progress.requestId);
-    const device = job?.devices.find((candidate) => candidate.clientId === client.id);
+    // A browser whose connection dropped mid-import rejoins under a new client
+    // id and goes on with the import: take its progress under the same name.
+    const device = job?.devices.find((candidate) => candidate.clientId === client.id) ??
+      job?.devices.find((candidate) => candidate.deviceName === client.deviceName && !this.clients.has(candidate.clientId));
     if (!device) {
       return;
     }
+    device.clientId = client.id;
     device.state = progress.state;
     device.detail = trimText(progress.detail ?? "", 500) || undefined;
     this.broadcastState();
