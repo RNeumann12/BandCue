@@ -80,6 +80,14 @@ let memberInstrument = "auto";
 // Songsterr Plus): it then stops offering to import, so the room's import
 // button only reaches the browsers that can. The popup's button still tries.
 let songsterrPlusMissing = false;
+let songsterrPlusRecheck = false;
+
+// A reloaded or updated extension checks again whether this browser has Plus.
+chrome.runtime.onInstalled?.addListener(() => {
+  songsterrPlusRecheck = true;
+  songsterrPlusMissing = false;
+  chrome.storage.local.set({ songsterrPlusMissing: false });
+});
 // What this device calls itself in the room. Chrome gives an extension no way to
 // read the computer's name -- chrome.enterprise.deviceAttributes.getDeviceHostname()
 // is ChromeOS-and-policy-only, and nothing else (userAgent, userAgentData, the
@@ -339,7 +347,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument", "deviceName", "songsterrPlusMissing"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
-  songsterrPlusMissing = Boolean(stored.songsterrPlusMissing);
+  songsterrPlusMissing = !songsterrPlusRecheck && Boolean(stored.songsterrPlusMissing);
   autoConnectEnabled = Boolean(stored.autoConnectEnabled);
   knownHosts = Array.isArray(stored.knownHosts) ? stored.knownHosts : [];
   memberInstrument = normalizeInstrument(stored.instrument);
@@ -1756,17 +1764,26 @@ async function captureSongsterrGuitarPro() {
     return originalDispatch.call(this, event);
   };
   try {
-    if (!byId("control-export-gp")) {
-      byId("control-export").click();
-    }
-    // The menu opens at once; without Plus it is an upgrade popup instead.
-    const menuDeadline = Math.min(deadline, Date.now() + 5000);
+    // A click before the page has hydrated does nothing, so click again until
+    // the menu shows its Guitar Pro entry. Without Plus it never does: the
+    // download button carries a lock and opens an upgrade popup instead.
+    const menuDeadline = Math.min(deadline, Date.now() + 15000);
     let gpButton;
     while (!(gpButton = byId("control-export-gp")) && Date.now() < menuDeadline) {
-      await sleep(200);
+      byId("control-export")?.click();
+      const clickedAt = Date.now();
+      while (!(gpButton = byId("control-export-gp")) && Date.now() - clickedAt < 2500) {
+        await sleep(200);
+      }
+      if (gpButton) {
+        break;
+      }
     }
     if (!gpButton) {
-      return { ok: false, noPlus: true, error: "Songsterr offers no Guitar Pro download here. Log in to Songsterr (Plus) in this browser." };
+      const locked = Boolean(byId("control-export")?.querySelector("[class*='lock']"));
+      return locked
+        ? { ok: false, noPlus: true, error: "Songsterr offers no Guitar Pro download here. Log in to Songsterr (Plus) in this browser." }
+        : { ok: false, error: "Songsterr's download menu did not open (page still loading?). Try again." };
     }
     gpButton.click();
     while (!(blob && fileName) && Date.now() < deadline) {
