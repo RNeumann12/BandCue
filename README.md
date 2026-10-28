@@ -488,17 +488,20 @@ extension or MuseScore is needed on that device.
 
 ![Score view in "Notes only" mode on an iPad: the cursor stands on the note being played, inside a repeat taken the second time](assets/score-view/score-view-running.png)
 
-- **The cursor stands on the note that is sounding.** It glides from note to note and reaches each
-  one on its beat, follows repeats, D.S./Coda jumps and tempo changes, and honours the song's
-  tempo and start measure. During the count-in it waits on the start measure; Stop freezes it
-  where the band stopped.
+- **The cursor moves with the music.** It crosses each bar at a steady speed and is exactly on
+  every bar line; *View › Cursor motion › Note by note* makes it stop on each note instead. It
+  follows repeats, D.S./Coda jumps and tempo changes, and honours the song's tempo and start
+  measure. During the count-in it waits on the start measure; Stop freezes it where the band
+  stopped.
 - **Read ahead like on Songsterr.** The line being played sits near the top of the screen and the
   next lines fill the rest. Pick *View › Current line at › Top* for the most read-ahead. *Page
   turns* shows two pages side by side in landscape and turns the left page as soon as you reach
   the right one, so the next page is always in view.
 - **Your part, not the whole score.** Pick *Part* once (say *Drums*); the choice is kept on that
   device and carried to the next song, even if that score calls the part *Schlagzeug*.
-- **Notes only** hides the room controls and gives the score the whole screen.
+- **The notes are the companion's main view:** it opens on the score, filling the window (*Show
+  room* brings the room info back). *Full screen* hides the browser's bars too, where the browser
+  allows it (desktop, iPad Safari).
 - Touch or scroll the score to look around: following pauses for a few seconds. While nothing
   plays, tap the left or right edge to page back and forth.
 

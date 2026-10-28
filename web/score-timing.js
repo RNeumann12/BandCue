@@ -88,14 +88,23 @@ export function findPassIndex(events, songMs) {
 
 /**
  * The cursor at songMs: which pass and measure, and the x position on that
- * measure's page. Between two note onsets the cursor glides linearly, so it
- * reaches each note exactly when the note sounds.
+ * measure's page.
+ *
+ * `motion` decides how it crosses a measure:
+ * - `even` (default): at one steady speed from the measure's first note to
+ *   where the next measure begins. Engraving spaces short notes wider than
+ *   their share of the time, so following the notes would make the cursor
+ *   sprint through a 16th-note run and crawl over a half note; a steady
+ *   cursor is easier to read along with. It is still exact on every bar.
+ * - `notes`: glides from note to note and stands on each one exactly when it
+ *   sounds, speeding up and slowing down with the engraving.
  *
  * @param {ScoreTiming} timing
  * @param {number} songMs
+ * @param {{ motion?: "even" | "notes" }} [options]
  * @returns {{ passIndex: number, measureIndex: number, page: number, x: number, measure: ScoreTimingMeasure, passNumber: number } | undefined}
  */
-export function cursorAt(timing, songMs) {
+export function cursorAt(timing, songMs, { motion = "even" } = {}) {
   const events = timing.events;
   if (!events.length) {
     return undefined;
@@ -111,7 +120,7 @@ export function cursorAt(timing, songMs) {
     passIndex,
     measureIndex: pass.m,
     page: measure.page,
-    x: anchorX(pass.b, clamped),
+    x: anchorX(motion === "notes" || pass.b.length < 3 ? pass.b : [pass.b[0], pass.b[pass.b.length - 1]], clamped),
     measure,
     passNumber: passNumberOf(events, passIndex)
   };

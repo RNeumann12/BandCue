@@ -50,6 +50,9 @@ const DEFAULT_SETTINGS = {
   readingLine: "upper",
   /** Shifts only this page's cursor, ms; positive runs ahead of the band. */
   leadMs: 0,
+  /** @type {"even" | "notes"} how the cursor crosses a measure (see cursorAt) */
+  motion: "even",
+  /** Notes only: the score fills the screen. A companion's default. */
   focus: false,
   collapsed: false
 };
@@ -68,6 +71,8 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     position: /** @type {HTMLElement} */ (root.querySelector("#scorePosition")),
     partSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scorePartSelect")),
     focusButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreFocusButton")),
+    fullscreenButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreFullscreenButton")),
+    motionSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scoreMotionSelect")),
     collapseButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreCollapseButton")),
     zoomOut: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreZoomOut")),
     zoomIn: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreZoomIn")),
@@ -160,6 +165,11 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     if (!score) {
       setFocus(false, false);
       return;
+    }
+    // Back on a MuseScore song after a song without notes: the score takes the
+    // screen again if that is how this device reads.
+    if (settings.focus && !document.body.classList.contains("score-focus")) {
+      setFocus(true, false);
     }
     el.title.textContent = song?.title ?? "";
 
@@ -307,7 +317,7 @@ export function createScoreView({ root, token, isHost, roomNow }) {
       }));
     }
 
-    const position = cursorAt(loaded.timing, songMs);
+    const position = cursorAt(loaded.timing, songMs, { motion: settings.motion });
     if (position) {
       placeCursor(position);
       const total = loaded.manifest.parts.find((part) => part.id === loaded?.partId)?.measureCount ?? 0;
@@ -504,13 +514,43 @@ export function createScoreView({ root, token, isHost, roomNow }) {
    */
   function setFocus(on, remember = true) {
     document.body.classList.toggle("score-focus", on);
-    el.focusButton.textContent = on ? "Exit notes only" : "Notes only";
+    el.focusButton.textContent = on ? "Show room" : "Notes only";
     el.focusButton.setAttribute("aria-pressed", String(on));
     if (remember) {
       settings.focus = on;
       saveSettings(settings);
     }
+    if (!on && fullscreenElement()) {
+      void exitFullscreen();
+    }
     void syncWakeLock();
+    lastSystem = -1;
+    requestDraw();
+  }
+
+  // Real full screen (no browser bars) where the browser allows it for a page:
+  // desktop browsers and Safari on iPad, but not on iPhone. Started from the
+  // home screen, iPadOS shows the page without bars anyway.
+  async function toggleFullscreen() {
+    if (fullscreenElement()) {
+      await exitFullscreen();
+      return;
+    }
+    setFocus(true);
+    const page = /** @type {any} */ (document.documentElement);
+    try {
+      await (page.requestFullscreen?.() ?? page.webkitRequestFullscreen?.());
+    } catch {
+      // Refused (e.g. not from a tap): notes only still fills the window.
+    }
+  }
+
+  function renderFullscreenButton() {
+    const page = /** @type {any} */ (document.documentElement);
+    el.fullscreenButton.hidden = !(page.requestFullscreen || page.webkitRequestFullscreen);
+    const on = Boolean(fullscreenElement());
+    el.fullscreenButton.textContent = on ? "Exit full screen" : "Full screen";
+    el.fullscreenButton.setAttribute("aria-pressed", String(on));
     lastSystem = -1;
     requestDraw();
   }
@@ -543,6 +583,8 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     el.layoutSelect.value = settings.layout;
     el.readingLineSelect.value = settings.readingLine;
     el.leadInput.value = String(settings.leadMs);
+    el.motionSelect.value = settings.motion;
+    renderFullscreenButton();
     root.classList.toggle("is-collapsed", settings.collapsed);
     el.collapseButton.textContent = settings.collapsed ? "Show notes" : "Hide notes";
     el.collapseButton.setAttribute("aria-expanded", String(!settings.collapsed));
@@ -567,6 +609,14 @@ export function createScoreView({ root, token, isHost, roomNow }) {
         .catch((error) => showMessage(`Could not load ${part.name}: ${error instanceof Error ? error.message : error}`));
     });
     el.focusButton.addEventListener("click", () => setFocus(!document.body.classList.contains("score-focus")));
+    el.fullscreenButton.addEventListener("click", () => void toggleFullscreen());
+    document.addEventListener("fullscreenchange", renderFullscreenButton);
+    document.addEventListener("webkitfullscreenchange", renderFullscreenButton);
+    el.motionSelect.addEventListener("change", () => {
+      settings.motion = el.motionSelect.value === "notes" ? "notes" : "even";
+      saveSettings(settings);
+      requestDraw();
+    });
     el.collapseButton.addEventListener("click", () => {
       settings.collapsed = !settings.collapsed;
       saveSettings(settings);
@@ -732,6 +782,20 @@ export function createScoreView({ root, token, isHost, roomNow }) {
   return { update, setConnection, requestDraw, get preloadedPages() { return preloaded.length; } };
 }
 
+function fullscreenElement() {
+  const page = /** @type {any} */ (document);
+  return page.fullscreenElement ?? page.webkitFullscreenElement;
+}
+
+async function exitFullscreen() {
+  const page = /** @type {any} */ (document);
+  try {
+    await (page.exitFullscreen?.() ?? page.webkitExitFullscreen?.());
+  } catch {
+    // Already left.
+  }
+}
+
 /** @param {string} url */
 async function fetchJson(url) {
   const response = await fetch(url);
@@ -752,7 +816,7 @@ function ordinal(value) {
 
 /** @param {boolean} isHost */
 function loadSettings(isHost) {
-  const settings = { ...DEFAULT_SETTINGS, collapsed: isHost };
+  const settings = { ...DEFAULT_SETTINGS, collapsed: isHost, focus: !isHost };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
     if (saved && typeof saved === "object") {
@@ -761,7 +825,10 @@ function loadSettings(isHost) {
       if (saved.layout === "scroll" || saved.layout === "pages") settings.layout = saved.layout;
       if (saved.readingLine in READING_LINES) settings.readingLine = saved.readingLine;
       if (Number.isFinite(saved.leadMs)) settings.leadMs = Math.max(-500, Math.min(1000, Math.round(saved.leadMs)));
-      if (typeof saved.focus === "boolean") settings.focus = saved.focus;
+      if (saved.motion === "even" || saved.motion === "notes") settings.motion = saved.motion;
+      // `notesFirst` replaced `focus`, whose default was off: older saved
+      // values say nothing about what the player wants now.
+      if (typeof saved.notesFirst === "boolean") settings.focus = saved.notesFirst;
       if (typeof saved[isHost ? "hostCollapsed" : "collapsed"] === "boolean") {
         settings.collapsed = saved[isHost ? "hostCollapsed" : "collapsed"];
       }
@@ -786,7 +853,8 @@ function saveSettings(settings) {
       layout: settings.layout,
       readingLine: settings.readingLine,
       leadMs: settings.leadMs,
-      ...(isHost ? { hostCollapsed: settings.collapsed } : { collapsed: settings.collapsed, focus: settings.focus })
+      motion: settings.motion,
+      ...(isHost ? { hostCollapsed: settings.collapsed } : { collapsed: settings.collapsed, notesFirst: settings.focus })
     }));
   } catch {
     // Keep running on in-memory settings.

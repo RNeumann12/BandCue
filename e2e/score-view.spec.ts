@@ -88,10 +88,16 @@ test("a companion reads along with the room's cursor", async ({ page, request })
   await expect(page.locator(".score-page img").first()).toHaveJSProperty("complete", true);
   await expect(page.locator("#scorePartSelect option")).toHaveText(["Full score", "Guitar", "Drums"]);
 
-  // Notes only: the score takes the whole screen.
+  // A companion opens on the notes, filling the screen; the room view is one tap away.
+  await expect(page.locator("body")).toHaveClass(/score-focus/);
+  await expect(page.locator("#roomCode")).toBeHidden();
+  const viewport = page.viewportSize()!;
+  expect(await view.boundingBox()).toMatchObject({ x: 0, y: 0, width: viewport.width, height: viewport.height });
+  await page.click("#scoreFocusButton");
+  await expect(page.locator("body")).not.toHaveClass(/score-focus/);
+  await expect(page.locator("#roomCode")).toBeVisible();
   await page.click("#scoreFocusButton");
   await expect(page.locator("body")).toHaveClass(/score-focus/);
-  await expect(page.locator("#hostPanel")).toBeHidden();
 
   host.socket.send(JSON.stringify({ type: "safetyUpdate", armed: true, updatedAt: Date.now() }));
   host.socket.send(JSON.stringify({ type: "transportRequest", action: "play", requestedAt: Date.now() }));

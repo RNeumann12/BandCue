@@ -1357,7 +1357,8 @@ body[data-transport="running"] .countdown {
 .score-view.is-collapsed .score-stage,
 .score-view.is-collapsed .score-part,
 .score-view.is-collapsed .score-settings,
-.score-view.is-collapsed #scoreFocusButton {
+.score-view.is-collapsed #scoreFocusButton,
+.score-view.is-collapsed #scoreFullscreenButton {
   display: none;
 }
 
@@ -1395,6 +1396,26 @@ body.score-focus .score-view {
 body.score-focus .score-stage {
   flex: 1;
   min-height: 0;
+}
+
+/* Notes only: a slim bar, so the music gets the screen. */
+body.score-focus .score-bar {
+  padding: 4px 10px;
+}
+
+body.score-focus .score-actions .compact,
+body.score-focus .score-settings summary {
+  padding: 4px 9px;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+body.score-focus .score-part select {
+  padding: 4px 8px;
+}
+
+body.score-focus .score-pages {
+  gap: 8px;
+  padding: 8px;
 }
 
 body.score-focus .score-scroller {

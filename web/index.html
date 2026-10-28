@@ -72,6 +72,7 @@
               <span>Part</span>
               <select id="scorePartSelect"></select>
             </label>
+            <button class="secondary compact" id="scoreFullscreenButton" type="button" aria-pressed="false" hidden>Full screen</button>
             <button class="secondary compact" id="scoreFocusButton" type="button" aria-pressed="false">Notes only</button>
             <button class="secondary compact" id="scoreCollapseButton" type="button" aria-expanded="true">Hide notes</button>
             <details class="score-settings">
@@ -90,6 +91,13 @@
                     <option value="top">Top (most read-ahead)</option>
                     <option value="upper">Upper fifth</option>
                     <option value="middle">Middle</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Cursor motion</span>
+                  <select id="scoreMotionSelect">
+                    <option value="even">Steady through each bar</option>
+                    <option value="notes">Note by note</option>
                   </select>
                 </label>
                 <div class="score-zoom">

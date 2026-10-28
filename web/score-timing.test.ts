@@ -54,14 +54,31 @@ describe("score view timing", () => {
     expect(findPassIndex(timing.events, 1e9)).toBe(timing.events.length - 1);
   });
 
-  it("puts the cursor on each note exactly when it sounds and glides in between", () => {
+  it("note by note: stands on each note exactly when it sounds and glides in between", () => {
     const measure2 = timing.events[1]!;
     for (const [time, x] of measure2.b) {
-      expect(cursorAt(timing, time)?.x).toBeCloseTo(x, 5);
+      expect(cursorAt(timing, time, { motion: "notes" })?.x).toBeCloseTo(x, 5);
     }
     const [[t0, x0], [t1, x1]] = measure2.b as [[number, number], [number, number]];
-    expect(cursorAt(timing, (t0 + t1) / 2)?.x).toBeCloseTo((x0 + x1) / 2, 5);
-    expect(cursorAt(timing, 750)?.measureIndex).toBe(1);
+    expect(cursorAt(timing, (t0 + t1) / 2, { motion: "notes" })?.x).toBeCloseTo((x0 + x1) / 2, 5);
+    expect(cursorAt(timing, 750, { motion: "notes" })?.measureIndex).toBe(1);
+  });
+
+  it("steady by default: one speed across a measure, exact on its first note and its end", () => {
+    // A measure whose notes are spaced unevenly, like a 16th run after a half note.
+    const uneven: ScoreTiming = {
+      ...timing,
+      events: [{ m: 1, t: 0, e: 2000, b: [[0, 100], [1000, 150], [1250, 400], [1500, 650], [1750, 900], [2000, 1000]] }],
+      durationMs: 2000
+    };
+    const xs = [0, 250, 500, 1000, 1500, 1750, 2000].map((time) => cursorAt(uneven, time)!.x);
+    expect(xs).toEqual([100, 212.5, 325, 550, 775, 887.5, 1000]);
+    // Note by note it would sprint through the run instead.
+    expect(cursorAt(uneven, 1500, { motion: "notes" })!.x).toBe(650);
+    // On every measure of the example, start and end are the same either way.
+    for (const event of timing.events) {
+      expect(cursorAt(timing, event.t)?.x).toBeCloseTo(event.b[0]![1], 5);
+    }
   });
 
   it("follows repeats and the D.S. jump, and counts the passes", () => {
