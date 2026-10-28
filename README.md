@@ -54,6 +54,7 @@ dependency once the dependencies are installed.
   - [Songsterr on Android](#songsterr-on-android)
   - [MuseScore on Windows](#musescore-on-windows)
 - [Running the Host on MuseScore (Bridge Mode)](#running-the-host-on-musescore-bridge-mode)
+- [Reading the Notes on an iPad (Score View)](#reading-the-notes-on-an-ipad-score-view)
 - [V1 Limits](#v1-limits)
 - [Documentation](#documentation)
 - [Project Layout](#project-layout)
@@ -478,6 +479,40 @@ activation/reset begins during the count-in (`--dispatch-lead-ms`, default 1000 
 final Play key waits for the scheduled instant. The full bridge protocol is in
 [docs/Adapters.md](docs/Adapters.md#musescore-bridge-api).
 
+## Reading the Notes on an iPad (Score View)
+
+Every device in the room can read the current MuseScore song along with the band: open the
+companion link (or scan the QR code) on an iPad, an Android tablet or a laptop without MuseScore,
+and the notes of the current song appear with a cursor that moves with the music. No app,
+extension or MuseScore is needed on that device.
+
+![Score view in "Notes only" mode on an iPad: the cursor stands on the note being played, inside a repeat taken the second time](assets/score-view/score-view-running.png)
+
+- **The cursor stands on the note that is sounding.** It glides from note to note and reaches each
+  one on its beat, follows repeats, D.S./Coda jumps and tempo changes, and honours the song's
+  tempo and start measure. During the count-in it waits on the start measure; Stop freezes it
+  where the band stopped.
+- **Read ahead like on Songsterr.** The line being played sits near the top of the screen and the
+  next lines fill the rest. Pick *View › Current line at › Top* for the most read-ahead. *Page
+  turns* shows two pages side by side in landscape and turns the left page as soon as you reach
+  the right one, so the next page is always in view.
+- **Your part, not the whole score.** Pick *Part* once (say *Drums*); the choice is kept on that
+  device and carried to the next song, even if that score calls the part *Schlagzeug*.
+- **Notes only** hides the room controls and gives the score the whole screen.
+- Touch or scroll the score to look around: following pauses for a few seconds. While nothing
+  plays, tap the left or right edge to page back and forth.
+
+Where the notes come from: the MuseScore helper (`npm run dev:musescore`, also part of
+`npm run dev:all`) exports every MuseScore song of the setlist with MuseScore itself, the current
+song first, and uploads the pages to the coordinator. The host setlist shows a badge per song
+(*Notes ready*, *Exporting notes*, *No notes*). It needs `--score-folder` like auto-open does;
+`--no-score-export` turns it off. Details in [docs/Adapters.md](docs/Adapters.md#score-view-export).
+
+**On the iPad:** add the companion page to the home screen (*Share › Add to Home Screen*) to start
+it full screen; the saved link keeps the room token. Set *Settings › Display & Brightness ›
+Auto-Lock* to *Never* for the rehearsal: the browser cannot keep the screen on by itself over the
+coordinator's plain `http://` address.
+
 ## V1 Limits
 
 - Same Wi-Fi only.
@@ -490,6 +525,8 @@ final Play key waits for the scheduled instant. The full bridge protocol is in
 - Phones are companion displays by default; Android phones can be app controllers only through
   the native adapter.
 - Only the leader's device should feed audible click / backing audio to the mixer.
+- The score view shows MuseScore songs only (not Songsterr tabs), reads along without playing any
+  audio, and cannot start or stop the room.
 
 ## Documentation
 
@@ -514,6 +551,7 @@ src/
 web/           Host controls + companion view (static HTML/CSS/JS)
 extension/     Chrome/Edge MV3 Songsterr adapter
 android/       Native Kotlin Songsterr adapter (sideload/debug APK)
+examples/      Example setlist; score-view/ holds the score the score-view tests run against
 docs/          This documentation set
 scripts/       build-android.ps1
 ```

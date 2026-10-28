@@ -79,6 +79,79 @@ export interface SongCatalogMatch {
   detail?: string;
 }
 
+/**
+ * A MuseScore helper's word on one setlist song's score-view export. The
+ * helper matches the song to a local score and exports it; `scoreId` names the
+ * files it published to the coordinator (`/api/scores/<scoreId>/…`) and is set
+ * only once the upload is complete.
+ */
+export interface ScoreExportReport {
+  songId: string;
+  relativePath?: string;
+  status: "queued" | "exporting" | "ready" | "failed";
+  scoreId?: string;
+  detail?: string;
+}
+
+/** What the room tells every device about a song's score view. */
+export interface ScoreAvailability {
+  songId: string;
+  status: "ready" | "exporting" | "missing";
+  scoreId?: string;
+  detail?: string;
+}
+
+/** `manifest.json` of an exported score. */
+export interface ScoreManifest {
+  version: 1;
+  scoreId: string;
+  title: string;
+  relativePath: string;
+  museScoreVersion?: string;
+  exportedAt: number;
+  /** The full score first (`id: "score"`), then one entry per instrument part. */
+  parts: ScoreManifestPart[];
+}
+
+export interface ScoreManifestPart {
+  id: string;
+  name: string;
+  /** SVG page files, in page order. */
+  pages: string[];
+  /** The part's `ScoreTiming` file. */
+  timing: string;
+  measureCount: number;
+  durationMs: number;
+}
+
+/** A measure's box on its page, in SVG units of that page. */
+export interface ScoreTimingMeasure {
+  page: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** One measure as it is played (a repeated measure appears once per pass). */
+export interface ScoreTimingEvent {
+  /** Measure index, 0-based; BandCue's measure numbers are this plus one. */
+  m: number;
+  /** Start and end of the pass, ms from the top of the song at 100 % tempo. */
+  t: number;
+  e: number;
+  /** Cursor anchors `[ms, x]`: each note onset, then where the pass ends. */
+  b: [number, number][];
+}
+
+export interface ScoreTiming {
+  version: 1;
+  pages: { width: number; height: number }[];
+  measures: (ScoreTimingMeasure | null)[];
+  events: ScoreTimingEvent[];
+  durationMs: number;
+}
+
 export interface ClientHello {
   type: "clientHello";
   deviceName: string;
@@ -148,6 +221,12 @@ export interface AdapterStatus {
    */
   requiredLeadMs?: number;
   tempo?: AdapterTempoStatus;
+  /**
+   * Score-view exports of the setlist's MuseScore songs (MuseScore helper
+   * only). Like `catalog`, it is sent when it changes and the room keeps the
+   * last list; the room turns it into `RoomState.currentScore`.
+   */
+  scores?: ScoreExportReport[];
   lastCommand?: {
     action: AdapterCommandAction;
     sequenceId?: number;
@@ -370,6 +449,10 @@ export interface RoomState {
   clients: RoomClientSummary[];
   transport: TransportState;
   currentSong?: CurrentSongState;
+  /** The current song's score view, when it is a MuseScore song. */
+  currentScore?: ScoreAvailability;
+  /** Score views of every MuseScore song in the setlist, in setlist order. */
+  setlistScores?: ScoreAvailability[];
   setlist: SetlistState;
   safety: SafetyState;
   companionUrl: string;

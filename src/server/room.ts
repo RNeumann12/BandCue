@@ -14,6 +14,8 @@ import type {
   OpenSongRequest,
   RoomClientSummary,
   RoomState,
+  ScoreAvailability,
+  ScoreExportReport,
   SafetyState,
   SafetyUpdate,
   ServerMessage,
@@ -127,6 +129,17 @@ export class RoomController {
   // log to one line per executed command.
   private readonly lastTimingLogByClientId = new Map<string, string>();
   private persistedStateListener?: (state: PersistedRoomState) => void;
+  /** Each MuseScore helper's latest score-view export list, by client id. */
+  private readonly scoreReports = new Map<string, ScoreExportReport[]>();
+  /**
+   * The last published export per song, kept after its helper leaves: the
+   * files stay on the coordinator, so the band can keep reading while the
+   * MuseScore laptop reconnects. Tied to the song's MuseScore reference, so
+   * pointing the song at a different score forgets it.
+   */
+  private readonly rememberedScores = new Map<string, { scoreId: string; reference: string }>();
+  private scoreAvailable?: (scoreId: string) => boolean;
+  private readonly scoreAvailabilityCache = new Map<string, { available: boolean; checkedAt: number }>();
 
   constructor(
     private readonly roomCode: string,
@@ -204,6 +217,7 @@ export class RoomController {
    */
   removeClient(clientId: string): void {
     this.clients.delete(clientId);
+    this.scoreReports.delete(clientId);
     this.broadcastState();
   }
 
@@ -449,11 +463,97 @@ export class RoomController {
       clients: [...this.clients.values()].map(({ socket: _socket, ...client }) => client),
       transport: this.transport,
       currentSong: this.currentSong,
+      ...this.scoreState(now),
       setlist: this.setlist,
       safety: this.safety,
       companionUrl: this.companionUrl,
       hostUrl: this.hostUrl
     };
+  }
+
+  /**
+   * Lets the room check that a reported export really is in the coordinator's
+   * score store before it tells the band the notes are ready.
+   */
+  setScoreAvailability(check: (scoreId: string) => boolean): void {
+    this.scoreAvailable = check;
+    this.scoreAvailabilityCache.clear();
+  }
+
+  /** Only connected desktop adapters may upload score-view exports. */
+  isDesktopAdapter(clientId: string | undefined): boolean {
+    return Boolean(clientId && this.clients.get(clientId)?.role === "desktop-adapter");
+  }
+
+  /** The current song's score view and every MuseScore song's, for roomState. */
+  private scoreState(now: number): Pick<RoomState, "currentScore" | "setlistScores"> {
+    const songs = this.setlist.songs.filter((song) => appliesToMuseScore(song));
+    const current = this.currentSong?.song;
+    const setlistScores = songs.map((song) => this.scoreAvailabilityFor(song, now));
+    const currentScore = current && appliesToMuseScore(current)
+      ? setlistScores.find((score) => score.songId === current.id) ?? this.scoreAvailabilityFor(current, now)
+      : undefined;
+    return {
+      currentScore,
+      setlistScores: setlistScores.length ? setlistScores : undefined
+    };
+  }
+
+  private scoreAvailabilityFor(song: SetlistSong, now: number): ScoreAvailability {
+    const reference = museScoreReference(song);
+    let pending: ScoreExportReport | undefined;
+    let failed: ScoreExportReport | undefined;
+    let helperConnected = false;
+    for (const [clientId, reports] of this.scoreReports) {
+      if (!this.clients.has(clientId)) {
+        continue;
+      }
+      helperConnected = true;
+      const report = reports.find((candidate) => candidate.songId === song.id);
+      if (!report) {
+        continue;
+      }
+      if (report.status === "ready" && report.scoreId && this.isScoreStored(report.scoreId, now)) {
+        this.rememberedScores.set(song.id, { scoreId: report.scoreId, reference });
+        return { songId: song.id, status: "ready", scoreId: report.scoreId };
+      }
+      if (report.status === "failed") {
+        failed ??= report;
+      } else {
+        pending ??= report;
+      }
+    }
+
+    // Still being (re-)exported: an earlier export of the song stays readable.
+    const remembered = this.rememberedScores.get(song.id);
+    if (remembered && remembered.reference === reference && this.isScoreStored(remembered.scoreId, now)) {
+      return { songId: song.id, status: "ready", scoreId: remembered.scoreId };
+    }
+    if (pending) {
+      return { songId: song.id, status: "exporting", detail: pending.detail };
+    }
+    return {
+      songId: song.id,
+      status: "missing",
+      detail: failed
+        ? `Export failed${failed.detail ? `: ${failed.detail}` : "."}`
+        : helperConnected
+          ? "The MuseScore helper found no score for this song."
+          : "No MuseScore helper is exporting score views."
+    };
+  }
+
+  private isScoreStored(scoreId: string, now: number): boolean {
+    if (!this.scoreAvailable) {
+      return true;
+    }
+    const cached = this.scoreAvailabilityCache.get(scoreId);
+    if (cached && (cached.available || now - cached.checkedAt < 2_000) && now - cached.checkedAt < 10_000) {
+      return cached.available;
+    }
+    const available = this.scoreAvailable(scoreId);
+    this.scoreAvailabilityCache.set(scoreId, { available, checkedAt: now });
+    return available;
   }
 
   private updateAdapterStatus(clientId: string, status: AdapterStatus, now: number): void {
@@ -483,7 +583,16 @@ export class RoomController {
         : client.status?.lastCommand
     };
     const songDurationChanged = this.applyAdapterDurationToCurrentSong(client, nextStatus, now);
-    const statusChanged = JSON.stringify(client.status ?? null) !== JSON.stringify(nextStatus);
+    let statusChanged = JSON.stringify(client.status ?? null) !== JSON.stringify(nextStatus);
+    // Kept out of the client summary: the room condenses it into
+    // currentScore/setlistScores instead of rebroadcasting every helper's list.
+    const scores = status.app === "musescore" && client.role === "desktop-adapter"
+      ? sanitizeScoreReports(status.scores)
+      : undefined;
+    if (scores && JSON.stringify(scores) !== JSON.stringify(this.scoreReports.get(clientId) ?? null)) {
+      this.scoreReports.set(clientId, scores);
+      statusChanged = true;
+    }
     this.logCommandTiming(client, nextStatus.lastCommand);
     client.status = nextStatus;
     client.lastSeenAt = now;
@@ -1335,6 +1444,34 @@ function sanitizeCatalog(value: AdapterStatus["catalog"]): AdapterStatus["catalo
       : undefined,
     detail: trimText(value.detail ?? "", 500) || undefined
   };
+}
+
+const SCORE_REPORT_STATUSES = new Set<ScoreExportReport["status"]>(["queued", "exporting", "ready", "failed"]);
+
+function sanitizeScoreReports(value: AdapterStatus["scores"]): ScoreExportReport[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  return value
+    .filter((report): report is ScoreExportReport => Boolean(report) && typeof report === "object")
+    .slice(0, MAX_SETLIST_SONGS)
+    .flatMap((report) => {
+      const songId = trimText(report.songId ?? "", 120);
+      if (!songId || !SCORE_REPORT_STATUSES.has(report.status)) {
+        return [];
+      }
+      const scoreId = typeof report.scoreId === "string" && /^[a-f0-9]{16,64}$/.test(report.scoreId)
+        ? report.scoreId
+        : undefined;
+      return [{
+        songId,
+        relativePath: normalizeRelativeCatalogPath(report.relativePath ?? "") || undefined,
+        status: report.status === "ready" && !scoreId ? "failed" : report.status,
+        scoreId,
+        detail: trimText(report.detail ?? "", 300) || undefined
+      }];
+    });
 }
 
 function sanitizeSongMatch(value: AdapterStatus["songMatch"]): AdapterStatus["songMatch"] | undefined {

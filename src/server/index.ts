@@ -4,6 +4,7 @@ import { networkInterfaces } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { timingSafeEqual } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import QRCode from "qrcode";
 import { WebSocketServer } from "ws";
 import { RoomController } from "./room.js";
@@ -13,6 +14,12 @@ import { loadOrCreateRoomIdentity } from "./room-identity.js";
 import { createRoomStateWriter, readRoomStateFile, roomStatePathFor } from "./room-state-file.js";
 import { serverNow } from "./server-clock.js";
 import { parsePort } from "./config.js";
+import {
+  DEFAULT_MAX_TOTAL_BYTES,
+  ScoreStore,
+  ScoreStoreError,
+  scoreStoreDirFor
+} from "./score-store.js";
 import { selectLanCandidates } from "../shared/lan-address.js";
 import {
   MAX_WS_MESSAGE_BYTES,
@@ -55,12 +62,24 @@ const room = new RoomController(ROOM_CODE, companionUrl, `${baseUrl}/host`, unde
 const restoredSongs = room.restorePersistedState(readRoomStateFile(ROOM_STATE_FILE));
 const roomStateWriter = createRoomStateWriter(ROOM_STATE_FILE);
 room.onPersistedStateChange((state) => roomStateWriter.schedule(state));
+// Score-view exports uploaded by the MuseScore helper (see score-store.ts).
+const SCORE_STORE_DIR = process.env.BANDCUE_SCORE_DIR ?? scoreStoreDirFor(IDENTITY_FILE);
+const scoreStore = new ScoreStore(SCORE_STORE_DIR, {
+  maxTotalBytes: parseMegabytes(process.env.BANDCUE_SCORE_STORE_MB) ?? DEFAULT_MAX_TOTAL_BYTES
+});
+room.setScoreAvailability((scoreId) => scoreStore.has(scoreId));
+
+function parseMegabytes(value: string | undefined): number | undefined {
+  const megabytes = Number(value);
+  return value && Number.isFinite(megabytes) && megabytes > 0 ? Math.round(megabytes * 1024 * 1024) : undefined;
+}
 
 function contentType(pathname: string): string {
   if (pathname.endsWith(".css")) return "text/css; charset=utf-8";
   if (pathname.endsWith(".js")) return "text/javascript; charset=utf-8";
   if (pathname.endsWith(".svg")) return "image/svg+xml";
   if (pathname.endsWith(".json")) return "application/json; charset=utf-8";
+  if (pathname.endsWith(".png")) return "image/png";
   return "text/html; charset=utf-8";
 }
 
@@ -88,6 +107,11 @@ async function handleHttpRequest(
   if (url.pathname === "/api/room") {
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(room.getState()));
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/scores/")) {
+    await handleScoreRequest(req, res, url);
     return;
   }
 
@@ -128,6 +152,128 @@ async function handleHttpRequest(
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     res.end("Not found");
   }
+}
+
+/**
+ * `GET`/`HEAD /api/scores/<scoreId>/<file>` serves a score-view file to anyone
+ * in the room; `PUT` stores one, and only for a connected desktop adapter (the
+ * MuseScore helper), named by its room client id in `x-bandcue-client-id`.
+ * The room or host token comes as `?token=` -- an <img> cannot send headers.
+ */
+async function handleScoreRequest(
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  url: URL
+): Promise<void> {
+  const match = /^\/api\/scores\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  const candidate = url.searchParams.get("token");
+  if (!tokenMatches(candidate, ROOM_TOKEN) && !tokenMatches(candidate, HOST_TOKEN)) {
+    res.writeHead(401, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Unauthorized");
+    return;
+  }
+  if (!match) {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Not found");
+    return;
+  }
+  const [, scoreId, file] = match as unknown as [string, string, string];
+
+  if (req.method === "PUT") {
+    const clientId = req.headers["x-bandcue-client-id"];
+    if (!room.isDesktopAdapter(typeof clientId === "string" ? clientId : undefined)) {
+      req.resume();
+      res.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Only a connected desktop adapter may upload scores.");
+      return;
+    }
+    const encoding = String(req.headers["content-encoding"] ?? "identity").toLowerCase();
+    if (encoding !== "gzip" && encoding !== "identity") {
+      req.resume();
+      res.writeHead(415, { "content-type": "text/plain; charset=utf-8" });
+      res.end("Use gzip or no content encoding.");
+      return;
+    }
+    const body = await readBody(req, scoreStore.maxUploadBytes);
+    if (!body) {
+      res.writeHead(413, { "content-type": "text/plain; charset=utf-8", connection: "close" });
+      res.end("File too large.");
+      return;
+    }
+    try {
+      await scoreStore.put(scoreId, file, body, encoding === "gzip");
+    } catch (error) {
+      const status = error instanceof ScoreStoreError ? error.statusCode : 500;
+      res.writeHead(status, { "content-type": "text/plain; charset=utf-8" });
+      res.end(error instanceof Error ? error.message : "Upload failed.");
+      return;
+    }
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.writeHead(405, { allow: "GET, HEAD, PUT" });
+    res.end();
+    return;
+  }
+
+  const stored = scoreStore.get(scoreId, file);
+  if (!stored) {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Not found");
+    return;
+  }
+  const headers: Record<string, string | number> = {
+    "content-type": stored.contentType,
+    // The id is a hash of the score: these bytes never change under it.
+    "cache-control": "private, max-age=31536000, immutable",
+    vary: "accept-encoding",
+    // An SVG opened on its own must not run anything it might contain.
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+    "x-content-type-options": "nosniff"
+  };
+  const acceptsGzip = /\bgzip\b/i.test(String(req.headers["accept-encoding"] ?? ""));
+  if (stored.gzip && !acceptsGzip) {
+    const { readFile } = await import("node:fs/promises");
+    const body = gunzipSync(await readFile(stored.path));
+    res.writeHead(200, { ...headers, "content-length": body.length });
+    res.end(req.method === "HEAD" ? undefined : body);
+    return;
+  }
+  if (stored.gzip) {
+    headers["content-encoding"] = "gzip";
+  }
+  res.writeHead(200, { ...headers, "content-length": stored.size });
+  if (req.method === "HEAD") {
+    res.end();
+    return;
+  }
+  const stream = scoreStore.open(stored);
+  stream.on("error", () => res.destroy());
+  stream.pipe(res);
+}
+
+function readBody(req: import("node:http").IncomingMessage, limit: number): Promise<Buffer | undefined> {
+  return new Promise((resolvePromise, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        tooLarge = true;
+        chunks.length = 0;
+        return;
+      }
+      if (!tooLarge) {
+        chunks.push(chunk);
+      }
+    });
+    req.on("end", () => resolvePromise(tooLarge ? undefined : Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_MESSAGE_BYTES });

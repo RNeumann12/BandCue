@@ -10,8 +10,11 @@
 //      coordinator down -- the next client can still join;
 //   4. only the host token can host: the join token joins as a companion;
 //   5. the setlist and current song survive the coordinator being killed
-//      (no clean shutdown, like a Pi losing power) and started again.
+//      (no clean shutdown, like a Pi losing power) and started again;
+//   6. a desktop adapter can upload a score-view file, which is served back
+//      gzipped to the room token and refused to anyone else.
 import { spawn } from "node:child_process";
+import { gzipSync } from "node:zlib";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -172,6 +175,26 @@ try {
     fail(`current song after a restart: ${JSON.stringify(restored.currentSong)}`);
   }
   console.log("ok: the setlist and current song survive the coordinator being killed");
+
+  const scoreUrl = (file, withToken = token) =>
+    `http://127.0.0.1:${port}/api/scores/${"5".repeat(32)}/${file}?token=${withToken}`;
+  let adapterId;
+  const adapter = await joinRoom("Smoke helper", { role: "desktop-adapter", onHello: (hello) => { adapterId = hello.clientId; } });
+  const manifest = JSON.stringify({ version: 1, scoreId: "5".repeat(32), parts: [] });
+  const upload = (headers) => fetch(scoreUrl("manifest.json"), {
+    method: "PUT",
+    headers: { "content-encoding": "gzip", ...headers },
+    body: gzipSync(manifest)
+  });
+  if ((await upload({})).status !== 403) fail("a score upload without a desktop adapter's id was accepted");
+  const stored = await upload({ "x-bandcue-client-id": adapterId });
+  if (stored.status !== 204) fail(`score upload: HTTP ${stored.status} ${await stored.text()}`);
+  if ((await fetch(scoreUrl("manifest.json", "wrong"))).status !== 401) fail("a score was served without the room token");
+  const served = await fetch(scoreUrl("manifest.json"));
+  if (!served.ok || (await served.text()) !== manifest) fail(`score download: HTTP ${served.status}`);
+  if ((await fetch(scoreUrl("..%2F..%2Froom.json"))).status !== 404) fail("a path outside the score store was served");
+  adapter.close();
+  console.log("ok: score-view files upload from an adapter and serve to the room");
   await finish(0);
 } catch (error) {
   console.error(`SMOKE FAILED: ${error instanceof Error ? error.message : String(error)}`);

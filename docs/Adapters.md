@@ -403,6 +403,55 @@ to foreground and no shell to launch. A command the attached plugin has claimed 
 keyboard control, even when its result is late: the plugin may already have started or stopped
 playback, and the keyboard path is a Space *toggle* that would undo it.
 
+### Score view export
+
+The companion page's score view (see the README) shows MuseScore's own engraving of the song, so
+a drummer on an iPad sees exactly the notes the score has. The helper produces it, because only
+the Windows machine has MuseScore and the scores; the coordinator (which may be a Raspberry Pi)
+only stores and serves the files.
+
+**What it does.** For every MuseScore song of the setlist that matches a local score (the same
+match Open Song uses), the current song first:
+
+1. Copies the score and, if it was saved in continuous view, rewrites the copy's layout mode to
+   pages: a continuous score exports as one page several metres wide, which no tablet can show.
+   Nothing else in the file changes (`mscz-page-layout.ts`).
+2. `MuseScore4.exe --score-parts` writes one `.mscz` per instrument part, whether or not the score
+   has parts set up.
+3. One `MuseScore4.exe -j job.json` run exports SVG pages plus `mpos` (measure positions) and
+   `spos` (note/rest segment positions) for the full score and every part.
+4. Turns `mpos`/`spos` into `<voice>.timing.json` (see [Protocol.md](Protocol.md#score-view-files-http))
+   and writes `manifest.json`, into a cache keyed by a hash of the score's bytes.
+5. Uploads the files gzipped to `/api/scores/<scoreId>/…`, manifest last, and reports the song as
+   `ready` in `adapterStatus.scores`.
+
+A score whose file changes is exported again under a new id; a cached export is only uploaded
+(after a `HEAD` shows the coordinator lacks it), and every export is confirmed again after the
+helper reconnects. A real 4-instrument song takes ~8–15 s, a small one ~2 s. The CLI export works
+while the MuseScore GUI is open (verified on 4.7.5). To keep the CPU free for playback, exports run
+only while the room is stopped and not armed, never during a song change, and not while the
+helper's MuseScore warm-up is still looking for a running MuseScore.
+
+**Why the timing is trustworthy.** MuseScore's `mpos` export lists the measures *in playback
+order*: repeats, voltas, D.S./D.C. and Coda jumps are already unrolled, and every pass carries its
+time in milliseconds with all tempo changes applied. `spos` does the same for every note onset.
+The score view therefore never interprets the notation itself. Coordinates in both files are 12×
+the SVG's units (checked against the staff lines of the exported SVG).
+
+**The cursor.** The companion computes
+`songMs = startOffset + (roomNow − downbeat) × tempoPercent / 100` on every animation frame from its
+synced room clock, looks the pass up by binary search and moves between the note onsets of that
+pass, reaching each note at its time. It is never counted up, so a throttled background tab or a
+Wi-Fi drop cannot make it drift. Measured against the timing file in the browser it sat within
+±3 ms. The leader's calibration still decides when the audio really starts; a per-device
+*Cursor lead* nudges only that screen's cursor.
+
+**Measure numbers.** `startMeasure` and the score view's *Bar N* count the score's measures from 1,
+**pickup included** — measure N is the `mpos` measure index N − 1. That is the numbering the bridge
+plugin seeks by (it walks the measure chain from the first measure) and the one MuseScore's
+playback toolbar uses. It differs from the printed measure numbers by one when a score's pickup
+is excluded from the count. A measure inside a repeat starts at its first pass, like MuseScore.
+
 ### MuseScore Bridge API
 
 When started with `--bridge-port` (e.g. `4731`), the helper exposes a small HTTP API on

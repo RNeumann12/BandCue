@@ -6,6 +6,13 @@
     <!-- Keep the UI in English: stop browsers (e.g. Chrome on a German phone)
          from auto-translating the page, which mixed German and English text. -->
     <meta name="google" content="notranslate" />
+    <!-- Started from the iPad home screen, the room opens full screen, notes and all. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BandCue" />
+    <meta name="theme-color" content="#12110f" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>BandCue Room</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -49,6 +56,63 @@
             <strong id="currentSongTitle">None</strong>
             <small id="currentSongMeta">No setlist song selected</small>
           </div>
+        </div>
+      </section>
+
+      <section class="score-view" id="scoreView" aria-label="Score" hidden>
+        <header class="score-bar">
+          <div class="score-heading">
+            <strong id="scoreTitle"></strong>
+            <span class="score-position" id="scorePosition" aria-live="off"></span>
+            <span class="score-countdown" id="scoreCountdown" role="timer" hidden></span>
+          </div>
+          <span class="score-connection" id="scoreConnection" role="status" hidden></span>
+          <div class="score-actions">
+            <label class="score-part">
+              <span>Part</span>
+              <select id="scorePartSelect"></select>
+            </label>
+            <button class="secondary compact" id="scoreFocusButton" type="button" aria-pressed="false">Notes only</button>
+            <button class="secondary compact" id="scoreCollapseButton" type="button" aria-expanded="true">Hide notes</button>
+            <details class="score-settings">
+              <summary>View</summary>
+              <div class="score-settings-body">
+                <label>
+                  <span>Layout</span>
+                  <select id="scoreLayoutSelect">
+                    <option value="scroll">Scroll</option>
+                    <option value="pages">Page turns</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Current line at</span>
+                  <select id="scoreReadingLineSelect">
+                    <option value="top">Top (most read-ahead)</option>
+                    <option value="upper">Upper fifth</option>
+                    <option value="middle">Middle</option>
+                  </select>
+                </label>
+                <div class="score-zoom">
+                  <span>Zoom</span>
+                  <button class="secondary compact" id="scoreZoomOut" type="button" aria-label="Zoom out">&minus;</button>
+                  <span id="scoreZoomLabel">100%</span>
+                  <button class="secondary compact" id="scoreZoomIn" type="button" aria-label="Zoom in">+</button>
+                </div>
+                <label title="Moves only this screen's cursor. Positive values run ahead of the band.">
+                  <span>Cursor lead ms</span>
+                  <input id="scoreLeadInput" type="number" inputmode="numeric" min="-500" max="1000" step="10" value="0" />
+                </label>
+                <p class="score-hint" id="scoreWakeHint">Keep this screen on: set Auto-Lock to Never (iPad: Settings &rsaquo; Display &amp; Brightness).</p>
+              </div>
+            </details>
+          </div>
+        </header>
+        <div class="score-stage">
+          <div class="score-scroller" id="scoreScroller">
+            <div class="score-pages" id="scorePages"></div>
+          </div>
+          <button class="score-follow" id="scoreFollowButton" type="button" hidden>Follow the cursor</button>
+          <p class="score-message" id="scoreMessage" hidden></p>
         </div>
       </section>
 

@@ -196,7 +196,10 @@ function sanitizeAdapterStatus(value: Record<string, unknown>): ClientMessage | 
     detail: typeof value.detail === "string" ? value.detail : undefined,
     requiredLeadMs: isFiniteNumber(value.requiredLeadMs) ? value.requiredLeadMs : undefined,
     tempo: sanitizeTempoStatus(value.tempo),
-    lastCommand: sanitizeLastCommand(value.lastCommand)
+    lastCommand: sanitizeLastCommand(value.lastCommand),
+    scores: Array.isArray(value.scores)
+      ? value.scores.filter(isRecord) as never
+      : undefined
   };
 }
 

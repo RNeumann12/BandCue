@@ -25,7 +25,9 @@
 # in ~/APP_DIR/.bandcue-room.setlist.json next to it. Neither file is shipped by
 # this script, so redeploys keep the same links, QR code, and setlist. Delete
 # the first on the Pi to rotate the tokens, the second to start with an empty
-# setlist. The host link is in the service log:
+# setlist. The score-view exports the MuseScore helper uploads live in
+# ~/APP_DIR/.bandcue-scores/ (capped at 200 MB, BANDCUE_SCORE_STORE_MB); they are
+# not shipped either, and a redeploy keeps them. The host link is in the service log:
 #     ssh bandcue-pi-mdns 'journalctl -u bandcue | grep "Host controls" | tail -1'
 set -euo pipefail
 
@@ -42,8 +44,9 @@ test -f dist/server/index.js || { echo "build produced no dist/server/index.js" 
 
 echo "==> Shipping build output, web assets, and manifests to $PI"
 # Only runtime code and assets. dist/release and dist/packages are
-# release-packaging leftovers; .bandcue-room.json is deliberately excluded so
-# the token/room code survive the deploy.
+# release-packaging leftovers; .bandcue-room.json and .bandcue-scores/ are
+# deliberately excluded so the token/room code and the uploaded scores survive
+# the deploy.
 tar -czf - dist/server dist/shared web package.json package-lock.json \
   | ssh "$PI" "mkdir -p ~/$APP_DIR && tar -xzf - -C ~/$APP_DIR"
 

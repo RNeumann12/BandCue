@@ -110,6 +110,12 @@ matching `durationMs` to the current song.
 }
 ```
 
+A MuseScore helper also sends **`scores`**: one entry per MuseScore song of the setlist that it
+matched to a local score, `{ songId, relativePath, status, scoreId?, detail? }` with `status` one of
+`queued`, `exporting`, `ready` (then `scoreId` names the uploaded files) or `failed`. Like
+`catalog`, it is only sent when it changed; the room keeps the last list per helper, keeps it out
+of `clients[].status`, and condenses it into `roomState.currentScore` / `setlistScores`.
+
 `lastCommand.startMeasure` is the measure this adapter actually started the song from — `1` when
 it had to fall back to the top, the song's `startMeasure` when it got there. It is only sent for a
 play with `resetBeforePlay`, and unlike a song's `startMeasure` the value `1` is meaningful and
@@ -247,6 +253,8 @@ See [Architecture.md → Room State](Architecture.md#room-state) for the field m
   "clients": [ { "id": "…", "deviceName": "…", "role": "desktop-adapter", "capabilities": [], "status": {…}, "clock": {…} } ],
   "transport": { "status": "stopped", "leaderId": "…", "action": "stop", "sequenceId": 8, "scheduledServerTime": 1718900140000, "stopReason": "auto-playback-ended" },
   "currentSong": { "song": {…}, "index": 2, "total": 8, "updatedAt": 1718900000000 },
+  "currentScore": { "songId": "…", "status": "ready", "scoreId": "17f7362bc4ba3106f1fe88a7cae1b128" },
+  "setlistScores": [ { "songId": "…", "status": "exporting" } ],
   "setlist": { "songs": [], "updatedAt": 1718900000000 },
   "safety": { "armed": false, "controlMode": "leader-stop", "updatedAt": 1718900000000 },
   "companionUrl": "http://192.168.1.10:4173/?token=…",
@@ -337,6 +345,46 @@ much:
   "appliedDelayMs": 1400,     // delay actually scheduled: max(requestedDelayMs, minimumDelayMs)
   "extendedMs": 245,          // appliedDelayMs - requestedDelayMs; 0 when honored as-is
   "measureDurationMs": 1200   // one Helix measure at this song's BPM and meter
+}
+```
+
+### `ScoreAvailability`
+`roomState.currentScore` (the current song, only when it is a MuseScore song) and
+`roomState.setlistScores` (every MuseScore song of the setlist): `{ songId, status, scoreId?, detail? }`.
+`ready` means the coordinator holds the export under `scoreId`; `exporting` means a helper is still
+on it; `missing` says why there are no notes in `detail` (no helper connected, no matching score,
+export failed). A published export stays `ready` while its helper reconnects, until the song is
+pointed at a different score.
+
+### Score view files (HTTP)
+`/api/scores/<scoreId>/<file>`, with the room or host token as `?token=` (an `<img>` cannot send
+headers). `scoreId` is a hash of the score file and the exporter version, so the bytes under an id
+never change and are served `Cache-Control: immutable`.
+
+| Method | Who | |
+| --- | --- | --- |
+| `GET` / `HEAD` | anyone in the room | Serves a file. Stored gzip and sent with `Content-Encoding: gzip` (unpacked for clients that do not accept it). 401 without a token, 404 for anything else. |
+| `PUT` | a **connected desktop adapter**, named by its room client id in `x-bandcue-client-id` | Stores a file, raw or `Content-Encoding: gzip`. 403 for any other client, 413 over 32 MB. |
+
+Only these names exist: `manifest.json`, `<voice>.timing.json`, `<voice>-<page>.svg` (lower-case
+letters, digits, `-`, `_`). The helper uploads `manifest.json` last, so a score counts as stored
+once its manifest is there.
+
+`manifest.json` (`ScoreManifest`) lists the voices, the full score first:
+`{ version: 1, scoreId, title, relativePath, museScoreVersion, exportedAt, parts: [{ id, name, pages, timing, measureCount, durationMs }] }`.
+
+`<voice>.timing.json` (`ScoreTiming`) is MuseScore's own playback timeline in SVG units of the pages:
+
+```jsonc
+{
+  "version": 1,
+  "pages": [{ "width": 9924, "height": 14028 }],
+  // Index = measure index (0-based); BandCue's measure N is index N - 1.
+  "measures": [{ "page": 0, "x": 1315.3, "y": 2114.2, "w": 790.6, "h": 4389.1 }],
+  // Measures as played, repeats and jumps unrolled: start/end in ms at 100 % tempo,
+  // and the cursor anchors [ms, x] of every note onset in that pass.
+  "events": [{ "m": 1, "t": 500, "e": 2500, "b": [[500, 2176.4], [1000, 2490.2], [2500, 3701.6]] }],
+  "durationMs": 34500
 }
 ```
 

@@ -1717,6 +1717,109 @@ describe("RoomController", () => {
   });
 });
 
+describe("RoomController score view", () => {
+  const SCORE_ID = "0123456789abcdef0123456789abcdef";
+  const songs = [
+    { id: "ruins", title: "In Ruins", sourceType: "musescore" as const, source: "In Ruins.mscz" },
+    { id: "ghosts", title: "Like Ghosts", sourceType: "musescore" as const, source: "Like Ghosts.mscz" },
+    { id: "zombie", title: "Zombie", sourceType: "songsterr" as const, source: "https://www.songsterr.com/a/wsa/x-s1" }
+  ];
+
+  function roomWithSetlist(stored = new Set<string>([SCORE_ID])) {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    room.setScoreAvailability((scoreId) => stored.has(scoreId));
+    const host = room.addClient(undefined, { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
+    room.handleMessage(host.id, { type: "setlistUpdate", songs, updatedAt: 1001 }, 1001);
+    room.handleMessage(host.id, { type: "currentSongUpdate", song: songs[0], index: 1, total: 3, updatedAt: 1002 }, 1002);
+    const helper = room.addClient(undefined, {
+      type: "clientHello", deviceName: "MuseScore laptop", role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1003);
+    return { room, host, helper, stored };
+  }
+
+  it("tells every device which export belongs to the current song, and keeps the list out of the client summary", () => {
+    const { room, helper } = roomWithSetlist();
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [
+        { songId: "ruins", relativePath: "In Ruins.mscz", status: "ready", scoreId: SCORE_ID },
+        { songId: "ghosts", relativePath: "Like Ghosts.mscz", status: "exporting" }
+      ]
+    }, 1010);
+
+    const state = room.getState(1010);
+    expect(state.currentScore).toEqual({ songId: "ruins", status: "ready", scoreId: SCORE_ID });
+    expect(state.setlistScores?.map((score) => [score.songId, score.status])).toEqual([
+      ["ruins", "ready"],
+      ["ghosts", "exporting"]
+    ]);
+    expect(JSON.stringify(state.clients)).not.toContain(SCORE_ID);
+  });
+
+  it("does not call a score ready before the coordinator has its files", () => {
+    const { room, helper } = roomWithSetlist(new Set());
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "ruins", status: "ready", scoreId: SCORE_ID }]
+    }, 1010);
+    expect(room.getState(1010).currentScore?.status).toBe("exporting");
+  });
+
+  it("keeps a published score readable while its helper reconnects", () => {
+    const { room, helper } = roomWithSetlist();
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "ruins", status: "ready", scoreId: SCORE_ID }]
+    }, 1010);
+    room.getState(1010);
+    room.removeClient(helper.id);
+    expect(room.getState(1020).currentScore).toMatchObject({ status: "ready", scoreId: SCORE_ID });
+  });
+
+  it("explains a missing score, and ignores score lists from anything but a MuseScore helper", () => {
+    const { room, helper } = roomWithSetlist();
+    expect(room.getState(1005).currentScore).toMatchObject({ status: "missing", detail: expect.stringContaining("No MuseScore helper") });
+
+    const browser = room.addClient(undefined, {
+      type: "clientHello", deviceName: "Phone", role: "companion", capabilities: []
+    }, 1006);
+    room.handleMessage(browser.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "ruins", status: "ready", scoreId: SCORE_ID }]
+    }, 1007);
+    expect(room.getState(1007).currentScore?.status).not.toBe("ready");
+
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "ruins", status: "failed", detail: "MuseScore crashed" }]
+    }, 1010);
+    expect(room.getState(1010).currentScore).toMatchObject({ status: "missing", detail: "Export failed: MuseScore crashed" });
+    expect(room.isDesktopAdapter(helper.id)).toBe(true);
+    expect(room.isDesktopAdapter(browser.id)).toBe(false);
+  });
+
+  it("forgets a remembered score once the song points at a different file", () => {
+    const { room, host, helper } = roomWithSetlist();
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "ruins", status: "ready", scoreId: SCORE_ID }]
+    }, 1010);
+    room.getState(1010);
+    room.removeClient(helper.id);
+    const retargeted = [{ ...songs[0]!, source: "In Ruins (live).mscz" }, songs[1]!, songs[2]!];
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: retargeted, updatedAt: 1020 }, 1020);
+    room.handleMessage(host.id, { type: "currentSongUpdate", song: retargeted[0], index: 1, total: 3, updatedAt: 1021 }, 1021);
+    expect(room.getState(1022).currentScore?.status).toBe("missing");
+  });
+
+  it("has no score view for a song that is not a MuseScore song", () => {
+    const { room, host } = roomWithSetlist();
+    room.handleMessage(host.id, { type: "currentSongUpdate", song: songs[2], index: 3, total: 3, updatedAt: 1030 }, 1030);
+    expect(room.getState(1030).currentScore).toBeUndefined();
+  });
+});
+
 describe("RoomController external cue", () => {
   function roomWithHostAndAdapter() {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);

@@ -46,6 +46,7 @@ import {
   hostHotkeyActionForEvent,
   parseDurationInput
 } from "./host-logic.js";
+import { createScoreView } from "./score-view.js";
 
 const params = new URLSearchParams(location.search);
 const token = params.get("token");
@@ -152,6 +153,15 @@ const elements = {
   timingPanel: $("#timingPanel"),
   timingRows: $("#timingRows")
 };
+
+// The current MuseScore song's notes with a cursor on the room's downbeat
+// (score-view.js). It reads room time the same way the countdown does.
+const scoreView = createScoreView({
+  root: $("#scoreView"),
+  token: token ?? "",
+  isHost,
+  roomNow: () => (serverOffsetMs === undefined ? undefined : Date.now() + serverOffsetMs)
+});
 
 const SETLIST_STORAGE_KEY = "bandcue:setlist";
 const CALIBRATION_STORAGE_KEY = "bandcue:calibration";
@@ -656,6 +666,7 @@ function connect() {
       transportRequestPending = false;
       lastState = message;
       renderState(message);
+      scoreView.update(message);
       return;
     }
 
@@ -731,6 +742,7 @@ function reconnectNow() {
 
 function setConnectionState(next) {
   connectionState = next;
+  scoreView.setConnection(next);
   if (next === "open") {
     connectionProblem = "";
   }
@@ -829,6 +841,7 @@ function renderState(state) {
   renderWarnings(warnings);
   renderHelixLeadReadiness();
   renderHostControls(state, readyAdapters);
+  renderSetlistScoreBadges(state);
   driveSetlistRun(state);
   prevTransportStatus = state.transport.status;
 }
@@ -873,6 +886,7 @@ function getStableRoomSignature(state) {
     transport: state.transport,
     currentSong: state.currentSong,
     setlist: state.setlist,
+    setlistScores: isHost ? state.setlistScores : undefined,
     safety: state.safety,
     clients: state.clients
       .map(getStableClientSignature)
@@ -2051,6 +2065,29 @@ function importSetlist(file) {
   reader.readAsText(file);
 }
 
+let lastScoreBadgeSignature = "";
+
+// The score-view status of each MuseScore song arrives with the room state, not
+// with the setlist, so it gets its own cheap re-render.
+function renderSetlistScoreBadges(state) {
+  const signature = JSON.stringify(state.setlistScores ?? []);
+  if (!isHost || signature === lastScoreBadgeSignature) {
+    return;
+  }
+  lastScoreBadgeSignature = signature;
+  renderSetlist();
+}
+
+function renderScoreBadge(song) {
+  const score = lastState?.setlistScores?.find((candidate) => candidate.songId === song.id);
+  if (!score) {
+    return "";
+  }
+  const label = score.status === "ready" ? "Notes ready" : score.status === "exporting" ? "Exporting notes" : "No notes";
+  const title = score.detail ? ` title="${escapeHtml(score.detail)}"` : "";
+  return `<span class="score-badge ${escapeHtml(score.status)}"${title}>${label}</span>`;
+}
+
 function renderSetlistItem(song, index) {
   const isCurrent = index === currentSongIndex;
   const isEditing = index === editingSongIndex;
@@ -2078,7 +2115,7 @@ function renderSetlistItem(song, index) {
           </button>
         </div>
       </div>
-      <span class="small">${escapeHtml(meta)}</span>
+      <span class="small">${escapeHtml(meta)} ${renderScoreBadge(song)}</span>
       ${notes}
     </div>
   `;

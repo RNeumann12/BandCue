@@ -12,7 +12,10 @@ import {
   type ServerResponse
 } from "node:http";
 import { readFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { readFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import { basename, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket, { WebSocketServer } from "ws";
@@ -29,6 +32,13 @@ import {
   scanMuseScoreCatalog,
   type LocalScoreCatalog
 } from "./musescore-catalog.js";
+import {
+  ScoreExportQueue,
+  exportScore,
+  findMuseScoreExecutable,
+  type ExportedScore,
+  type ScoreExportJob
+} from "./musescore-score-export.js";
 import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
 import { sanitizeStartMeasure } from "../shared/transport.js";
 import {
@@ -112,6 +122,8 @@ interface Args {
   pluginAutostart: boolean;
   /** Start MuseScore (and with it the plugin) once the setlist needs it. */
   warmUp: boolean;
+  /** Export the setlist's scores for the companion page's score view. */
+  scoreExport: boolean;
   globalHotkeys: Record<ExternalHotkeyAction, string | undefined>;
 }
 
@@ -361,6 +373,27 @@ let bridgeStatus: Partial<MuseScoreStatus> & {
 let bridgeLastSeenAt: number | undefined;
 let scoreCatalog: LocalScoreCatalog = scanMuseScoreCatalog([]);
 let lastPublishedCatalogAt: number | undefined;
+let setlistSongs: SetlistSong[] = [];
+let lastPublishedScores: string | undefined;
+let museScoreWarmUpSettled = false;
+const scoreExportQueue = new ScoreExportQueue({
+  exportScore: async (source) => {
+    const executable = await museScoreExecutable();
+    if (!executable) {
+      throw new Error("MuseScore was not found; set BANDCUE_MUSESCORE_EXE to MuseScore4.exe.");
+    }
+    return exportScore(source, { cacheDir: scoreExportCacheDir(), executable });
+  },
+  publish: publishScoreExport,
+  // Never compete with playback or a song change for the CPU, and never run a
+  // MuseScore of our own while the warm-up is still looking for one.
+  isPaused: () => !args.scoreExport || (museScoreWarmUpStarted && !museScoreWarmUpSettled) || !myClientId || !ws ||
+    ws.readyState !== WebSocket.OPEN || openSongInFlight || lastArmed || lastTransportStatus !== "stopped",
+  onChange: () => {
+    void reportMuseScoreStatus();
+  },
+  log: (message) => console.log(message)
+});
 const bridgeCommands = new Map<number, BridgeCommand>();
 let clockTimer: NodeJS.Timeout | undefined;
 let pollTimer: NodeJS.Timeout | undefined;
@@ -534,6 +567,10 @@ async function connect(): Promise<void> {
 
     if (message.type === "serverHello") {
       myClientId = message.clientId;
+      // Possibly a restarted or different coordinator: confirm every export
+      // is (still) in its store, and announce the list afresh.
+      lastPublishedScores = undefined;
+      scoreExportQueue.invalidatePublished();
       return;
     }
 
@@ -561,8 +598,12 @@ async function connect(): Promise<void> {
 
     if (message.type === "roomState") {
       if (!museScoreWarmUpStarted && (message.setlist?.songs ?? []).some((song) => appliesToMuseScore(song))) {
-        void warmUpMuseScore();
+        void warmUpMuseScore().finally(() => {
+          museScoreWarmUpSettled = true;
+          syncScoreExports();
+        });
       }
+      setlistSongs = message.setlist?.songs ?? [];
       const songChanged = message.currentSong?.updatedAt !== currentSongUpdatedAt;
       currentSong = message.currentSong?.song;
       currentSongUpdatedAt = message.currentSong?.updatedAt;
@@ -593,6 +634,7 @@ async function connect(): Promise<void> {
         void reportMuseScoreStatus();
       }
       reconcileTransportFromRoomState(message);
+      syncScoreExports();
       return;
     }
   });
@@ -949,6 +991,20 @@ function pollMuseScore(): void {
   }
 }
 
+/** Like the catalog, the export list only travels when it changed. */
+function scoreReportsIfChanged(): Pick<AdapterStatus, "scores"> {
+  if (!args.scoreExport) {
+    return {};
+  }
+  const scores = scoreExportQueue.reports();
+  const signature = JSON.stringify(scores);
+  if (signature === lastPublishedScores) {
+    return {};
+  }
+  lastPublishedScores = signature;
+  return { scores };
+}
+
 async function reportMuseScoreStatus(): Promise<void> {
   if (statusReportInFlight) {
     statusReportQueued = true;
@@ -997,7 +1053,8 @@ async function reportMuseScoreStatus(): Promise<void> {
       // more; only the shell-per-command fallback needs a count-in big enough to
       // launch PowerShell and prepare an app inside it.
       requiredLeadMs: hasActiveBridge() ? 0 : museScoreDispatchLeadMs(),
-      tempo: currentTempoStatus()
+      tempo: currentTempoStatus(),
+      ...scoreReportsIfChanged()
     });
   } finally {
     statusReportInFlight = false;
@@ -3096,6 +3153,86 @@ function refreshScoreCatalog(): void {
   scoreCatalog = scanMuseScoreCatalog(args.scoreFolders, {
     recursive: args.scoreCatalogRecursive
   });
+  syncScoreExports();
+}
+
+/**
+ * Hands the export queue tonight's MuseScore songs (setlist plus the current
+ * song), each matched to its local score the same way Open Song finds it.
+ */
+function syncScoreExports(): void {
+  // Nothing to export for before the room has told us its setlist.
+  if (!args.scoreExport || !myClientId) {
+    return;
+  }
+  const songs = [...setlistSongs];
+  if (currentSong && !songs.some((song) => song.id === currentSong!.id)) {
+    songs.unshift(currentSong);
+  }
+  const jobs: ScoreExportJob[] = [];
+  for (const song of songs) {
+    if (!appliesToMuseScore(song)) {
+      continue;
+    }
+    const entry = matchedCatalogEntry(matchMuseScoreSong(song, scoreCatalog.entries), scoreCatalog.entries);
+    if (entry) {
+      jobs.push({
+        songId: song.id,
+        source: { absolutePath: entry.absolutePath, relativePath: entry.relativePath, title: entry.title }
+      });
+    }
+  }
+  const currentEntry = matchedCatalogEntry(matchMuseScoreSong(currentSong, scoreCatalog.entries), scoreCatalog.entries);
+  scoreExportQueue.sync(jobs, currentEntry?.relativePath);
+}
+
+let museScoreExecutablePromise: Promise<string | undefined> | undefined;
+
+function museScoreExecutable(): Promise<string | undefined> {
+  museScoreExecutablePromise ??= findMuseScoreExecutable();
+  return museScoreExecutablePromise;
+}
+
+function scoreExportCacheDir(): string {
+  return process.env.BANDCUE_SCORE_CACHE ??
+    join(process.env.LOCALAPPDATA ?? tmpdir(), "BandCue", "score-exports");
+}
+
+const gzipAsync = promisify(gzip);
+
+/**
+ * Uploads an export to the coordinator unless it already has it. Files are sent
+ * gzipped (SVG pages shrink to a fraction) and stored that way; the manifest
+ * goes last, so the coordinator never lists a half-uploaded score.
+ */
+async function publishScoreExport(exported: ExportedScore): Promise<void> {
+  if (!wsUrl || !myClientId) {
+    throw new Error("Not connected to the coordinator.");
+  }
+  const roomEndpoint = new URL(wsUrl);
+  const token = roomEndpoint.searchParams.get("token") ?? "";
+  const base = `${roomEndpoint.protocol === "wss:" ? "https:" : "http:"}//${roomEndpoint.host}/api/scores/${exported.scoreId}`;
+  const fileUrl = (file: string) => `${base}/${encodeURIComponent(file)}?token=${encodeURIComponent(token)}`;
+
+  const existing = await fetch(fileUrl("manifest.json"), { method: "HEAD" });
+  if (existing.ok) {
+    return;
+  }
+  for (const file of exported.files) {
+    const body = await gzipAsync(await readFile(join(exported.dir, file)));
+    const response = await fetch(fileUrl(file), {
+      method: "PUT",
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-encoding": "gzip",
+        "x-bandcue-client-id": myClientId
+      },
+      body
+    });
+    if (!response.ok) {
+      throw new Error(`Uploading ${file} failed: HTTP ${response.status} ${(await response.text()).slice(0, 120)}`);
+    }
+  }
 }
 
 async function waitForBridgeResult(
@@ -3298,6 +3435,7 @@ function parseArgs(raw: string[]): Args {
     pluginSetup: process.env.BANDCUE_MUSESCORE_PLUGIN_SETUP !== "0",
     pluginAutostart: process.env.BANDCUE_MUSESCORE_PLUGIN_AUTOSTART !== "0",
     warmUp: process.env.BANDCUE_MUSESCORE_WARMUP !== "0",
+    scoreExport: process.env.BANDCUE_SCORE_EXPORT !== "0",
     globalHotkeys: {
       "toggle-arm": process.env.BANDCUE_ARM_HOTKEY,
       play: process.env.BANDCUE_PLAY_HOTKEY ?? process.env.BANDCUE_CUE_HOTKEY,
@@ -3368,6 +3506,12 @@ function parseArgs(raw: string[]): Args {
     }
     if (value === "--warm-up") {
       parsed.warmUp = parseBooleanFlag(raw[index + 1], parsed.warmUp);
+    }
+    if (value === "--score-export") {
+      parsed.scoreExport = true;
+    }
+    if (value === "--no-score-export") {
+      parsed.scoreExport = false;
     }
     if (value === "--plugin-autostart") {
       parsed.pluginAutostart = parseBooleanFlag(raw[index + 1], parsed.pluginAutostart);

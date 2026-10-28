@@ -16,6 +16,8 @@ android/keystore.properties
 # Room identity (tokens) and the saved setlist, e.g. .bandcue-room.setlist.json.
 .bandcue-room*.json
 .bandcue-room*.json.tmp
+# Score-view exports uploaded by the MuseScore helper (src/server/score-store.ts).
+.bandcue-scores/
 playwright-report/
 test-results/
 .tmp/

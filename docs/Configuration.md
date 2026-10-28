@@ -48,6 +48,8 @@ The coordinator is configured entirely through environment variables.
 | `BANDCUE_HOST_TOKEN` | random, saved | The host token in the *Host controls* link; the only token that may host. |
 | `BANDCUE_STATE_FILE` | **`.bandcue-room.json`** | Where the tokens and room code are kept. The setlist and current song are saved next to it (`.bandcue-room.setlist.json`) and restored on start. Delete the first to rotate the tokens, the second to start with an empty setlist. |
 | `PUBLIC_HOST` | auto-detected LAN IP | The IP/host advertised in the room URL and QR code. |
+| `BANDCUE_SCORE_DIR` | **`.bandcue-scores/`** next to the state file | Where the score-view exports the MuseScore helper uploads are kept. Safe to delete; the helper uploads again. |
+| `BANDCUE_SCORE_STORE_MB` | **200** | Size budget of that folder. Beyond it, the scores used least recently are dropped. |
 
 The room **code** is always randomly generated (6 hex chars) and can't be pinned.
 
@@ -138,6 +140,14 @@ than executed with adapter authority, so host-only mode and the usual safety che
 | `--score-folder <path>` (repeatable) / `BANDCUE_MUSESCORE_FOLDERS` (`;`-separated) | none | Folders to scan for `.mscz`/`.mscx`. Enables publishing + auto-open. |
 | `--score-recursive <bool>` / `BANDCUE_MUSESCORE_RECURSIVE` | **on** (`0` disables) | Scan folders recursively. |
 | `--close-old-instances <bool>` / `BANDCUE_MUSESCORE_CLOSE_OLD` | **on** (`0` disables) | After auto-open confirms the new MuseScore window, close the previous instances gracefully (WM_CLOSE, never force-killed). |
+
+### Score view export
+
+| Flag / Env var | Default | Purpose |
+| --- | --- | --- |
+| `--score-export` / `--no-score-export` / `BANDCUE_SCORE_EXPORT` | **on** (`0` disables) | Export the setlist's MuseScore songs (SVG pages + timing) and upload them to the coordinator for the companion page's score view. Needs a `--score-folder`. Runs only while the room is stopped and not armed. |
+| `BANDCUE_MUSESCORE_EXE` | found automatically | Path to `MuseScore4.exe` (or `MuseScoreStudio.exe`) for exporting, when it is not in `Program Files` or registered under *App Paths*. |
+| `BANDCUE_SCORE_CACHE` | **`%LOCALAPPDATA%\BandCue\score-exports`** | Local cache of finished exports, one folder per score version. Safe to delete. |
 
 ### Examples
 

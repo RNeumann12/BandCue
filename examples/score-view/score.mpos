@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score>
+  <elements>
+    <element id="0" x="15784.1" y="25370.1" sx="11935.8" sy="17362.2" page="0">
+      </element>
+    <element id="1" x="27719.9" y="25370.1" sx="15717.2" sy="17362.2" page="0">
+      </element>
+    <element id="2" x="43437.1" y="25370.1" sx="17767" sy="17362.2" page="0">
+      </element>
+    <element id="3" x="61204.1" y="25370.1" sx="17588.4" sy="17362.2" page="0">
+      </element>
+    <element id="4" x="78792.5" y="25370.1" sx="15895.8" sy="17362.2" page="0">
+      </element>
+    <element id="5" x="94688.3" y="25370.1" sx="15895.8" sy="17362.2" page="0">
+      </element>
+    <element id="6" x="8503.93" y="66295.3" sx="28819.1" sy="17362.2" page="0">
+      </element>
+    <element id="7" x="37323" y="66295.3" sx="24116.1" sy="17362.2" page="0">
+      </element>
+    <element id="8" x="61439.1" y="66295.3" sx="24116.1" sy="17362.2" page="0">
+      </element>
+    <element id="9" x="85555.2" y="66295.3" sx="25028.9" sy="17362.2" page="0">
+      </element>
+    </elements>
+  <events>
+    <event elid="0" position="0">
+      </event>
+    <event elid="1" position="500">
+      </event>
+    <event elid="2" position="2500">
+      </event>
+    <event elid="3" position="4500">
+      </event>
+    <event elid="2" position="6500">
+      </event>
+    <event elid="3" position="8500">
+      </event>
+    <event elid="4" position="10500">
+      </event>
+    <event elid="5" position="12500">
+      </event>
+    <event elid="6" position="14500">
+      </event>
+    <event elid="7" position="18500">
+      </event>
+    <event elid="4" position="22500">
+      </event>
+    <event elid="5" position="24500">
+      </event>
+    <event elid="8" position="26500">
+      </event>
+    <event elid="9" position="30500">
+      </event>
+    </events>
+  </score>
