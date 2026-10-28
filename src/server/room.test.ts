@@ -1909,6 +1909,24 @@ describe("RoomController Songsterr score imports", () => {
     expect(room.getState(1031).setlist.songs[0]?.scoreImports).toBeUndefined();
   });
 
+  it("merges imports a host sends: a stale copy never drops a newer import, a setlist file brings its own back", () => {
+    const { room, host } = roomWithSong();
+    room.recordScoreImport("zombie", "s900", IMPORT_ID, "2026-10-24", 1010);
+    const stale = { ...song, scoreImports: [{ key: "s900", importId: "d".repeat(32), importedAt: 500 }] };
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [stale], updatedAt: 1020 }, 1020);
+    expect(room.getState(1021).setlist.songs[0]?.scoreImports).toEqual([
+      expect.objectContaining({ key: "s900", importId: IMPORT_ID, importedAt: 1010 })
+    ]);
+
+    // A fresh room (another setlist was loaded meanwhile) takes the file's imports.
+    const fresh = roomWithSong();
+    fresh.room.handleMessage(fresh.host.id, { type: "setlistUpdate", songs: [{ id: "other", title: "Other", sourceType: "musescore", source: "o.mscz" }], updatedAt: 1030 }, 1030);
+    const fromFile = { ...song, scoreImports: [{ key: "s900", importId: IMPORT_ID, importedAt: 1010, scoreId: DRUM_SCORE_ID }] };
+    fresh.room.handleMessage(fresh.host.id, { type: "setlistUpdate", songs: [fromFile], updatedAt: 1040 }, 1040);
+    fresh.room.handleMessage(fresh.host.id, { type: "currentSongUpdate", song: fromFile, index: 1, total: 1, updatedAt: 1041 }, 1041);
+    expect(fresh.room.getState(1042).currentScore?.imports?.[0]).toMatchObject({ status: "ready", scoreId: DRUM_SCORE_ID });
+  });
+
   it("gives a Songsterr-only song a score view once it has an import", () => {
     const { room, host } = roomWithSong();
     const songsterrOnly = { id: "creep", title: "Creep", sourceType: "songsterr" as const, source: "https://www.songsterr.com/a/wsa/radiohead-creep-tab-s44" };

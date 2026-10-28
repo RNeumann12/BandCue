@@ -82,7 +82,8 @@ export function normalizeSong(song) {
     helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(song.helixBeatsPerMeasure),
     helixTargetMeasure: sanitizeHelixTargetMeasure(song.helixTargetMeasure),
     helixOffsetMs: clampHelixOffsetMs(song.helixOffsetMs),
-    notes: song.notes || undefined
+    notes: song.notes || undefined,
+    scoreImports: normalizeScoreImports(song.scoreImports)
   };
 }
 
@@ -115,8 +116,64 @@ export function normalizeStoredSong(song) {
     helixBeatsPerMeasure: sanitizeHelixBeatsPerMeasure(Number(song.helixBeatsPerMeasure)) ?? 4,
     helixTargetMeasure: sanitizeHelixTargetMeasure(Number(song.helixTargetMeasure)) ?? 2,
     helixOffsetMs: clampHelixOffsetMs(Number(song.helixOffsetMs)),
-    notes: typeof song.notes === "string" ? song.notes.trim() : ""
+    notes: typeof song.notes === "string" ? song.notes.trim() : "",
+    scoreImports: normalizeScoreImports(song.scoreImports)
   };
+}
+
+const IMPORT_HASH = /^[a-f0-9]{16,64}$/;
+
+/**
+ * The song's notes imported from Songsterr (recorded by the room). The host
+ * keeps them with the song, in local storage and in exported setlist files, so
+ * loading a setlist again brings its imports back; the room checks them.
+ */
+export function normalizeScoreImports(value) {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const imports = value
+    .filter((entry) => entry && /^s\d{1,12}$/.test(entry.key) && IMPORT_HASH.test(entry.importId))
+    .slice(0, 10)
+    .map((entry) => ({
+      key: entry.key,
+      importId: entry.importId,
+      revision: typeof entry.revision === "string" && entry.revision ? entry.revision.slice(0, 40) : undefined,
+      importedAt: Number.isFinite(entry.importedAt) ? entry.importedAt : 0,
+      scoreId: typeof entry.scoreId === "string" && IMPORT_HASH.test(entry.scoreId) ? entry.scoreId : undefined
+    }));
+  return imports.length ? imports : undefined;
+}
+
+/**
+ * Takes the room's newer Songsterr imports into the host's songs (by song id).
+ * Returns the songs unchanged (same array) when there is nothing new.
+ */
+export function mergeRoomScoreImports(songs, roomSongs) {
+  let changed = false;
+  const merged = songs.map((song) => {
+    const room = roomSongs.find((candidate) => candidate.id === song.id);
+    const imports = mergeScoreImports(song.scoreImports, room?.scoreImports);
+    if (JSON.stringify(imports) === JSON.stringify(song.scoreImports)) {
+      return song;
+    }
+    changed = true;
+    return { ...song, scoreImports: imports };
+  });
+  return changed ? merged : songs;
+}
+
+/** Per Songsterr song, the newer import (and, at a tie, the one that knows its export). */
+export function mergeScoreImports(mine, theirs) {
+  const byKey = new Map();
+  for (const entry of [...(normalizeScoreImports(mine) ?? []), ...(normalizeScoreImports(theirs) ?? [])]) {
+    const known = byKey.get(entry.key);
+    if (!known || entry.importedAt > known.importedAt ||
+        (entry.importedAt === known.importedAt && entry.importId === known.importId && !known.scoreId && entry.scoreId)) {
+      byKey.set(entry.key, entry);
+    }
+  }
+  return byKey.size ? [...byKey.values()] : undefined;
 }
 
 export function sanitizeHelixBpm(value) {

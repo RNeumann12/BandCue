@@ -395,8 +395,11 @@ cache, never the score folders), exports it like a local score and reports it in
 `importKey`/`importId`. The room then writes the export's `scoreId` into the import, so it stays
 served (and persisted with the setlist) without the helper. `ScoreAvailability.imports` lists each
 import with `roles` (`main`/`bass`/`drums`: which of the song's URLs it came from), `status` and
-`scoreId`. Host setlist and current-song updates that omit `scoreImports` keep the song's imports;
-an import whose URL is removed from the song is dropped.
+`scoreId`. Host setlist and current-song updates merge their `scoreImports` with the room's, per Songsterr
+song the newer import (`importedAt`) winning, so a host page with an out-of-date copy never drops
+a newer import and a setlist file brings its imports back; an import whose URL is removed from the
+song is dropped. The host page copies the room's imports into its own setlist, its local storage
+and exported setlist files.
 
 `manifest.json` (`ScoreManifest`) lists the voices, the full score first:
 `{ version: 1, scoreId, title, relativePath, museScoreVersion, exportedAt, parts: [{ id, name, pages, timing, measureCount, durationMs }] }`.

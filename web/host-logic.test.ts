@@ -35,6 +35,7 @@ import {
   restoreCurrentSongIndex,
   normalizeSong,
   normalizeStoredSong,
+  mergeRoomScoreImports,
   parseDurationInput,
   playBlockedReason,
   startBlockers,
@@ -878,5 +879,29 @@ describe("formatting", () => {
       helixTargetMeasure: 2,
       helixOffsetMs: -80
     }, 1, 1)).toBe("1 / 1 - Other - 100% tempo - Helix: 120 BPM, 4/4, 2-measure count-in, -80 ms");
+  });
+});
+
+describe("Songsterr imports in the host's setlist", () => {
+  const A = "a".repeat(32);
+  const B = "b".repeat(32);
+  const song = { id: "zombie", title: "Zombie", sourceType: "songsterr", source: "https://www.songsterr.com/a/wsa/x-tab-s431" };
+
+  it("keeps imports through storage and exports, and drops malformed ones", () => {
+    const imports = [{ key: "s431", importId: A, revision: "2026-10-26", importedAt: 5, scoreId: B }, { key: "nope", importId: A }];
+    const stored = normalizeStoredSong({ ...song, scoreImports: imports });
+    expect(stored?.scoreImports).toEqual([{ key: "s431", importId: A, revision: "2026-10-26", importedAt: 5, scoreId: B }]);
+    expect(normalizeSong(stored)?.scoreImports).toEqual(stored?.scoreImports);
+    expect(normalizeStoredSong(song)?.scoreImports).toBeUndefined();
+  });
+
+  it("takes the room's newer imports, and only those", () => {
+    const mine = [{ ...song, scoreImports: [{ key: "s431", importId: A, importedAt: 5 }] }];
+    const newer = [{ ...song, scoreImports: [{ key: "s431", importId: B, importedAt: 9, scoreId: A }] }];
+    expect(mergeRoomScoreImports(mine, newer)[0]?.scoreImports?.[0]?.importId).toBe(B);
+    const older = [{ ...song, scoreImports: [{ key: "s431", importId: B, importedAt: 1 }] }];
+    expect(mergeRoomScoreImports(mine, older)).toBe(mine);
+    const sameButExported = [{ ...song, scoreImports: [{ key: "s431", importId: A, importedAt: 5, scoreId: B }] }];
+    expect(mergeRoomScoreImports(mine, sameButExported)[0]?.scoreImports?.[0]?.scoreId).toBe(B);
   });
 });

@@ -2,6 +2,7 @@ import {
   createId,
   normalizeSong,
   normalizeStoredSong,
+  mergeRoomScoreImports,
   nextSongIndex,
   previousSongIndex,
   adjustCurrentIndexAfterRemoval,
@@ -1346,7 +1347,7 @@ function addSetlistSong() {
     return;
   }
 
-  setlist.push({ id: createId(), ...fields });
+  setlist.push({ id: createId(), ...fields, scoreImports: undefined });
   persistSetlist();
   publishSetlist();
   elements.setlistForm.reset();
@@ -1404,7 +1405,7 @@ function saveEditedSong() {
   }
 
   const editedIndex = editingSongIndex;
-  setlist[editedIndex] = { id: setlist[editedIndex].id, ...fields };
+  setlist[editedIndex] = { id: setlist[editedIndex].id, ...fields, scoreImports: setlist[editedIndex].scoreImports };
   resetEditState();
   persistSetlist();
   publishSetlist();
@@ -1900,6 +1901,13 @@ function syncWithRoom(state) {
   }
 
   const roomSongs = state.setlist?.songs ?? [];
+  // Imports from Songsterr are recorded by the room; keep this copy (and so
+  // local storage and exported files) up to date with them.
+  const withImports = mergeRoomScoreImports(setlist, roomSongs);
+  if (withImports !== setlist) {
+    setlist = withImports;
+    persistSetlist();
+  }
   if (roomSyncPending) {
     roomSyncPending = false;
     if (setlistUnsent || !roomSongs.length) {

@@ -508,14 +508,16 @@ export class RoomController {
   }
 
   /**
-   * A song from a host's update. Songsterr imports are recorded by the room, so
-   * a host page that does not send them keeps the ones the song already has.
+   * A song from a host's update. Songsterr imports are recorded by the room;
+   * what a host sends (from its copy, or a setlist file) is merged with what
+   * the room knows, the newer import per Songsterr song winning, so a host
+   * whose copy is out of date never drops a newer import.
    */
   private sanitizeHostSong(song: SetlistSong): SetlistSong | undefined {
-    if (song && typeof song === "object" && song.scoreImports === undefined) {
+    if (song && typeof song === "object") {
       const known = this.findSong(String(song.id ?? ""));
       if (known?.scoreImports) {
-        return sanitizeSong({ ...song, scoreImports: known.scoreImports });
+        return sanitizeSong({ ...song, scoreImports: mergeScoreImports(song.scoreImports, known.scoreImports) });
       }
     }
     return sanitizeSong(song);
@@ -1564,6 +1566,24 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
 }
 
 const HASH_PATTERN = /^[a-f0-9]{16,64}$/;
+
+/** Per Songsterr song, the newer import (at a tie, the copy that knows its export). */
+function mergeScoreImports(sent: unknown, known: ScoreImport[]): ScoreImport[] {
+  const byKey = new Map<string, ScoreImport>();
+  const candidates = [...(Array.isArray(sent) ? sent : []), ...known] as Partial<ScoreImport>[];
+  for (const entry of candidates) {
+    if (!entry || typeof entry !== "object" || typeof entry.key !== "string") {
+      continue;
+    }
+    const importedAt = Number.isFinite(entry.importedAt) ? Number(entry.importedAt) : 0;
+    const current = byKey.get(entry.key);
+    if (!current || importedAt > current.importedAt ||
+        (importedAt === current.importedAt && entry.importId === current.importId && !current.scoreId && entry.scoreId)) {
+      byKey.set(entry.key, { ...entry, importedAt } as ScoreImport);
+    }
+  }
+  return [...byKey.values()];
+}
 
 /** Keeps the imports of the song's current Songsterr URLs, one per Songsterr song. */
 function sanitizeScoreImports(value: unknown, song: SetlistSong): ScoreImport[] | undefined {

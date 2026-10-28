@@ -535,7 +535,9 @@ device): the drummer chooses *Songsterr import* once and reads the drum arrangem
 timing, everyone else keeps the hand-edited MuseScore file. A song without a MuseScore file gets a
 score view too once it has an import. After the import nothing goes online again: the coordinator
 keeps the files and serves them with the MuseScore laptop switched off. Import again when the tab
-changes on Songsterr (the newer import replaces the older one).
+changes on Songsterr (the newer import replaces the older one). The imports travel with the
+setlist: *Export* writes them into the setlist file, and loading that file later brings them back
+(as long as the coordinator still has the files; it keeps 200 MB of scores).
 
 **On the iPad:** add the companion page to the home screen (*Share › Add to Home Screen*) to start
 it full screen; the saved link keeps the room token. Set *Settings › Display & Brightness ›
