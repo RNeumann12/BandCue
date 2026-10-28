@@ -109,13 +109,17 @@ export interface ScoreManifest {
   relativePath: string;
   museScoreVersion?: string;
   exportedAt: number;
-  /** The full score first (`id: "score"`), then one entry per instrument part. */
+  /** The full score first (`id: "score"`), then each instrument (guitar and bass as notes and tab). */
   parts: ScoreManifestPart[];
 }
 
 export interface ScoreManifestPart {
   id: string;
   name: string;
+  /** Voices of the same instrument share this (`score` for the full score). */
+  instrument?: string;
+  /** Guitar and bass come twice: as notes and as tab. */
+  notation?: "notes" | "tab";
   /** SVG page files, in page order. */
   pages: string[];
   /** The part's `ScoreTiming` file. */

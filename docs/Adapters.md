@@ -416,10 +416,22 @@ match Open Song uses), the current song first:
 1. Copies the score and, if it was saved in continuous view, rewrites the copy's layout mode to
    pages: a continuous score exports as one page several metres wide, which no tablet can show.
    Nothing else in the file changes (`mscz-page-layout.ts`).
-2. `MuseScore4.exe --score-parts` writes one `.mscz` per instrument part, whether or not the score
-   has parts set up.
+2. Writes one more copy per instrument, in which every other instrument is hidden
+   (`<show>0</show>`). Guitars and basses get two copies, one as notes and one as tab: a staff of
+   the wanted kind that has notes is kept and the other kind hidden (`<isStaffVisible>0`);
+   otherwise the staff with the notes is switched to the other kind (and its clefs to TAB or the
+   octave clef), and MuseScore works out frets from pitches or pitches from frets. Every other
+   instrument reads from notes, even when an import stored it as tab (Guitar Pro imports often
+   put vocals on a tab staff). An instrument the score hides still gets its copy; one without a
+   single note does not. Multimeasure rests are turned off.
 3. One `MuseScore4.exe -j job.json` run exports SVG pages plus `mpos` (measure positions) and
-   `spos` (note/rest segment positions) for the full score and every part.
+   `spos` (note/rest segment positions) for the full score and every copy.
+
+Why copies of the full score instead of MuseScore's parts: `MuseScore4.exe --score-parts` (which
+generates parts on the command line) produced parts with doubled measures and tempo marks for
+scores that have no parts saved, so their timing no longer matched what MuseScore plays (Zombie's
+drum part was 5 measures longer than the score). A copy with one instrument showing has the
+score's measures and timing by construction.
 4. Turns `mpos`/`spos` into `<voice>.timing.json` (see [Protocol.md](Protocol.md#score-view-files-http))
    and writes `manifest.json`, into a cache keyed by a hash of the score's bytes.
 5. Uploads the files gzipped to `/api/scores/<scoreId>/…`, manifest last, and reports the song as

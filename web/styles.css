@@ -1158,6 +1158,30 @@ body[data-transport="running"] .countdown {
   padding: 7px 10px;
 }
 
+/* Notes | Tab: one segmented control. */
+.score-notation {
+  display: flex;
+}
+
+.score-notation .compact {
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.score-notation .compact:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.score-notation .compact:last-child {
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+}
+
+.score-notation .compact[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+
 .score-settings {
   position: relative;
 }
@@ -1357,6 +1381,7 @@ body[data-transport="running"] .countdown {
 .score-view.is-collapsed .score-stage,
 .score-view.is-collapsed .score-part,
 .score-view.is-collapsed .score-settings,
+.score-view.is-collapsed .score-notation,
 .score-view.is-collapsed #scoreFocusButton,
 .score-view.is-collapsed #scoreFullscreenButton {
   display: none;

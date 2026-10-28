@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { forcePageLayout } from "./mscz-page-layout.js";
+import { entryContent, forcePageLayout, readZipEntries, rewriteZipText } from "./mscz-page-layout.js";
 import type {
   ScoreExportReport,
   ScoreManifest,
@@ -23,7 +23,7 @@ import type {
 // file the browser can use without parsing XML. See docs/Adapters.md.
 
 /** Bump when the export output changes shape, so cached exports are redone. */
-export const SCORE_EXPORTER_VERSION = 1;
+export const SCORE_EXPORTER_VERSION = 2;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;
@@ -226,46 +226,213 @@ export function scoreIdFor(content: Buffer): string {
     .slice(0, 32);
 }
 
-/** File stem of a voice's output files: `score` for the full score, `part-1`, `part-2`, … */
-export function voiceStem(partIndex: number | undefined): string {
-  return partIndex === undefined ? "score" : `part-${partIndex + 1}`;
+export type StaffKind = "pitched" | "tablature" | "percussion";
+
+/** An instrument of the score, as its .mscx describes it. */
+export interface ScoreInstrument {
+  /** The `<Part id>`. */
+  id: string;
+  name: string;
+  /** Global staff numbers (the `<Staff id>` of the music), with their kind and note count. */
+  staves: { number: number; kind: StaffKind; notes: number }[];
+  /** Guitar, bass and friends: offered as notes and as tab. */
+  fretted: boolean;
+  strings: number;
+  /** Hidden in the full score; its own voice shows it anyway. */
+  hidden: boolean;
+  /** Named like a drum kit but not on a percussion staff (some Guitar Pro imports): left as it is. */
+  drumsByName: boolean;
 }
 
 /**
- * The `-j` conversion job: SVG pages, measure and segment positions for the full
- * score and for every part. MuseScore numbers the SVG pages itself
- * (`score-1.svg`, `score-2.svg`, …).
+ * Reads the instruments of a score. MuseScore numbers staves by their order
+ * across the `<Part>`s; the music of staff N follows as `<Staff id="N">`.
  */
-export function buildExportJob(partCount: number): { in: string; out: string[] }[] {
-  const voices = [undefined, ...Array.from({ length: partCount }, (_, index) => index)];
-  return voices.map((partIndex) => {
-    const stem = voiceStem(partIndex);
-    return { in: `${stem}.mscz`, out: [`${stem}.svg`, `${stem}.mpos`, `${stem}.spos`] };
+export function readScoreInstruments(xml: string): ScoreInstrument[] {
+  const music = xml.slice(xml.lastIndexOf("</Part>"));
+  const notesOnStaff = (number: number) => {
+    const start = music.indexOf(`<Staff id="${number}">`);
+    if (start < 0) {
+      return 0;
+    }
+    const next = music.indexOf("<Staff id=", start + 10);
+    return (music.slice(start, next < 0 ? undefined : next).match(/<Note>/g) ?? []).length;
+  };
+
+  let staffNumber = 0;
+  return [...xml.matchAll(/<Part id="([^"]+)">([\s\S]*?)<\/Part>/g)].map((match) => {
+    const body = match[2] ?? "";
+    const staves = [...body.matchAll(/<Staff>([\s\S]*?)<\/Staff>/g)].map((staff) => {
+      staffNumber += 1;
+      const group = /<StaffType group="([a-z]+)"/.exec(staff[1] ?? "")?.[1];
+      const kind: StaffKind = group === "tablature" || group === "percussion" ? group : "pitched";
+      return { number: staffNumber, kind, notes: notesOnStaff(staffNumber) };
+    });
+    const instrumentId = /<instrumentId>([^<]*)<\/instrumentId>/.exec(body)?.[1] ?? "";
+    const instrumentTag = /<Instrument id="([^"]*)"/.exec(body)?.[1] ?? "";
+    const strings = (/<StringData>([\s\S]*?)<\/StringData>/.exec(body)?.[1]?.match(/<string>/g) ?? []).length;
+    const name = decodeXml(/<trackName>([^<]+)<\/trackName>/.exec(body)?.[1] ??
+      /<longName>([^<]+)<\/longName>/.exec(body)?.[1] ?? `Instrument ${match[1]}`).trim().slice(0, 80);
+    const percussion = staves.some((staff) => staff.kind === "percussion");
+    const drumsByName = !percussion && /drum|schlag|percussion/i.test(name);
+    // Imports do not always say what an instrument is: a "Guitar" can arrive as
+    // a piano on a tab staff. A fretted instrument is one that says so, or one
+    // named like it that has strings or a tab staff.
+    const looksFretted = /^pluck\./.test(instrumentId) ||
+      /guitar|gitarre|bass|ukulele|banjo|mandolin/i.test(`${instrumentTag} ${name}`);
+    return {
+      id: match[1]!,
+      name,
+      staves,
+      fretted: !percussion && !drumsByName && looksFretted &&
+        (strings > 0 || staves.some((staff) => staff.kind === "tablature")),
+      strings: strings || (/bass/i.test(`${instrumentId} ${name}`) ? 4 : 6),
+      hidden: /^\s*<show>0<\/show>/m.test(body),
+      drumsByName
+    };
   });
 }
 
-/** Parses `--score-parts` output: one base64 .mscz per instrument part. */
-export function parseScorePartsOutput(stdout: string): { name: string; mscz: Buffer }[] {
-  const start = stdout.indexOf("{");
-  if (start < 0) {
-    return [];
+export interface VoicePlan {
+  /** File stem: `score`, `part-<n>`, or `part-<n>-notes` / `part-<n>-tab`. */
+  stem: string;
+  name: string;
+  /** Voices of one instrument share this; the full score's is `score`. */
+  instrument: string;
+  notation?: "notes" | "tab";
+  /** Turns the full score's .mscx into this voice's. */
+  transform: (xml: string) => string;
+}
+
+/**
+ * What to export: the full score, then every visible instrument on its own --
+ * guitars and basses twice, as notes and as tab; everything else as notes
+ * (Guitar Pro imports often keep even vocals on a tab staff).
+ *
+ * Each voice is the full score with every other instrument hidden, not a
+ * MuseScore "part": parts that MuseScore generates from the command line
+ * (`--score-parts`) came out with doubled measures and different tempos for
+ * some scores, so their timing no longer matched what MuseScore plays.
+ */
+export function planVoices(instruments: ScoreInstrument[]): VoicePlan[] {
+  const plans: VoicePlan[] = [{ stem: "score", name: "Full score", instrument: "score", transform: (xml) => xml }];
+  // An instrument without a single note (an empty drum staff, say) is no voice.
+  const playing = instruments.filter((instrument) => instrument.staves.some((staff) => staff.notes > 0));
+  if (playing.length < 2 && !playing.some((instrument) => instrument.fretted)) {
+    return plans;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout.slice(start, stdout.lastIndexOf("}") + 1));
-  } catch {
-    return [];
+  for (const instrument of playing) {
+    const stem = `part-${instrument.id}`;
+    const isDrums = instrument.drumsByName || instrument.staves.every((staff) => staff.kind === "percussion");
+    const notations: ("notes" | "tab" | undefined)[] = instrument.fretted ? ["notes", "tab"] : [isDrums ? undefined : "notes"];
+    for (const notation of notations) {
+      plans.push({
+        stem: instrument.fretted ? `${stem}-${notation}` : stem,
+        name: instrument.name,
+        instrument: stem,
+        notation: instrument.fretted ? notation : undefined,
+        transform: (xml) => soloInstrument(xml, instrument, notation)
+      });
+    }
   }
-  const record = parsed as { parts?: unknown; partsBin?: unknown };
-  if (!Array.isArray(record.parts) || !Array.isArray(record.partsBin)) {
-    return [];
-  }
-  return record.parts.flatMap((name, index) => {
-    const data = record.partsBin as unknown[];
-    return typeof name === "string" && typeof data[index] === "string"
-      ? [{ name: name.trim().slice(0, 80) || `Part ${index + 1}`, mscz: Buffer.from(data[index] as string, "base64") }]
-      : [];
+  return plans;
+}
+
+/** The score with only `instrument` shown, its staves set to `notation`. */
+export function soloInstrument(xml: string, instrument: ScoreInstrument, notation: "notes" | "tab" | undefined): string {
+  const target: StaffKind = notation === "tab" ? "tablature" : "pitched";
+  const keep = notation ? stavesFor(instrument, target) : undefined;
+  const converted = instrument.staves.filter((_, index) => keep?.get(index) === "convert").map((staff) => staff.number);
+  const soloed = xml.replace(/<Part id="([^"]+)">([\s\S]*?)<\/Part>/g, (part, id: string) => {
+    if (id !== instrument.id) {
+      return /<show>0<\/show>/.test(part) ? part : part.replace(/<Part id="[^"]+">/, (open) => `${open}\n      <show>0</show>`);
+    }
+    // Hidden in the full score, but this voice is the instrument itself.
+    const shown = part.replace(/\n?[ \t]*<show>0<\/show>/, "");
+    if (!keep) {
+      return shown;
+    }
+    let index = 0;
+    return shown.replace(/<Staff>([\s\S]*?)<\/Staff>/g, (staff) => {
+      const action = keep.get(index);
+      index += 1;
+      if (action === "show") {
+        return staff;
+      }
+      if (action === "convert") {
+        return convertStaff(staff, notation === "tab" ? "tablature" : "pitched", instrument.strings);
+      }
+      return staff.replace("<Staff>", "<Staff>\n        <isStaffVisible>0</isStaffVisible>");
+    });
   });
+  if (!converted.length) {
+    return soloed;
+  }
+  // Clefs live in the music, not in the staff definition: a converted staff
+  // gets the clef of its new kind -- TAB, or the octave clef guitars and
+  // basses are written in.
+  const clef = target === "tablature" ? "TAB" : /bass/i.test(instrument.name) ? "F8_vb" : "G8_vb";
+  const musicStart = soloed.lastIndexOf("</Part>");
+  const music = soloed.slice(musicStart).replace(/<Staff id="(\d+)">[\s\S]*?(?=<Staff id="|<\/Score>)/g, (staff, number: string) =>
+    converted.includes(Number(number))
+      ? staff.replace(/<(concertClefType|transposingClefType)>([^<]*)<\/\1>/g, (tag, name: string, type: string) =>
+        target === "tablature" || /^TAB/.test(type) ? `<${name}>${clef}</${name}>` : tag)
+      : staff);
+  return soloed.slice(0, musicStart) + music;
+}
+
+/**
+ * Per staff of the instrument (by position): show it, convert it, or hide it.
+ * A staff of the wanted kind that has notes is shown as it is; otherwise the
+ * staff with the notes is converted (MuseScore works out frets from pitches and
+ * pitches from frets). Everything else -- the other kind, empty staves -- hides.
+ */
+function stavesFor(instrument: ScoreInstrument, wanted: StaffKind): Map<number, "show" | "convert" | "hide"> {
+  const actions = new Map<number, "show" | "convert" | "hide">();
+  const ready = instrument.staves.filter((staff) => staff.kind === wanted && staff.notes > 0);
+  if (ready.length) {
+    instrument.staves.forEach((staff, index) => actions.set(index, ready.includes(staff) ? "show" : "hide"));
+    return actions;
+  }
+  const withNotes = instrument.staves.filter((staff) => staff.kind !== "percussion" && staff.notes > 0);
+  const source = withNotes.length ? withNotes : instrument.staves.filter((staff) => staff.kind !== "percussion").slice(0, 1);
+  instrument.staves.forEach((staff, index) => actions.set(index, source.includes(staff)
+    ? staff.kind === wanted ? "show" : "convert"
+    : "hide"));
+  return actions;
+}
+
+function convertStaff(staff: string, kind: StaffKind, strings: number): string {
+  const staffType = kind === "tablature"
+    ? `<StaffType group="tablature">\n          <name>tab${strings}StrCommon</name>\n          <lines>${strings}</lines>\n          </StaffType>`
+    : "<StaffType group=\"pitched\">\n          <name>stdNormal</name>\n          </StaffType>";
+  const converted = /<StaffType\b[\s\S]*?<\/StaffType>/.test(staff)
+    ? staff.replace(/<StaffType\b[\s\S]*?<\/StaffType>/, staffType)
+    : staff.replace("<Staff>", `<Staff>\n        ${staffType}`);
+  // A tab clef has no place on a staff of notes, and the reverse.
+  return converted.replace(/\s*<defaultClef>[^<]*<\/defaultClef>/, "");
+}
+
+/** Multimeasure rests would fold measures together that the cursor counts one by one. */
+export function withoutMultimeasureRests(text: string): string {
+  return text.replace(/<createMultiMeasureRests>1<\/createMultiMeasureRests>/g, "<createMultiMeasureRests>0</createMultiMeasureRests>");
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", "\"")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+/**
+ * The `-j` conversion job: SVG pages, measure and segment positions for every
+ * voice. MuseScore numbers the SVG pages itself (`score-1.svg`, `score-2.svg`, …).
+ */
+export function buildExportJob(stems: string[]): { in: string; out: string[] }[] {
+  return stems.map((stem) => ({ in: `${stem}.mscz`, out: [`${stem}.svg`, `${stem}.mpos`, `${stem}.spos`] }));
 }
 
 export interface MuseScoreRunResult {
@@ -388,20 +555,19 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
 
   const work = await mkdtemp(join(tmpdir(), "bandcue-export-"));
   try {
-    await writeFile(join(work, "score.mscz"), forcePageLayout(content) ?? content);
-
-    const partsRun = await run(options.executable, ["--score-parts", "score.mscz"], {
-      cwd: work,
-      timeoutMs: MUSESCORE_RUN_TIMEOUT_MS
-    });
-    // A one-instrument score's only part is the score itself.
-    const parts = parseScorePartsOutput(partsRun.stdout);
-    const exportedParts = parts.length > 1 ? parts : [];
-    for (const [index, part] of exportedParts.entries()) {
-      await writeFile(join(work, `${voiceStem(index)}.mscz`), part.mscz);
+    const paged = forcePageLayout(content) ?? content;
+    const scoreEntry = readZipEntries(paged).find((entry) => isScoreFile(entry.name));
+    if (!scoreEntry) {
+      throw new Error("No score inside the .mscz.");
+    }
+    const voices = planVoices(readScoreInstruments(entryContent(scoreEntry).toString("utf8")));
+    for (const voice of voices) {
+      const copy = rewriteZipText(paged, (name) => isScoreFile(name) || name === "score_style.mss",
+        (text) => withoutMultimeasureRests(voice.stem === "score" ? text : voice.transform(text)));
+      await writeFile(join(work, `${voice.stem}.mscz`), copy ?? paged);
     }
 
-    await writeFile(join(work, "job.json"), JSON.stringify(buildExportJob(exportedParts.length)));
+    await writeFile(join(work, "job.json"), JSON.stringify(buildExportJob(voices.map((voice) => voice.stem))));
     const jobRun = await run(options.executable, ["-j", "job.json"], { cwd: work, timeoutMs: MUSESCORE_RUN_TIMEOUT_MS });
     if (!existsSync(join(work, "score.mpos"))) {
       throw new Error(`MuseScore did not export the score (exit ${jobRun.code}): ${lastLine(jobRun.stderr)}`);
@@ -417,13 +583,10 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
     await mkdir(staging, { recursive: true });
     const workFiles = await readdir(work);
     const manifestParts: ScoreManifestPart[] = [];
-    const voices = [{ index: undefined as number | undefined, name: "Full score" },
-      ...exportedParts.map((part, index) => ({ index: index as number | undefined, name: part.name }))];
     for (const voice of voices) {
-      const stem = voiceStem(voice.index);
-      const part = await collectVoice(work, workFiles, staging, stem, voice.name);
+      const part = await collectVoice(work, workFiles, staging, voice.stem, voice.name);
       if (part) {
-        manifestParts.push(part);
+        manifestParts.push({ ...part, instrument: voice.instrument, notation: voice.notation });
       }
     }
     if (!manifestParts.length) {
@@ -495,6 +658,10 @@ async function collectVoice(
     measureCount: timing.measures.length,
     durationMs: timing.durationMs
   };
+}
+
+function isScoreFile(name: string): boolean {
+  return /\.mscx$/i.test(name) && !name.includes("/");
 }
 
 function lastLine(text: string): string {

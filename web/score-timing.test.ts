@@ -7,6 +7,8 @@ import {
   choosePart,
   cursorAt,
   findPassIndex,
+  instrumentsOf,
+  partInNotation,
   followScrollTop,
   partFamily,
   passNumberOf,
@@ -154,6 +156,29 @@ describe("score layout helpers", () => {
     expect(choosePart(parts, "Vocals")).toBe("score");
     expect(choosePart([], "Drums")).toBeUndefined();
     expect(partFamily("Bass Drum")).toBe("drums");
+  });
+
+  it("offers guitar and bass as notes or tab, and keeps the player's choice", () => {
+    const parts = [
+      { id: "score", name: "Full score", instrument: "score" },
+      { id: "part-1", name: "Vocals", instrument: "part-1" },
+      { id: "part-2-notes", name: "Lead Guitar", instrument: "part-2", notation: "notes" as const },
+      { id: "part-2-tab", name: "Lead Guitar", instrument: "part-2", notation: "tab" as const },
+      { id: "part-3", name: "Drums", instrument: "part-3" }
+    ];
+    expect(instrumentsOf(parts)).toEqual([
+      { key: "score", name: "Full score", notations: [] },
+      { key: "part-1", name: "Vocals", notations: [] },
+      { key: "part-2", name: "Lead Guitar", notations: ["notes", "tab"] },
+      { key: "part-3", name: "Drums", notations: [] }
+    ]);
+    expect(choosePart(parts, "Lead Guitar")).toBe("part-2-tab");
+    expect(choosePart(parts, "Lead Guitar", "notes")).toBe("part-2-notes");
+    expect(choosePart(parts, "Rhythm Guitar", "notes")).toBe("part-2-notes");
+    expect(choosePart(parts, "Drums", "notes")).toBe("part-3");
+    expect(partInNotation(parts, "part-2", "tab")).toBe("part-2-tab");
+    expect(partInNotation(parts, "part-3", "tab")).toBe("part-3");
+    expect(partInNotation(parts, "nope", "tab")).toBeUndefined();
   });
 
   it("shows the next page beside the current one, turning the left page first", () => {

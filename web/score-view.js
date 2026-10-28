@@ -16,6 +16,8 @@
 import {
   choosePart,
   cursorAt,
+  instrumentsOf,
+  partInNotation,
   followScrollTop,
   resolvePlayhead,
   songTimeMs,
@@ -43,6 +45,8 @@ const CURSOR_OVERHANG = 70;
 const DEFAULT_SETTINGS = {
   /** Name of the part this player reads, carried from song to song. */
   part: "",
+  /** @type {"notes" | "tab"} how a guitarist or bassist reads */
+  notation: "tab",
   zoom: 1,
   /** "scroll" (one long column of pages) or "pages" (page turns). */
   layout: "scroll",
@@ -70,6 +74,9 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     title: /** @type {HTMLElement} */ (root.querySelector("#scoreTitle")),
     position: /** @type {HTMLElement} */ (root.querySelector("#scorePosition")),
     partSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scorePartSelect")),
+    notation: /** @type {HTMLElement} */ (root.querySelector("#scoreNotation")),
+    notesButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreNotesButton")),
+    tabButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreTabButton")),
     focusButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreFocusButton")),
     fullscreenButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreFullscreenButton")),
     motionSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scoreMotionSelect")),
@@ -204,7 +211,7 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     showMessage(loaded ? "" : "Loading the notes…");
     try {
       const manifest = await fetchManifest(scoreId);
-      const partId = choosePart(manifest.parts, settings.part) ?? manifest.parts[0]?.id;
+      const partId = choosePart(manifest.parts, settings.part, settings.notation) ?? manifest.parts[0]?.id;
       const part = manifest.parts.find((candidate) => candidate.id === partId);
       if (!part) {
         throw new Error("The export lists no parts.");
@@ -256,14 +263,22 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     });
     loaded = { scoreId, manifest, partId, timing, systems: systemsOf(timing), pages };
 
-    el.partSelect.replaceChildren(...manifest.parts.map((candidate) => {
+    const instruments = instrumentsOf(manifest.parts);
+    const current = manifest.parts.find((candidate) => candidate.id === partId);
+    const currentKey = current?.instrument ?? partId;
+    el.partSelect.replaceChildren(...instruments.map((instrument) => {
       const option = document.createElement("option");
-      option.value = candidate.id;
-      option.textContent = candidate.name;
-      option.selected = candidate.id === partId;
+      option.value = instrument.key;
+      option.textContent = instrument.name;
+      option.selected = instrument.key === currentKey;
       return option;
     }));
-    el.partSelect.disabled = manifest.parts.length < 2;
+    el.partSelect.disabled = instruments.length < 2;
+    // Notes or tab: only for an instrument that comes both ways.
+    const notations = instruments.find((instrument) => instrument.key === currentKey)?.notations ?? [];
+    el.notation.hidden = notations.length < 2;
+    el.notesButton.setAttribute("aria-pressed", String(current?.notation === "notes"));
+    el.tabButton.setAttribute("aria-pressed", String(current?.notation === "tab"));
     showMessage("");
     lastSystem = -1;
     manualPage = undefined;
@@ -598,16 +613,29 @@ export function createScoreView({ root, token, isHost, roomNow }) {
       if (!loaded) {
         return;
       }
-      const part = loaded.manifest.parts.find((candidate) => candidate.id === el.partSelect.value);
+      const partId = partInNotation(loaded.manifest.parts, el.partSelect.value, settings.notation);
+      const part = loaded.manifest.parts.find((candidate) => candidate.id === partId);
       if (!part) {
         return;
       }
       settings.part = part.id === "score" ? "" : part.name;
       saveSettings(settings);
-      const { scoreId, manifest } = loaded;
-      void fetchTiming(scoreId, part.timing).then((timing) => showScore(scoreId, manifest, part.id, timing))
-        .catch((error) => showMessage(`Could not load ${part.name}: ${error instanceof Error ? error.message : error}`));
+      switchPart(part.id);
     });
+    for (const [button, notation] of /** @type {const} */ ([[el.notesButton, "notes"], [el.tabButton, "tab"]])) {
+      button.addEventListener("click", () => {
+        if (!loaded) {
+          return;
+        }
+        settings.notation = notation;
+        saveSettings(settings);
+        const current = loaded.manifest.parts.find((candidate) => candidate.id === loaded?.partId);
+        const partId = partInNotation(loaded.manifest.parts, current?.instrument ?? loaded.partId, notation);
+        if (partId && partId !== loaded.partId) {
+          switchPart(partId);
+        }
+      });
+    }
     el.focusButton.addEventListener("click", () => setFocus(!document.body.classList.contains("score-focus")));
     el.fullscreenButton.addEventListener("click", () => void toggleFullscreen());
     document.addEventListener("fullscreenchange", renderFullscreenButton);
@@ -699,6 +727,20 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     });
   }
 
+  /** @param {string} partId */
+  function switchPart(partId) {
+    if (!loaded) {
+      return;
+    }
+    const { scoreId, manifest } = loaded;
+    const part = manifest.parts.find((candidate) => candidate.id === partId);
+    if (!part) {
+      return;
+    }
+    void fetchTiming(scoreId, part.timing).then((timing) => showScore(scoreId, manifest, part.id, timing))
+      .catch((error) => showMessage(`Could not load ${part.name}: ${error instanceof Error ? error.message : error}`));
+  }
+
   /** @param {number} zoom */
   function setZoom(zoom) {
     settings.zoom = Math.round(Math.max(0.5, Math.min(2, zoom)) * 10) / 10;
@@ -722,14 +764,14 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     const upcoming = index >= 0
       ? songs.slice(index + 1).map((song) => ready.find((score) => score.songId === song.id)).find(Boolean)
       : undefined;
-    const key = upcoming?.scoreId ? `${upcoming.scoreId}:${settings.part}` : "";
+    const key = upcoming?.scoreId ? `${upcoming.scoreId}:${settings.part}:${settings.notation}` : "";
     if (!upcoming?.scoreId || key === preloadedKey) {
       return;
     }
     preloadedKey = key;
     const scoreId = upcoming.scoreId;
     void fetchManifest(scoreId).then(async (manifest) => {
-      const part = manifest.parts.find((candidate) => candidate.id === choosePart(manifest.parts, settings.part));
+      const part = manifest.parts.find((candidate) => candidate.id === choosePart(manifest.parts, settings.part, settings.notation));
       if (!part) {
         return;
       }
@@ -821,6 +863,7 @@ function loadSettings(isHost) {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
     if (saved && typeof saved === "object") {
       if (typeof saved.part === "string") settings.part = saved.part.slice(0, 80);
+      if (saved.notation === "notes" || saved.notation === "tab") settings.notation = saved.notation;
       if (Number.isFinite(saved.zoom)) settings.zoom = Math.max(0.5, Math.min(2, saved.zoom));
       if (saved.layout === "scroll" || saved.layout === "pages") settings.layout = saved.layout;
       if (saved.readingLine in READING_LINES) settings.readingLine = saved.readingLine;
@@ -849,6 +892,7 @@ function saveSettings(settings) {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       ...saved,
       part: settings.part,
+      notation: settings.notation,
       zoom: settings.zoom,
       layout: settings.layout,
       readingLine: settings.readingLine,

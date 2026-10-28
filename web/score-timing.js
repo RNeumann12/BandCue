@@ -257,27 +257,60 @@ export function partFamily(name) {
  * Picks the part to show: the one the player chose by name, else one of the
  * same instrument family, else the full score.
  *
- * @param {Pick<ScoreManifestPart, "id" | "name">[]} parts
+ * Guitar and bass come as notes and as tab; `notation` picks between them.
+ *
+ * @param {Pick<ScoreManifestPart, "id" | "name" | "instrument" | "notation">[]} parts
  * @param {string | undefined} preferredName
+ * @param {"notes" | "tab"} [notation]
  * @returns {string | undefined} part id
  */
-export function choosePart(parts, preferredName) {
+export function choosePart(parts, preferredName, notation = "tab") {
   if (!parts.length) {
     return undefined;
   }
   const wanted = String(preferredName ?? "").trim().toLowerCase();
+  let pick = parts.find((part) => part.id === "score") ?? parts[0];
   if (wanted) {
     const exact = parts.find((part) => part.name.trim().toLowerCase() === wanted);
-    if (exact) {
-      return exact.id;
-    }
     const family = partFamily(wanted);
     const sameFamily = family ? parts.find((part) => part.id !== "score" && partFamily(part.name) === family) : undefined;
-    if (sameFamily) {
-      return sameFamily.id;
+    pick = exact ?? sameFamily ?? pick;
+  }
+  return partInNotation(parts, pick.instrument ?? pick.id, notation) ?? pick.id;
+}
+
+/**
+ * The instruments a score offers, in order, each with the notations it comes in.
+ *
+ * @param {Pick<ScoreManifestPart, "id" | "name" | "instrument" | "notation">[]} parts
+ * @returns {{ key: string, name: string, notations: ("notes" | "tab")[] }[]}
+ */
+export function instrumentsOf(parts) {
+  /** @type {{ key: string, name: string, notations: ("notes" | "tab")[] }[]} */
+  const instruments = [];
+  for (const part of parts) {
+    const key = part.instrument ?? part.id;
+    let instrument = instruments.find((candidate) => candidate.key === key);
+    if (!instrument) {
+      instrument = { key, name: part.name, notations: [] };
+      instruments.push(instrument);
+    }
+    if (part.notation) {
+      instrument.notations.push(part.notation);
     }
   }
-  return (parts.find((part) => part.id === "score") ?? parts[0]).id;
+  return instruments;
+}
+
+/**
+ * @param {Pick<ScoreManifestPart, "id" | "instrument" | "notation">[]} parts
+ * @param {string} instrument
+ * @param {"notes" | "tab"} notation
+ * @returns {string | undefined}
+ */
+export function partInNotation(parts, instrument, notation) {
+  const voices = parts.filter((part) => (part.instrument ?? part.id) === instrument);
+  return (voices.find((part) => part.notation === notation) ?? voices[0])?.id;
 }
 
 /**

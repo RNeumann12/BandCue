@@ -87,6 +87,18 @@ test("a companion reads along with the room's cursor", async ({ page, request })
   await expect(page.locator("#scorePosition")).toHaveText("Bar 3 / 10");
   await expect(page.locator(".score-page img").first()).toHaveJSProperty("complete", true);
   await expect(page.locator("#scorePartSelect option")).toHaveText(["Full score", "Guitar", "Drums"]);
+  // Guitar comes as notes and as tab; the player switches, the drums have no switch.
+  await expect(page.locator("#scoreNotation")).toBeHidden();
+  await page.selectOption("#scorePartSelect", { label: "Guitar" });
+  await expect(page.locator("#scoreNotation")).toBeVisible();
+  await expect(page.locator("#scoreTabButton")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".score-page img").first()).toHaveAttribute("src", /part-1-tab-1\.svg/);
+  await page.click("#scoreNotesButton");
+  await expect(page.locator("#scoreNotesButton")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".score-page img").first()).toHaveAttribute("src", /part-1-notes-1\.svg/);
+  await page.selectOption("#scorePartSelect", { label: "Drums" });
+  await expect(page.locator("#scoreNotation")).toBeHidden();
+  await page.selectOption("#scorePartSelect", { label: "Full score" });
 
   // A companion opens on the notes, filling the screen; the room view is one tap away.
   await expect(page.locator("body")).toHaveClass(/score-focus/);

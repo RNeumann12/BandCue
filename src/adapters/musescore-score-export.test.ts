@@ -9,7 +9,9 @@ import {
   buildScoreTiming,
   exportFiles,
   parsePositionsXml,
-  parseScorePartsOutput,
+  planVoices,
+  readScoreInstruments,
+  withoutMultimeasureRests,
   parseSvgPageSize,
   readCachedExport,
   scoreIdFor,
@@ -96,26 +98,145 @@ describe("buildScoreTiming", () => {
   });
 });
 
-describe("export job and parts", () => {
-  it("exports the full score and every part as SVG, mpos and spos", () => {
-    expect(buildExportJob(2)).toEqual([
-      { in: "score.mscz", out: ["score.svg", "score.mpos", "score.spos"] },
-      { in: "part-1.mscz", out: ["part-1.svg", "part-1.mpos", "part-1.spos"] },
-      { in: "part-2.mscz", out: ["part-2.svg", "part-2.mpos", "part-2.spos"] }
+// A Guitar Pro import in miniature: vocals kept on a tab staff, a guitar on
+// tab only, a bass with a staff of notes and an empty tab staff, a drum kit
+// that the score hides, and an empty second kit.
+const IMPORTED = `<museScore><Score>
+    <Part id="1">
+      <Staff>
+        <StaffType group="tablature"><name>tab6StrFull</name></StaffType>
+        </Staff>
+      <trackName>Lead Vocals</trackName>
+      <Instrument id="voice"><instrumentId>voice.vocals</instrumentId><StringData><string>40</string></StringData></Instrument>
+      </Part>
+    <Part id="2">
+      <Staff>
+        <StaffType group="tablature"><name>tab6StrFull</name></StaffType>
+        <defaultClef>TAB</defaultClef>
+        </Staff>
+      <trackName>Rhythm Guitar &amp; Lead</trackName>
+      <Instrument id="electric-guitar"><instrumentId>pluck.guitar.electric</instrumentId>
+        <StringData><frets>24</frets><string>40</string><string>45</string><string>50</string><string>55</string><string>59</string><string>64</string></StringData></Instrument>
+      </Part>
+    <Part id="3">
+      <Staff>
+        <StaffType group="pitched"><name>stdNormal</name></StaffType>
+        </Staff>
+      <Staff>
+        <StaffType group="tablature"><name>tab4StrCommon</name></StaffType>
+        </Staff>
+      <trackName>Bass</trackName>
+      <Instrument id="bass"><instrumentId>pluck.bass</instrumentId>
+        <StringData><string>28</string><string>33</string><string>38</string><string>43</string></StringData></Instrument>
+      </Part>
+    <Part id="4">
+      <show>0</show>
+      <Staff>
+        <StaffType group="percussion"><name>perc5Line</name></StaffType>
+        </Staff>
+      <trackName>Drums</trackName>
+      <Instrument id="drumset"><instrumentId>drum.group.set</instrumentId></Instrument>
+      </Part>
+    <Part id="5">
+      <Staff>
+        <StaffType group="percussion"><name>perc5Line</name></StaffType>
+        </Staff>
+      <trackName>Spare kit</trackName>
+      <Instrument id="drumset"><instrumentId>drum.group.set</instrumentId></Instrument>
+      </Part>
+    <Staff id="1"><Measure><Note><pitch>60</pitch></Note><Clef><concertClefType>TAB</concertClefType></Clef></Measure></Staff>
+    <Staff id="2"><Measure><Clef><concertClefType>TAB</concertClefType><transposingClefType>TAB</transposingClefType></Clef><Note><pitch>52</pitch></Note></Measure></Staff>
+    <Staff id="3"><Measure><Note><pitch>40</pitch></Note></Measure></Staff>
+    <Staff id="4"><Measure><Rest/></Measure></Staff>
+    <Staff id="5"><Measure><Note><pitch>36</pitch></Note></Measure></Staff>
+    <Staff id="6"><Measure><Rest/></Measure></Staff>
+    </Score></museScore>`;
+
+const partOf = (xml: string, id: string) => new RegExp(`<Part id="${id}">[\\s\\S]*?</Part>`).exec(xml)![0];
+const musicOf = (xml: string, number: number) => new RegExp(`<Staff id="${number}">[\\s\\S]*?</Staff>`).exec(xml)![0];
+const stavesOf = (part: string) => [...part.matchAll(/<Staff>[\s\S]*?<\/Staff>/g)].map((match) => match[0]);
+
+describe("voices", () => {
+  const instruments = readScoreInstruments(IMPORTED);
+  const voices = planVoices(instruments);
+  const voice = (stem: string) => voices.find((candidate) => candidate.stem === stem)!;
+  const shownParts = (xml: string) => [...xml.matchAll(/<Part id="(\d)">([\s\S]*?)<\/Part>/g)]
+    .filter((match) => !match[2]!.includes("<show>0</show>")).map((match) => match[1]);
+
+  it("reads every instrument with its staves, numbered across the score", () => {
+    expect(instruments.map((instrument) => [instrument.id, instrument.name, instrument.fretted, instrument.hidden])).toEqual([
+      ["1", "Lead Vocals", false, false],
+      ["2", "Rhythm Guitar & Lead", true, false],
+      ["3", "Bass", true, false],
+      ["4", "Drums", false, true],
+      ["5", "Spare kit", false, false]
+    ]);
+    expect(instruments[2]!.staves).toEqual([
+      { number: 3, kind: "pitched", notes: 1 },
+      { number: 4, kind: "tablature", notes: 0 }
     ]);
   });
 
-  it("parses --score-parts output and tolerates log lines around it", () => {
-    const payload = JSON.stringify({
-      parts: ["E-Gitarre", "Schlagzeug"],
-      partsBin: [Buffer.from("one").toString("base64"), Buffer.from("two").toString("base64")]
-    });
-    const parts = parseScorePartsOutput(`some log\n${payload}\n`);
-    expect(parts.map((part) => part.name)).toEqual(["E-Gitarre", "Schlagzeug"]);
-    expect(parts[1]!.mscz.toString()).toBe("two");
-    expect(parseScorePartsOutput("garbage")).toEqual([]);
+  it("plans the full score, guitar and bass as notes and tab, the rest once, and skips empty instruments", () => {
+    expect(voices.map((plan) => [plan.stem, plan.instrument, plan.notation])).toEqual([
+      ["score", "score", undefined],
+      ["part-1", "part-1", undefined],
+      ["part-2-notes", "part-2", "notes"],
+      ["part-2-tab", "part-2", "tab"],
+      ["part-3-notes", "part-3", "notes"],
+      ["part-3-tab", "part-3", "tab"],
+      ["part-4", "part-4", undefined]
+    ]);
+    expect(voice("score").transform(IMPORTED)).toBe(IMPORTED);
   });
 
+  it("shows only its own instrument, even one the score hides", () => {
+    expect(shownParts(voice("part-4").transform(IMPORTED))).toEqual(["4"]);
+    expect(shownParts(voice("part-2-tab").transform(IMPORTED))).toEqual(["2"]);
+  });
+
+  it("turns a tab staff into notes, clefs included", () => {
+    const xml = voice("part-2-notes").transform(IMPORTED);
+    expect(partOf(xml, "2")).toContain('<StaffType group="pitched">');
+    expect(partOf(xml, "2")).not.toContain("<defaultClef>");
+    expect(musicOf(xml, 2)).toContain("<concertClefType>G8_vb</concertClefType>");
+    expect(musicOf(xml, 2)).not.toContain("TAB");
+    // Other staves keep their clefs.
+    expect(musicOf(xml, 1)).toContain("<concertClefType>TAB</concertClefType>");
+    // The guitar's tab voice is the staff as it is.
+    expect(partOf(voice("part-2-tab").transform(IMPORTED), "2")).toContain("<name>tab6StrFull</name>");
+  });
+
+  it("shows the staff with the notes and hides an empty one of the other kind", () => {
+    const [pitched, tab] = stavesOf(partOf(voice("part-3-notes").transform(IMPORTED), "3"));
+    expect(pitched).not.toContain("isStaffVisible");
+    expect(tab).toContain("<isStaffVisible>0</isStaffVisible>");
+    // As tab, the empty tab staff is no help: the staff with the notes turns
+    // into a four-string tab, and the empty one stays hidden.
+    const [converted, empty] = stavesOf(partOf(voice("part-3-tab").transform(IMPORTED), "3"));
+    expect(converted).toContain("<name>tab4StrCommon</name>");
+    expect(converted).toContain("<lines>4</lines>");
+    expect(empty).toContain("<isStaffVisible>0</isStaffVisible>");
+  });
+
+  it("reads vocals as notes, even when the import stored them as tab", () => {
+    expect(partOf(voice("part-1").transform(IMPORTED), "1")).toContain('<StaffType group="pitched">');
+  });
+
+  it("turns multimeasure rests off", () => {
+    expect(withoutMultimeasureRests("<createMultiMeasureRests>1</createMultiMeasureRests>"))
+      .toBe("<createMultiMeasureRests>0</createMultiMeasureRests>");
+  });
+
+  it("builds one conversion job entry per voice", () => {
+    expect(buildExportJob(["score", "part-2-tab"])).toEqual([
+      { in: "score.mscz", out: ["score.svg", "score.mpos", "score.spos"] },
+      { in: "part-2-tab.mscz", out: ["part-2-tab.svg", "part-2-tab.mpos", "part-2-tab.spos"] }
+    ]);
+  });
+});
+
+describe("export files and ids", () => {
   it("derives the score id from the contents and the exporter version", () => {
     const id = scoreIdFor(Buffer.from("score"));
     expect(id).toMatch(/^[a-f0-9]{32}$/);
@@ -128,7 +249,7 @@ describe("export job and parts", () => {
     const cached = await readCachedExport(join(EXAMPLES, ".."), "score-view/export");
     expect(cached).toBeUndefined();
     expect(exportFiles(manifest).at(-1)).toBe("manifest.json");
-    expect(exportFiles(manifest)).toContain("part-2-1.svg");
+    expect(exportFiles(manifest)).toContain("part-1-tab-1.svg");
   });
 
   it("keeps the committed example export in step with the parser", () => {

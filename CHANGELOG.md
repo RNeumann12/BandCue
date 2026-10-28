@@ -9,10 +9,11 @@
   it follows the room's downbeat, the song's tempo and start measure, repeats, D.S./Coda jumps and
   tempo changes, waits on the start measure during the count-in and freezes on Stop. The line being
   played sits near the top with the next lines below it (or, in page-turn mode, the next page beside
-  the current one), each player picks their part once (Drums, Bass, …) and *Notes only* gives the
-  score the whole screen. Works in Safari on iPad, also started from the home screen.
+  the current one), each player picks their part once (Drums, Bass, …), guitarists and bassists
+  switch between notes and tab, and the notes fill the companion's screen. Works in Safari on iPad, also started from the home screen.
 - The MuseScore helper exports the setlist's MuseScore songs with MuseScore itself (pages and
-  timing, every instrument part) and uploads them to the coordinator, which keeps them in
+  timing, each instrument on its own, guitar and bass as notes and as tab) and uploads them to the
+  coordinator, which keeps them in
   `.bandcue-scores/` (200 MB, `BANDCUE_SCORE_STORE_MB`). `--no-score-export` turns it off. The host
   setlist shows per song whether its notes are ready.
 

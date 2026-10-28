@@ -498,7 +498,9 @@ extension or MuseScore is needed on that device.
   turns* shows two pages side by side in landscape and turns the left page as soon as you reach
   the right one, so the next page is always in view.
 - **Your part, not the whole score.** Pick *Part* once (say *Drums*); the choice is kept on that
-  device and carried to the next song, even if that score calls the part *Schlagzeug*.
+  device and carried to the next song, even if that score calls the part *Schlagzeug*. Guitar and
+  bass switch between **Notes** and **Tab** next to it, whichever way the score was written;
+  every other instrument reads from notes.
 - **The notes are the companion's main view:** it opens on the score, filling the window (*Show
   room* brings the room info back). *Full screen* hides the browser's bars too, where the browser
   allows it (desktop, iPad Safari).
