@@ -35,7 +35,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      # WebKit runs the score view at iPad size (playwright.config.ts).
+      - run: npx playwright install --with-deps chromium webkit
       - run: npm run test:e2e
 
   pi-node18:
