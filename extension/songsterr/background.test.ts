@@ -1063,3 +1063,36 @@ describe("per-member instrument", () => {
     expect(created[0].url).toBe(SONG_A_TAB);
   });
 });
+
+describe("Songsterr score import", () => {
+  it("imports each Songsterr song of the current song once, with the roles it serves", () => {
+    const { context } = loadBackground([]);
+    const targets = context.scoreImportTargets({
+      id: "a",
+      title: "Song A",
+      sourceType: "songsterr",
+      source: SONG_A_TAB,
+      songsterrBassUrl: SONG_A_BASS,
+      songsterrDrumUrl: SONG_A_EASY_DRUM
+    });
+    expect(JSON.parse(JSON.stringify(targets))).toEqual([
+      { key: "s100", url: SONG_A_TAB, roles: ["main", "bass"] },
+      { key: "s5446545", url: SONG_A_EASY_DRUM, roles: ["drums"] }
+    ]);
+    expect(context.scoreImportTargets({ id: "b", title: "B", sourceType: "musescore", source: "B.mscz" })).toHaveLength(0);
+  });
+
+  it("reads Songsterr's revision date from the file name", () => {
+    const { context } = loadBackground([]);
+    expect(context.revisionFromFileName("Led Zeppelin-Stairway to Heaven-10-24-2026.gp")).toBe("2026-10-24");
+    expect(context.revisionFromFileName("AC-DC-Back in Black-3-5-2025.gp")).toBe("2025-03-05");
+    expect(context.revisionFromFileName("whatever.gp")).toBe("");
+  });
+
+  it("explains why it cannot import before the room has a Songsterr song", async () => {
+    const { sendRuntimeMessage } = loadBackground([]);
+    const state: any = await sendRuntimeMessage({ type: "popupImportScores" });
+    expect(state.canImportScores).toBe(false);
+    expect(state.scoreImport.detail).toMatch(/no Songsterr URL/);
+  });
+});

@@ -14,8 +14,13 @@ import type {
   OpenSongRequest,
   RoomClientSummary,
   RoomState,
+  ScoreImportJob,
+  ScoreImportProgress,
+  ScoreImportRequest,
   ScoreAvailability,
   ScoreExportReport,
+  ScoreImport,
+  ScoreImportAvailability,
   SafetyState,
   SafetyUpdate,
   ServerMessage,
@@ -50,7 +55,9 @@ import {
 import {
   appliesToMuseScore,
   appliesToSongsterr,
+  hasScoreView,
   museScoreReference,
+  songsterrImportTargets,
   songsterrReferences
 } from "../shared/song-sources.js";
 
@@ -84,6 +91,7 @@ const CLIENT_IDLE_TIMEOUT_MS = 12_000;
 const AUTO_STOP_RECHECK_MS = 2_000;
 const LIVENESS_SWEEP_INTERVAL_MS = 4_000;
 export const MAX_SETLIST_SONGS = 500;
+const MAX_SCORE_IMPORT_JOBS = 20;
 
 /**
  * What the coordinator keeps across restarts: the setlist and the current song.
@@ -138,6 +146,9 @@ export class RoomController {
    * pointing the song at a different score forgets it.
    */
   private readonly rememberedScores = new Map<string, { scoreId: string; reference: string }>();
+  /** The latest Songsterr import the host asked for, per song id (insertion order = age). */
+  private readonly scoreImportJobs = new Map<string, ScoreImportJob>();
+  private scoreImportSequence = 0;
   private scoreAvailable?: (scoreId: string) => boolean;
   private readonly scoreAvailabilityCache = new Map<string, { available: boolean; checkedAt: number }>();
 
@@ -332,6 +343,16 @@ export class RoomController {
       return;
     }
 
+    if (message.type === "scoreImportRequest") {
+      this.handleScoreImportRequest(client, message, now);
+      return;
+    }
+
+    if (message.type === "scoreImportProgress") {
+      this.handleScoreImportProgress(client, message);
+      return;
+    }
+
     if (message.type === "transportRequest") {
       this.handleTransportRequest(client, message, now);
       return;
@@ -464,6 +485,7 @@ export class RoomController {
       transport: this.transport,
       currentSong: this.currentSong,
       ...this.scoreState(now),
+      scoreImportJobs: this.scoreImportJobState(),
       setlist: this.setlist,
       safety: this.safety,
       companionUrl: this.companionUrl,
@@ -485,12 +507,120 @@ export class RoomController {
     return Boolean(clientId && this.clients.get(clientId)?.role === "desktop-adapter");
   }
 
-  /** The current song's score view and every MuseScore song's, for roomState. */
+  /**
+   * A song from a host's update. Songsterr imports are recorded by the room, so
+   * a host page that does not send them keeps the ones the song already has.
+   */
+  private sanitizeHostSong(song: SetlistSong): SetlistSong | undefined {
+    if (song && typeof song === "object" && song.scoreImports === undefined) {
+      const known = this.findSong(String(song.id ?? ""));
+      if (known?.scoreImports) {
+        return sanitizeSong({ ...song, scoreImports: known.scoreImports });
+      }
+    }
+    return sanitizeSong(song);
+  }
+
+  private findSong(songId: string): SetlistSong | undefined {
+    if (!songId) {
+      return undefined;
+    }
+    return this.setlist.songs.find((song) => song.id === songId) ??
+      (this.currentSong?.song?.id === songId ? this.currentSong.song : undefined);
+  }
+
+  /** Applies a change to a song in the setlist and, if it is current, to the current song. */
+  private updateSong(songId: string, change: (song: SetlistSong) => SetlistSong, now: number): boolean {
+    let changed = false;
+    const songs = this.setlist.songs.map((song) => {
+      if (song.id !== songId) {
+        return song;
+      }
+      changed = true;
+      return change(song);
+    });
+    if (changed) {
+      this.setlist = { ...this.setlist, songs, updatedAt: now };
+    }
+    if (this.currentSong?.song?.id === songId) {
+      this.currentSong = { ...this.currentSong, song: change(this.currentSong.song) };
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * Records a Guitar Pro file imported from one of a song's Songsterr pages
+   * (already stored as `/api/scores/<importId>/source.gp`). It replaces an
+   * earlier import of the same Songsterr song; the MuseScore helper sees it in
+   * the setlist and exports it.
+   */
+  recordScoreImport(
+    songId: string,
+    key: string,
+    importId: string,
+    revision: string | undefined,
+    now = this.now()
+  ): { ok: true; roles: ScoreImportAvailability["roles"] } | { ok: false; message: string } {
+    const song = this.findSong(songId);
+    if (!song) {
+      return { ok: false, message: "That song is not in the room's setlist." };
+    }
+    const target = songsterrImportTargets(song).find((candidate) => candidate.key === key);
+    if (!target) {
+      return { ok: false, message: "That Songsterr song is not one of this song's Songsterr URLs." };
+    }
+    const entry: ScoreImport = {
+      key,
+      importId,
+      revision: trimText(revision ?? "", 40) || undefined,
+      importedAt: now
+    };
+    this.updateSong(songId, (current) => ({
+      ...current,
+      scoreImports: [...(current.scoreImports ?? []).filter((existing) => existing.key !== key), entry]
+    }), now);
+    this.notifyPersistedStateChange();
+    this.broadcastState();
+    return { ok: true, roles: target.roles };
+  }
+
+  /**
+   * Notes in each import the export the helper finished for it, so the Pi
+   * keeps serving it once the MuseScore laptop is gone (and across restarts:
+   * the setlist file carries it).
+   */
+  private adoptImportExports(reports: ScoreExportReport[], now: number): void {
+    let changed = false;
+    for (const report of reports) {
+      if (!report.importKey || report.status !== "ready" || !report.scoreId) {
+        continue;
+      }
+      const imported = this.findSong(report.songId)?.scoreImports
+        ?.find((entry) => entry.key === report.importKey && entry.importId === report.importId);
+      // Asked fresh: a "not stored" answer cached while it was still uploading
+      // would otherwise keep the finished export from ever being recorded.
+      if (!imported || imported.scoreId === report.scoreId || !(this.scoreAvailable?.(report.scoreId) ?? true)) {
+        continue;
+      }
+      const scoreId = report.scoreId;
+      changed = this.updateSong(report.songId, (song) => ({
+        ...song,
+        scoreImports: song.scoreImports?.map((entry) =>
+          entry.key === report.importKey && entry.importId === report.importId ? { ...entry, scoreId } : entry)
+      }), now) || changed;
+    }
+    if (changed) {
+      this.notifyPersistedStateChange();
+    }
+  }
+
+  /** The current song's score view and every other song's that has one, for roomState. */
   private scoreState(now: number): Pick<RoomState, "currentScore" | "setlistScores"> {
-    const songs = this.setlist.songs.filter((song) => appliesToMuseScore(song));
+    const songs = this.setlist.songs.filter((song) => hasScoreView(song));
     const current = this.currentSong?.song;
     const setlistScores = songs.map((song) => this.scoreAvailabilityFor(song, now));
-    const currentScore = current && appliesToMuseScore(current)
+    const currentScore = current && hasScoreView(current)
       ? setlistScores.find((score) => score.songId === current.id) ?? this.scoreAvailabilityFor(current, now)
       : undefined;
     return {
@@ -500,6 +630,51 @@ export class RoomController {
   }
 
   private scoreAvailabilityFor(song: SetlistSong, now: number): ScoreAvailability {
+    const local: ScoreAvailability = appliesToMuseScore(song)
+      ? this.localScoreAvailabilityFor(song, now)
+      : { songId: song.id, status: "missing", detail: "This song has no MuseScore score." };
+    const imports = this.importAvailabilityFor(song, now);
+    return imports.length ? { ...local, imports } : local;
+  }
+
+  private importAvailabilityFor(song: SetlistSong, now: number): ScoreImportAvailability[] {
+    if (!song.scoreImports?.length) {
+      return [];
+    }
+    const targets = songsterrImportTargets(song);
+    const liveReports = [...this.scoreReports]
+      .filter(([clientId]) => this.clients.has(clientId))
+      .flatMap(([, reports]) => reports);
+    return song.scoreImports.map((entry): ScoreImportAvailability => {
+      const base = {
+        key: entry.key,
+        roles: targets.find((target) => target.key === entry.key)?.roles ?? [],
+        revision: entry.revision,
+        importedAt: entry.importedAt
+      };
+      if (entry.scoreId && this.isScoreStored(entry.scoreId, now)) {
+        return { ...base, status: "ready", scoreId: entry.scoreId };
+      }
+      const report = liveReports.find((candidate) =>
+        candidate.songId === song.id && candidate.importKey === entry.key && candidate.importId === entry.importId);
+      if (report?.status === "ready" && report.scoreId && this.isScoreStored(report.scoreId, now)) {
+        return { ...base, status: "ready", scoreId: report.scoreId };
+      }
+      if (report?.status === "failed") {
+        return {
+          ...base,
+          status: "missing",
+          detail: `Converting the Songsterr import failed${report.detail ? `: ${report.detail}` : "."}`
+        };
+      }
+      if (report) {
+        return { ...base, status: "exporting", detail: report.detail };
+      }
+      return { ...base, status: "missing", detail: "Waiting for the MuseScore laptop to convert the Songsterr import." };
+    });
+  }
+
+  private localScoreAvailabilityFor(song: SetlistSong, now: number): ScoreAvailability {
     const reference = museScoreReference(song);
     let pending: ScoreExportReport | undefined;
     let failed: ScoreExportReport | undefined;
@@ -509,7 +684,7 @@ export class RoomController {
         continue;
       }
       helperConnected = true;
-      const report = reports.find((candidate) => candidate.songId === song.id);
+      const report = reports.find((candidate) => candidate.songId === song.id && !candidate.importKey);
       if (!report) {
         continue;
       }
@@ -591,6 +766,7 @@ export class RoomController {
       : undefined;
     if (scores && JSON.stringify(scores) !== JSON.stringify(this.scoreReports.get(clientId) ?? null)) {
       this.scoreReports.set(clientId, scores);
+      this.adoptImportExports(scores, now);
       statusChanged = true;
     }
     this.logCommandTiming(client, nextStatus.lastCommand);
@@ -648,7 +824,7 @@ export class RoomController {
     }
 
     this.currentSong = {
-      song: update.song ? sanitizeSong(update.song) : undefined,
+      song: update.song ? this.sanitizeHostSong(update.song) : undefined,
       index: sanitizeOptionalInteger(update.index, 1, 10_000),
       total: sanitizeOptionalInteger(update.total, 0, 10_000),
       leaderId: client.id,
@@ -676,7 +852,9 @@ export class RoomController {
       return;
     }
 
-    const songs = update.songs.map(sanitizeSong).filter((song): song is SetlistSong => Boolean(song));
+    const songs = update.songs
+      .map((song) => this.sanitizeHostSong(song))
+      .filter((song): song is SetlistSong => Boolean(song));
     this.setlist = {
       songs,
       leaderId: client.id,
@@ -837,6 +1015,72 @@ export class RoomController {
         (info.extendedMs > 0 ? ` (held ${info.extendedMs} ms past the Helix downbeat)` : " (on the downbeat)")
     );
     return info.appliedDelayMs;
+  }
+
+  /**
+   * Hands a host's "Import notes from Songsterr" to every connected Songsterr
+   * extension that can import (one logged in to Songsterr Plus). The room has
+   * no Songsterr login of its own: the browser does the download.
+   */
+  private handleScoreImportRequest(client: RoomClientSummary, request: ScoreImportRequest, now: number): void {
+    if (client.role !== "host") {
+      this.send(client, { type: "error", message: "Only a host can import notes from Songsterr." });
+      return;
+    }
+    const song = this.findSong(request.songId);
+    if (!song || !songsterrImportTargets(song).length) {
+      this.send(client, { type: "error", message: "That song has no Songsterr URL to import notes from." });
+      return;
+    }
+    const importers = [...this.clients.values()].filter((candidate) => candidate.role === "desktop-adapter" &&
+      candidate.capabilities.some((capability) => capability.app === "songsterr" && capability.canImportScores));
+    if (!importers.length) {
+      this.send(client, {
+        type: "error",
+        message: "No Songsterr extension that can import is connected. Connect the BandCue extension in a browser logged in to Songsterr Plus."
+      });
+      return;
+    }
+    this.scoreImportSequence += 1;
+    const job: ScoreImportJob = {
+      songId: song.id,
+      requestId: this.scoreImportSequence,
+      requestedAt: now,
+      devices: importers.map((importer) => ({ clientId: importer.id, deviceName: importer.deviceName, state: "running" }))
+    };
+    this.scoreImportJobs.delete(song.id);
+    this.scoreImportJobs.set(song.id, job);
+    while (this.scoreImportJobs.size > MAX_SCORE_IMPORT_JOBS) {
+      this.scoreImportJobs.delete(this.scoreImportJobs.keys().next().value!);
+    }
+    for (const importer of importers) {
+      this.send(importer, { type: "scoreImportCommand", requestId: job.requestId, song });
+    }
+    this.broadcastState();
+  }
+
+  private handleScoreImportProgress(client: RoomClientSummary, progress: ScoreImportProgress): void {
+    const job = [...this.scoreImportJobs.values()].find((candidate) => candidate.requestId === progress.requestId);
+    const device = job?.devices.find((candidate) => candidate.clientId === client.id);
+    if (!device) {
+      return;
+    }
+    device.state = progress.state;
+    device.detail = trimText(progress.detail ?? "", 500) || undefined;
+    this.broadcastState();
+  }
+
+  /** Import jobs for roomState; a browser that left mid-import counts as failed. */
+  private scoreImportJobState(): ScoreImportJob[] | undefined {
+    if (!this.scoreImportJobs.size) {
+      return undefined;
+    }
+    return [...this.scoreImportJobs.values()].map((job) => ({
+      ...job,
+      devices: job.devices.map((device) => device.state === "running" && !this.clients.has(device.clientId)
+        ? { ...device, state: "failed", detail: "The browser left the room before the import finished." }
+        : device)
+    }));
   }
 
   private handleOpenSongRequest(
@@ -1295,7 +1539,7 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     ? song.sourceType
     : "other";
 
-  return {
+  const sanitized: SetlistSong = {
     id: trimText(song.id, 80) || randomUUID(),
     title,
     sourceType,
@@ -1315,6 +1559,38 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
     helixOffsetMs: clampHelixOffsetMs(song.helixOffsetMs),
     notes: trimText(song.notes ?? "", 500) || undefined
   };
+  const scoreImports = sanitizeScoreImports(song.scoreImports, sanitized);
+  return scoreImports ? { ...sanitized, scoreImports } : sanitized;
+}
+
+const HASH_PATTERN = /^[a-f0-9]{16,64}$/;
+
+/** Keeps the imports of the song's current Songsterr URLs, one per Songsterr song. */
+function sanitizeScoreImports(value: unknown, song: SetlistSong): ScoreImport[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const keys = new Set(songsterrImportTargets(song).map((target) => target.key));
+  const imports: ScoreImport[] = [];
+  for (const raw of value.slice(0, 10)) {
+    if (!raw || typeof raw !== "object") {
+      continue;
+    }
+    const entry = raw as Partial<ScoreImport>;
+    const key = typeof entry.key === "string" ? entry.key : "";
+    const importId = typeof entry.importId === "string" ? entry.importId : "";
+    if (!keys.has(key) || !HASH_PATTERN.test(importId) || imports.some((existing) => existing.key === key)) {
+      continue;
+    }
+    imports.push({
+      key,
+      importId,
+      revision: trimText(typeof entry.revision === "string" ? entry.revision : "", 40) || undefined,
+      importedAt: Number.isFinite(entry.importedAt) ? Number(entry.importedAt) : 0,
+      scoreId: typeof entry.scoreId === "string" && HASH_PATTERN.test(entry.scoreId) ? entry.scoreId : undefined
+    });
+  }
+  return imports.length ? imports : undefined;
 }
 
 function sanitizeTempoPercent(value: number | undefined): number {
@@ -1455,7 +1731,8 @@ function sanitizeScoreReports(value: AdapterStatus["scores"]): ScoreExportReport
 
   return value
     .filter((report): report is ScoreExportReport => Boolean(report) && typeof report === "object")
-    .slice(0, MAX_SETLIST_SONGS)
+    // A song's local score plus up to three Songsterr imports.
+    .slice(0, MAX_SETLIST_SONGS * 4)
     .flatMap((report) => {
       const songId = trimText(report.songId ?? "", 120);
       if (!songId || !SCORE_REPORT_STATUSES.has(report.status)) {
@@ -1469,7 +1746,9 @@ function sanitizeScoreReports(value: AdapterStatus["scores"]): ScoreExportReport
         relativePath: normalizeRelativeCatalogPath(report.relativePath ?? "") || undefined,
         status: report.status === "ready" && !scoreId ? "failed" : report.status,
         scoreId,
-        detail: trimText(report.detail ?? "", 300) || undefined
+        detail: trimText(report.detail ?? "", 300) || undefined,
+        importKey: typeof report.importKey === "string" && /^s\d{1,12}$/.test(report.importKey) ? report.importKey : undefined,
+        importId: typeof report.importId === "string" && HASH_PATTERN.test(report.importId) ? report.importId : undefined
       }];
     });
 }

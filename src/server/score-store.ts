@@ -7,11 +7,12 @@ import { dirname, join } from "node:path";
 // which is a hash of the score's contents: the files never change under an id,
 // so they can be cached by the browsers forever, and a new version of a score
 // simply arrives as a new id. When the store outgrows its budget, the scores
-// used least recently go first. Plain fs only -- this has to run on the Pi's
-// Node 18.
+// used least recently go first. A Guitar Pro file imported from Songsterr is
+// kept the same way, as `source.gp` under its own content hash. Plain fs only --
+// this has to run on the Pi's Node 18.
 
 export const SCORE_ID_PATTERN = /^[a-f0-9]{16,64}$/;
-const FILE_NAME_PATTERN = /^(manifest\.json|[a-z0-9][a-z0-9_-]{0,60}\.timing\.json|[a-z0-9][a-z0-9_-]{0,60}\.svg)$/;
+const FILE_NAME_PATTERN = /^(manifest\.json|source\.gp|[a-z0-9][a-z0-9_-]{0,60}\.timing\.json|[a-z0-9][a-z0-9_-]{0,60}\.svg)$/;
 const GZIP_MAGIC = [0x1f, 0x8b];
 export const DEFAULT_MAX_FILE_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_MAX_TOTAL_BYTES = 200 * 1024 * 1024;
@@ -156,6 +157,9 @@ export class ScoreStore {
 }
 
 function contentTypeFor(file: string): string {
+  if (file.endsWith(".gp")) {
+    return "application/octet-stream";
+  }
   return file.endsWith(".svg") ? "image/svg+xml" : "application/json; charset=utf-8";
 }
 

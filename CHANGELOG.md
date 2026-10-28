@@ -16,6 +16,15 @@
   coordinator, which keeps them in
   `.bandcue-scores/` (200 MB, `BANDCUE_SCORE_STORE_MB`). `--no-score-export` turns it off. The host
   setlist shows per song whether its notes are ready.
+- **Notes from Songsterr.** The extension's *Import notes from Songsterr* (needs Songsterr Plus in
+  that browser) takes Songsterr's own Guitar Pro download of each of the current song's Songsterr
+  pages, including a separate drum or bass arrangement, and the MuseScore helper converts and
+  exports it beside the song's MuseScore file, which stays untouched. Each tablet chooses *Notes
+  from › MuseScore file / Songsterr import*; the drummer can read the drum arrangement while the
+  rest of the band keeps the hand-edited score. The import is kept on the coordinator and served
+  offline from then on; Songsterr-only songs get a score view too. The host setlist has an *Import
+  notes* button per song that hands the job to the connected extension with Plus and shows its
+  progress.
 
 ## 1.8.2 - 2026-10-11
 

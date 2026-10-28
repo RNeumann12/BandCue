@@ -9,7 +9,7 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["storage", "tabs", "activeTab", "alarms"],
+  "permissions": ["storage", "tabs", "activeTab", "alarms", "scripting"],
   "host_permissions": ["https://www.songsterr.com/*", "https://songsterr.com/*"],
   "optional_host_permissions": ["http://*/*"],
   "background": {

@@ -367,8 +367,36 @@ never change and are served `Cache-Control: immutable`.
 | `PUT` | a **connected desktop adapter**, named by its room client id in `x-bandcue-client-id` | Stores a file, raw or `Content-Encoding: gzip`. 403 for any other client, 413 over 32 MB. |
 
 Only these names exist: `manifest.json`, `<voice>.timing.json`, `<voice>-<page>.svg` (lower-case
-letters, digits, `-`, `_`). The helper uploads `manifest.json` last, so a score counts as stored
+letters, digits, `-`, `_`), and `source.gp` (a Songsterr import, see below). The helper uploads `manifest.json` last, so a score counts as stored
 once its manifest is there.
+
+### Songsterr imports (HTTP)
+`POST /api/score-imports?token=…&songId=…&key=s<digits>&revision=YYYY-MM-DD`, body: a Guitar Pro file
+(GP7 `.gp`, GPX or GP3–5), at most 16 MB. Only a **connected desktop adapter** may send one
+(`x-bandcue-client-id`, like `PUT` above); the Songsterr extension sends what Songsterr's
+*Download › Guitar Pro* produced for one of the song's Songsterr URLs. `key` is that URL's Songsterr
+song id and must be one of the song's own URLs (`songsterrUrl`, `songsterrBassUrl`,
+`songsterrDrumUrl`, or `source` of a Songsterr song). The coordinator stores the file as
+`/api/scores/<importId>/source.gp` (`importId`: a content hash) and records
+`{ key, importId, revision, importedAt }` in the song's `scoreImports`, replacing an earlier import
+of the same key. Answers `{ importId, roles }`; 400 for a non-Guitar-Pro body, 403 for other
+clients, 409 for an unknown song or key.
+
+The host page starts an import with `scoreImportRequest { songId }`. The room sends
+`scoreImportCommand { requestId, song }` to every connected Songsterr extension whose `clientHello`
+capability has `canImportScores` (an extension drops it after finding its browser without Songsterr
+Plus, and gets it back after an import works); each answers with `scoreImportProgress { requestId,
+state: "running" | "done" | "failed", detail }`. `RoomState.scoreImportJobs` lists the latest job per
+song with each browser's progress (a browser that leaves mid-import counts as failed). Errors: not a
+host, no Songsterr URL, or no extension that can import.
+
+The MuseScore helper fetches `source.gp`, converts it (`MuseScore4.exe -o x.mscz x.gp`, in its own
+cache, never the score folders), exports it like a local score and reports it in `scores` with
+`importKey`/`importId`. The room then writes the export's `scoreId` into the import, so it stays
+served (and persisted with the setlist) without the helper. `ScoreAvailability.imports` lists each
+import with `roles` (`main`/`bass`/`drums`: which of the song's URLs it came from), `status` and
+`scoreId`. Host setlist and current-song updates that omit `scoreImports` keep the song's imports;
+an import whose URL is removed from the song is dropped.
 
 `manifest.json` (`ScoreManifest`) lists the voices, the full score first:
 `{ version: 1, scoreId, title, relativePath, museScoreVersion, exportedAt, parts: [{ id, name, pages, timing, measureCount, durationMs }] }`.

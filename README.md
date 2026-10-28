@@ -513,6 +513,30 @@ song first, and uploads the pages to the coordinator. The host setlist shows a b
 (*Notes ready*, *Exporting notes*, *No notes*). It needs `--score-folder` like auto-open does;
 `--no-score-export` turns it off. Details in [docs/Adapters.md](docs/Adapters.md#score-view-export).
 
+### Notes from Songsterr instead of the MuseScore file
+
+When a MuseScore file is older than the Songsterr tab, or a player reads a different Songsterr
+arrangement (the song's *Songsterr drums URL*, say), import the notes from Songsterr once:
+
+1. Keep the BandCue extension connected in a browser that is **logged in to Songsterr Plus**
+   (the room has no Songsterr login of its own; that browser does the download).
+2. On the host page, press **Import notes** on the song in the setlist (or, in the extension, *Import
+   notes from Songsterr* for the current song). The extension opens each of the song's Songsterr
+   pages (main, bass, drums) in a background tab for a few seconds, takes Songsterr's own *Download ›
+   Guitar Pro* file (every track) and sends it to the coordinator. Nothing lands in your Downloads
+   folder. The setlist shows the progress, and why when it fails. A browser found without Plus
+   stops offering to import, so the button only reaches browsers that can.
+3. The MuseScore helper converts the file with MuseScore and exports it like a local score. The host
+   setlist shows *Songsterr drums notes* (hover for Songsterr's revision date) next to *Notes ready*.
+
+The band's MuseScore files are never touched: the import lives beside them. Each tablet picks
+**Notes from › MuseScore file / Songsterr import** (shown on songs with an import, kept per
+device): the drummer chooses *Songsterr import* once and reads the drum arrangement's own notes and
+timing, everyone else keeps the hand-edited MuseScore file. A song without a MuseScore file gets a
+score view too once it has an import. After the import nothing goes online again: the coordinator
+keeps the files and serves them with the MuseScore laptop switched off. Import again when the tab
+changes on Songsterr (the newer import replaces the older one).
+
 **On the iPad:** add the companion page to the home screen (*Share › Add to Home Screen*) to start
 it full screen; the saved link keeps the room token. Set *Settings › Display & Brightness ›
 Auto-Lock* to *Never* for the rehearsal: the browser cannot keep the screen on by itself over the
@@ -530,8 +554,10 @@ coordinator's plain `http://` address.
 - Phones are companion displays by default; Android phones can be app controllers only through
   the native adapter.
 - Only the leader's device should feed audible click / backing audio to the mixer.
-- The score view shows MuseScore songs only (not Songsterr tabs), reads along without playing any
-  audio, and cannot start or stop the room.
+- The score view shows MuseScore songs and songs with a Songsterr import, reads along without
+  playing any audio, and cannot start or stop the room. Importing from Songsterr needs Songsterr
+  Plus in that browser and the MuseScore helper to convert the file once; it automates Songsterr's
+  own download button, so a Songsterr redesign can break it until the extension is updated.
 
 ## Documentation
 

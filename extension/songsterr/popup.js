@@ -22,6 +22,8 @@ const connectionDot = /** @type {HTMLElement} */ (document.querySelector("#conne
 const roomSummary = /** @type {HTMLElement} */ (document.querySelector("#roomSummary"));
 const adapterState = /** @type {HTMLElement} */ (document.querySelector("#adapterState"));
 const commandState = /** @type {HTMLElement} */ (document.querySelector("#commandState"));
+const importScores = /** @type {HTMLButtonElement} */ (document.querySelector("#importScores"));
+const importStatus = /** @type {HTMLElement} */ (document.querySelector("#importStatus"));
 
 // Once the user edits the room field, stop auto-filling it from saved state so
 // they can clear it and type a different room without it being overwritten by
@@ -112,6 +114,10 @@ play.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupTransport", action: "play" }, renderState);
 });
 
+importScores.addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "popupImportScores" }, renderState);
+});
+
 stopButton.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "popupTransport", action: "stop" }, renderState);
 });
@@ -144,6 +150,10 @@ function renderState(state) {
   disconnect.disabled = disconnectedByUser || (!connected && !state?.autoConnectEnabled);
   play.disabled = !connected;
   stopButton.disabled = !connected;
+  const scoreImport = state?.scoreImport;
+  importScores.disabled = !connected || !state?.canImportScores || Boolean(scoreImport?.running);
+  importStatus.textContent = scoreImport?.detail || "";
+  importStatus.hidden = !importStatus.textContent;
 }
 
 function formatConnectionState(value) {

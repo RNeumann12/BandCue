@@ -13,12 +13,13 @@ import {
   partFamily,
   passNumberOf,
   resolvePlayhead,
+  resolveScoreSource,
   songTimeMs,
   startOffsetMs,
   systemsOf,
   visiblePages
 } from "./score-timing.js";
-import type { ScoreTiming, TransportState } from "../src/shared/protocol.js";
+import type { ScoreAvailability, ScoreTiming, TransportState } from "../src/shared/protocol.js";
 
 // The committed example export: pickup, repeat of measures 3-4 (BandCue
 // numbering), D.S. al Coda, 120 BPM then 60 BPM from measure 7.
@@ -198,5 +199,37 @@ describe("score layout helpers", () => {
     expect(tight).toBeGreaterThan(800);
     expect(tight).toBeLessThanOrEqual(1000);
     expect(followScrollTop({ lineTop: 50, lineBottom: 100, viewportHeight: 1000, readingLine: 0.2 })).toBe(0);
+  });
+});
+
+describe("resolveScoreSource", () => {
+  const score: ScoreAvailability = {
+    songId: "zombie",
+    status: "ready",
+    scoreId: "local",
+    imports: [
+      { key: "s27", roles: ["main", "bass"], status: "ready", scoreId: "main-import", importedAt: 1, revision: "2026-10-24" },
+      { key: "s900", roles: ["drums"], status: "ready", scoreId: "drum-import", importedAt: 1 }
+    ]
+  };
+
+  it("keeps the MuseScore score unless the device asks for Songsterr", () => {
+    expect(resolveScoreSource(score, "Drums", "musescore")).toEqual({ scoreId: "local", origin: "musescore" });
+    expect(resolveScoreSource(undefined, "Drums", "songsterr")).toBeUndefined();
+  });
+
+  it("reads the import of the Songsterr page that serves this player's instrument", () => {
+    expect(resolveScoreSource(score, "Feargal Lawler (Drums)", "songsterr")).toMatchObject({ scoreId: "drum-import", origin: "songsterr" });
+    expect(resolveScoreSource(score, "Bass", "songsterr")).toMatchObject({ scoreId: "main-import", revision: "2026-10-24" });
+    expect(resolveScoreSource(score, "Lead Guitar", "songsterr")?.scoreId).toBe("main-import");
+  });
+
+  it("falls back to whatever is ready", () => {
+    const onlyDrums: ScoreAvailability = { ...score, imports: [score.imports![1]!] };
+    expect(resolveScoreSource(onlyDrums, "Guitar", "songsterr")?.scoreId).toBe("drum-import");
+    const converting: ScoreAvailability = { ...score, imports: [{ ...score.imports![1]!, status: "exporting", scoreId: undefined }] };
+    expect(resolveScoreSource(converting, "Drums", "songsterr")?.scoreId).toBe("local");
+    const noLocal: ScoreAvailability = { songId: "creep", status: "missing", imports: [score.imports![0]!] };
+    expect(resolveScoreSource(noLocal, "Drums", "musescore")?.scoreId).toBe("main-import");
   });
 });

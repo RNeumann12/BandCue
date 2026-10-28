@@ -505,6 +505,13 @@ export interface ScoreExportSource {
   absolutePath: string;
   relativePath: string;
   title: string;
+  /**
+   * Export even if MuseScore calls the score corrupted (`-f`), as its GUI
+   * would after "open anyway". For converted Guitar Pro imports: MuseScore's
+   * importer can leave a measure it then refuses to load ("Incomplete
+   * measure"), although it plays it fine.
+   */
+  force?: boolean;
 }
 
 export interface ExportedScore {
@@ -568,7 +575,10 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
     }
 
     await writeFile(join(work, "job.json"), JSON.stringify(buildExportJob(voices.map((voice) => voice.stem))));
-    const jobRun = await run(options.executable, ["-j", "job.json"], { cwd: work, timeoutMs: MUSESCORE_RUN_TIMEOUT_MS });
+    const jobRun = await run(options.executable, [...(source.force ? ["-f"] : []), "-j", "job.json"], {
+      cwd: work,
+      timeoutMs: MUSESCORE_RUN_TIMEOUT_MS
+    });
     if (!existsSync(join(work, "score.mpos"))) {
       throw new Error(`MuseScore did not export the score (exit ${jobRun.code}): ${lastLine(jobRun.stderr)}`);
     }
@@ -671,6 +681,9 @@ function lastLine(text: string): string {
 export interface ScoreExportJob {
   songId: string;
   source: ScoreExportSource;
+  /** Set when the score is a converted Songsterr import. */
+  importKey?: string;
+  importId?: string;
 }
 
 interface TrackedScore {
@@ -731,14 +744,15 @@ export class ScoreExportQueue {
   }
 
   reports(): ScoreExportReport[] {
-    return this.songs.map(({ songId, source }) => {
+    return this.songs.map(({ songId, source, importKey, importId }) => {
       const item = this.tracked.get(source.absolutePath);
       return {
         songId,
         relativePath: source.relativePath,
         status: item?.state ?? "queued",
         scoreId: item?.state === "ready" ? item.scoreId : undefined,
-        detail: item?.detail
+        detail: item?.detail,
+        ...(importKey ? { importKey, importId } : {})
       };
     });
   }

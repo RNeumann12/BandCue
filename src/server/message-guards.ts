@@ -135,6 +135,19 @@ export function sanitizeClientMessage(value: unknown): ClientMessage | undefined
         controlMode: value.controlMode as ControlMode | undefined,
         updatedAt: isFiniteNumber(value.updatedAt) ? value.updatedAt : 0
       };
+    case "scoreImportRequest":
+      return typeof value.songId === "string" && value.songId
+        ? { type: "scoreImportRequest", songId: value.songId.slice(0, 120) }
+        : undefined;
+    case "scoreImportProgress":
+      return isFiniteNumber(value.requestId) && ["running", "done", "failed"].includes(value.state as string)
+        ? {
+            type: "scoreImportProgress",
+            requestId: value.requestId,
+            state: value.state as "running" | "done" | "failed",
+            detail: typeof value.detail === "string" ? value.detail.slice(0, 500) : undefined
+          }
+        : undefined;
     case "openSongRequest":
       return {
         type: "openSongRequest",
@@ -255,7 +268,8 @@ function sanitizeCapabilities(value: unknown): AdapterCapability[] {
       app: capability.app as AdapterCapability["app"],
       canPlay: capability.canPlay as boolean,
       canStop: capability.canStop as boolean,
-      ...(capability.canSetTempo === true ? { canSetTempo: true } : {})
+      ...(capability.canSetTempo === true ? { canSetTempo: true } : {}),
+      ...(capability.canImportScores === true ? { canImportScores: true } : {})
     }))
     .filter((capability): capability is AdapterCapability => (
       APP_TYPES.has(capability.app as AdapterCapability["app"]) &&

@@ -72,6 +72,13 @@
               <span>Part</span>
               <select id="scorePartSelect"></select>
             </label>
+            <label class="score-part" id="scoreSourceLabel" hidden>
+              <span>Notes from</span>
+              <select id="scoreSourceSelect">
+                <option value="musescore">MuseScore file</option>
+                <option value="songsterr">Songsterr import</option>
+              </select>
+            </label>
             <div class="score-notation" id="scoreNotation" role="group" aria-label="Notation" hidden>
               <button class="secondary compact" id="scoreNotesButton" type="button" aria-pressed="false">Notes</button>
               <button class="secondary compact" id="scoreTabButton" type="button" aria-pressed="false">Tab</button>

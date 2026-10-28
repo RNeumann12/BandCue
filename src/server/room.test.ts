@@ -1820,6 +1820,174 @@ describe("RoomController score view", () => {
   });
 });
 
+describe("RoomController Songsterr score imports", () => {
+  const LOCAL_ID = "0123456789abcdef0123456789abcdef";
+  const IMPORT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const DRUM_SCORE_ID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const song = {
+    id: "zombie",
+    title: "Zombie",
+    sourceType: "musescore" as const,
+    source: "Zombie.mscz",
+    songsterrUrl: "https://www.songsterr.com/a/wsa/cranberries-zombie-tab-s27",
+    songsterrDrumUrl: "https://www.songsterr.com/a/wsa/cranberries-zombie-drum-tab-s900"
+  };
+
+  function roomWithSong(stored = new Set<string>([LOCAL_ID, DRUM_SCORE_ID])) {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    room.setScoreAvailability((scoreId) => stored.has(scoreId));
+    const persisted: unknown[] = [];
+    room.onPersistedStateChange((state) => persisted.push(state));
+    const host = room.addClient(undefined, { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [song], updatedAt: 1001 }, 1001);
+    room.handleMessage(host.id, { type: "currentSongUpdate", song, index: 1, total: 1, updatedAt: 1002 }, 1002);
+    const helper = room.addClient(undefined, {
+      type: "clientHello", deviceName: "MuseScore laptop", role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1003);
+    return { room, host, helper, persisted };
+  }
+
+  it("records an import of the drummer's Songsterr song beside the local score", () => {
+    const { room } = roomWithSong();
+    expect(room.recordScoreImport("zombie", "s900", IMPORT_ID, "2026-10-24", 1010)).toEqual({ ok: true, roles: ["drums"] });
+
+    const state = room.getState(1010);
+    expect(state.setlist.songs[0]?.scoreImports).toEqual([
+      { key: "s900", importId: IMPORT_ID, revision: "2026-10-24", importedAt: 1010 }
+    ]);
+    expect(state.currentSong?.song?.scoreImports?.[0]?.importId).toBe(IMPORT_ID);
+    expect(state.currentScore?.imports).toEqual([expect.objectContaining({
+      key: "s900", roles: ["drums"], status: "missing", detail: expect.stringContaining("MuseScore laptop")
+    })]);
+  });
+
+  it("refuses imports for unknown songs and Songsterr songs the song does not use", () => {
+    const { room } = roomWithSong();
+    expect(room.recordScoreImport("nope", "s27", IMPORT_ID, undefined, 1010)).toMatchObject({ ok: false });
+    expect(room.recordScoreImport("zombie", "s5", IMPORT_ID, undefined, 1010)).toMatchObject({ ok: false });
+  });
+
+  it("serves the helper's export of an import, also after the helper is gone", () => {
+    const { room, helper, persisted } = roomWithSong();
+    room.recordScoreImport("zombie", "s900", IMPORT_ID, undefined, 1010);
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [
+        { songId: "zombie", status: "ready", scoreId: LOCAL_ID },
+        { songId: "zombie", status: "exporting", importKey: "s900", importId: IMPORT_ID }
+      ]
+    }, 1020);
+    expect(room.getState(1020).currentScore).toMatchObject({
+      status: "ready", scoreId: LOCAL_ID, imports: [expect.objectContaining({ status: "exporting" })]
+    });
+
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [
+        { songId: "zombie", status: "ready", scoreId: LOCAL_ID },
+        { songId: "zombie", status: "ready", scoreId: DRUM_SCORE_ID, importKey: "s900", importId: IMPORT_ID }
+      ]
+    }, 1030);
+    room.removeClient(helper.id);
+    const state = room.getState(1040);
+    expect(state.currentScore?.imports?.[0]).toMatchObject({ status: "ready", scoreId: DRUM_SCORE_ID });
+    expect(state.setlist.songs[0]?.scoreImports?.[0]?.scoreId).toBe(DRUM_SCORE_ID);
+    expect(JSON.stringify(persisted.at(-1))).toContain(DRUM_SCORE_ID);
+  });
+
+  it("keeps imports through host edits that do not mention them, and drops them with their URL", () => {
+    const { room, host } = roomWithSong();
+    room.recordScoreImport("zombie", "s900", IMPORT_ID, undefined, 1010);
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [{ ...song, notes: "loud" }], updatedAt: 1020 }, 1020);
+    room.handleMessage(host.id, { type: "currentSongUpdate", song, index: 1, total: 1, updatedAt: 1021 }, 1021);
+    expect(room.getState(1022).setlist.songs[0]?.scoreImports?.[0]?.key).toBe("s900");
+    expect(room.getState(1022).currentSong?.song?.scoreImports?.[0]?.key).toBe("s900");
+
+    const withoutDrums = { ...song, songsterrDrumUrl: undefined };
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [withoutDrums], updatedAt: 1030 }, 1030);
+    expect(room.getState(1031).setlist.songs[0]?.scoreImports).toBeUndefined();
+  });
+
+  it("gives a Songsterr-only song a score view once it has an import", () => {
+    const { room, host } = roomWithSong();
+    const songsterrOnly = { id: "creep", title: "Creep", sourceType: "songsterr" as const, source: "https://www.songsterr.com/a/wsa/radiohead-creep-tab-s44" };
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [song, songsterrOnly], updatedAt: 1010 }, 1010);
+    room.handleMessage(host.id, { type: "currentSongUpdate", song: songsterrOnly, index: 2, total: 2, updatedAt: 1011 }, 1011);
+    expect(room.getState(1012).currentScore).toBeUndefined();
+
+    room.recordScoreImport("creep", "s44", IMPORT_ID, undefined, 1020);
+    expect(room.getState(1020).currentScore).toMatchObject({
+      songId: "creep", status: "missing", imports: [expect.objectContaining({ key: "s44", roles: ["main"] })]
+    });
+  });
+});
+
+describe("RoomController Songsterr import requests", () => {
+  const song = {
+    id: "zombie", title: "Zombie", sourceType: "songsterr" as const,
+    source: "https://www.songsterr.com/a/wsa/cranberries-zombie-tab-s431"
+  };
+
+  function setup() {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const hostMessages: string[] = [];
+    const plusMessages: string[] = [];
+    const freeMessages: string[] = [];
+    const host = room.addClient(fakeSocket(hostMessages), { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [song], updatedAt: 1001 }, 1001);
+    const plus = room.addClient(fakeSocket(plusMessages), {
+      type: "clientHello", deviceName: "My Chrome", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canImportScores: true }]
+    }, 1002);
+    const free = room.addClient(fakeSocket(freeMessages), {
+      type: "clientHello", deviceName: "Drummer Chrome", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1003);
+    const parsed = (messages: string[]) => messages.map((message) => JSON.parse(message));
+    return { room, host, plus, free, hostMessages: () => parsed(hostMessages), plusMessages: () => parsed(plusMessages), freeMessages: () => parsed(freeMessages) };
+  }
+
+  it("hands the host's import to the extensions that can import, and tracks their progress", () => {
+    const { room, host, plus, plusMessages, freeMessages } = setup();
+    room.handleMessage(host.id, { type: "scoreImportRequest", songId: "zombie" }, 1010);
+
+    const command = plusMessages().find((message) => message.type === "scoreImportCommand");
+    expect(command).toMatchObject({ requestId: 1, song: { id: "zombie" } });
+    expect(freeMessages().some((message) => message.type === "scoreImportCommand")).toBe(false);
+    expect(room.getState(1010).scoreImportJobs).toEqual([{
+      songId: "zombie", requestId: 1, requestedAt: 1010,
+      devices: [{ clientId: plus.id, deviceName: "My Chrome", state: "running" }]
+    }]);
+
+    room.handleMessage(plus.id, { type: "scoreImportProgress", requestId: 1, state: "done", detail: "main tab: imported" }, 1020);
+    expect(room.getState(1020).scoreImportJobs?.[0]?.devices[0]).toMatchObject({ state: "done", detail: "main tab: imported" });
+  });
+
+  it("counts a browser that leaves mid-import as failed, and ignores progress from others", () => {
+    const { room, host, plus, free } = setup();
+    room.handleMessage(host.id, { type: "scoreImportRequest", songId: "zombie" }, 1010);
+    room.handleMessage(free.id, { type: "scoreImportProgress", requestId: 1, state: "done" }, 1011);
+    expect(room.getState(1011).scoreImportJobs?.[0]?.devices).toHaveLength(1);
+    room.removeClient(plus.id);
+    expect(room.getState(1020).scoreImportJobs?.[0]?.devices[0]).toMatchObject({ state: "failed", detail: expect.stringContaining("left") });
+  });
+
+  it("refuses non-hosts, songs without Songsterr URLs, and rooms without an importer", () => {
+    const { room, host, plus, free, hostMessages, freeMessages } = setup();
+    room.handleMessage(free.id, { type: "scoreImportRequest", songId: "zombie" }, 1010);
+    expect(freeMessages().at(-1)).toMatchObject({ type: "error" });
+
+    room.handleMessage(host.id, { type: "scoreImportRequest", songId: "nope" }, 1011);
+    expect(hostMessages().at(-1)).toMatchObject({ type: "error", message: expect.stringContaining("no Songsterr URL") });
+
+    room.removeClient(plus.id);
+    room.handleMessage(host.id, { type: "scoreImportRequest", songId: "zombie" }, 1012);
+    expect(hostMessages().at(-1)).toMatchObject({ type: "error", message: expect.stringContaining("Songsterr Plus") });
+    expect(room.getState(1012).scoreImportJobs).toBeUndefined();
+  });
+});
+
 describe("RoomController external cue", () => {
   function roomWithHostAndAdapter() {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);

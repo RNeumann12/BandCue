@@ -36,9 +36,11 @@ import {
   ScoreExportQueue,
   exportScore,
   findMuseScoreExecutable,
+  runMuseScore,
   type ExportedScore,
   type ScoreExportJob
 } from "./musescore-score-export.js";
+import { ScoreImportConverter, convertGuitarPro, type WantedImport } from "./songsterr-score-import.js";
 import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
 import { sanitizeStartMeasure } from "../shared/transport.js";
 import {
@@ -387,9 +389,26 @@ const scoreExportQueue = new ScoreExportQueue({
   publish: publishScoreExport,
   // Never compete with playback or a song change for the CPU, and never run a
   // MuseScore of our own while the warm-up is still looking for one.
-  isPaused: () => !args.scoreExport || (museScoreWarmUpStarted && !museScoreWarmUpSettled) || !myClientId || !ws ||
-    ws.readyState !== WebSocket.OPEN || openSongInFlight || lastArmed || lastTransportStatus !== "stopped",
+  isPaused: () => scoreExportQueuePaused(),
   onChange: () => {
+    void reportMuseScoreStatus();
+  },
+  log: (message) => console.log(message)
+});
+const scoreImportConverter = new ScoreImportConverter({
+  cacheDir: songsterrImportCacheDir(),
+  download: downloadScoreImport,
+  convert: async (gpPath, msczPath) => {
+    const executable = await museScoreExecutable();
+    if (!executable) {
+      throw new Error("MuseScore was not found; set BANDCUE_MUSESCORE_EXE to MuseScore4.exe.");
+    }
+    await convertGuitarPro(runMuseScore, executable, gpPath, msczPath, songsterrImportCacheDir());
+  },
+  isPaused: () => scoreExportQueuePaused(),
+  onChange: () => {
+    // A converted import becomes an export job.
+    syncScoreExports();
     void reportMuseScoreStatus();
   },
   log: (message) => console.log(message)
@@ -996,7 +1015,7 @@ function scoreReportsIfChanged(): Pick<AdapterStatus, "scores"> {
   if (!args.scoreExport) {
     return {};
   }
-  const scores = scoreExportQueue.reports();
+  const scores = [...scoreExportQueue.reports(), ...scoreImportConverter.reports()];
   const signature = JSON.stringify(scores);
   if (signature === lastPublishedScores) {
     return {};
@@ -3182,8 +3201,54 @@ function syncScoreExports(): void {
       });
     }
   }
+  // Songsterr imports: converted ones are exported like local scores, the
+  // rest wait for the converter. Songs without a MuseScore score count too.
+  const wantedImports: WantedImport[] = [];
+  for (const song of songs) {
+    for (const entry of song.scoreImports ?? []) {
+      const scorePath = scoreImportConverter.scorePathFor(entry.importId);
+      if (!scorePath) {
+        wantedImports.push({ songId: song.id, key: entry.key, importId: entry.importId });
+        continue;
+      }
+      jobs.push({
+        songId: song.id,
+        source: { absolutePath: scorePath, relativePath: `songsterr/${entry.key}.mscz`, title: song.title, force: true },
+        importKey: entry.key,
+        importId: entry.importId
+      });
+    }
+  }
+  scoreImportConverter.sync(wantedImports);
   const currentEntry = matchedCatalogEntry(matchMuseScoreSong(currentSong, scoreCatalog.entries), scoreCatalog.entries);
   scoreExportQueue.sync(jobs, currentEntry?.relativePath);
+}
+
+/** Never compete with playback or a song change for the CPU, and never run a
+ * MuseScore of our own while the warm-up is still looking for one. */
+function scoreExportQueuePaused(): boolean {
+  return !args.scoreExport || (museScoreWarmUpStarted && !museScoreWarmUpSettled) || !myClientId || !ws ||
+    ws.readyState !== WebSocket.OPEN || openSongInFlight || lastArmed || lastTransportStatus !== "stopped";
+}
+
+function songsterrImportCacheDir(): string {
+  return join(scoreExportCacheDir(), "songsterr-imports");
+}
+
+/** Fetches an imported Guitar Pro file from the coordinator's score store. */
+async function downloadScoreImport(importId: string): Promise<Buffer> {
+  if (!wsUrl) {
+    throw new Error("Not connected to the coordinator.");
+  }
+  const roomEndpoint = new URL(wsUrl);
+  const token = roomEndpoint.searchParams.get("token") ?? "";
+  const response = await fetch(
+    `${roomEndpoint.protocol === "wss:" ? "https:" : "http:"}//${roomEndpoint.host}/api/scores/${importId}/source.gp?token=${encodeURIComponent(token)}`
+  );
+  if (!response.ok) {
+    throw new Error(`Fetching the Songsterr import failed: HTTP ${response.status}.`);
+  }
+  return Buffer.from(await response.arrayBuffer());
 }
 
 let museScoreExecutablePromise: Promise<string | undefined> | undefined;

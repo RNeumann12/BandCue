@@ -1,5 +1,5 @@
-// Score view: the current MuseScore song's notes with a cursor that follows the
-// room's downbeat, so any browser in the room (an iPad on a music stand, a
+// Score view: the current song's notes (its MuseScore score, or a score imported
+// from Songsterr) with a cursor that follows the room's downbeat, so any browser in the room (an iPad on a music stand, a
 // laptop without MuseScore) can read along. It only ever reads: it never asks
 // the room to play or stop, and it plays no audio.
 //
@@ -20,6 +20,7 @@ import {
   partInNotation,
   followScrollTop,
   resolvePlayhead,
+  resolveScoreSource,
   songTimeMs,
   startOffsetMs,
   systemsOf,
@@ -47,6 +48,11 @@ const DEFAULT_SETTINGS = {
   part: "",
   /** @type {"notes" | "tab"} how a guitarist or bassist reads */
   notation: "tab",
+  /**
+   * @type {"musescore" | "songsterr"} the band's MuseScore score, or a score
+   * imported from Songsterr where a song has one (see resolveScoreSource)
+   */
+  source: "musescore",
   zoom: 1,
   /** "scroll" (one long column of pages) or "pages" (page turns). */
   layout: "scroll",
@@ -74,6 +80,8 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     title: /** @type {HTMLElement} */ (root.querySelector("#scoreTitle")),
     position: /** @type {HTMLElement} */ (root.querySelector("#scorePosition")),
     partSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scorePartSelect")),
+    sourceLabel: /** @type {HTMLElement} */ (root.querySelector("#scoreSourceLabel")),
+    sourceSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scoreSourceSelect")),
     notation: /** @type {HTMLElement} */ (root.querySelector("#scoreNotation")),
     notesButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreNotesButton")),
     tabButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreTabButton")),
@@ -178,20 +186,29 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     if (settings.focus && !document.body.classList.contains("score-focus")) {
       setFocus(true, false);
     }
+    const chosen = resolveScoreSource(score, settings.part, settings.source);
     el.title.textContent = song?.title ?? "";
+    if (chosen?.origin === "songsterr") {
+      el.title.textContent += chosen.revision ? ` · Songsterr ${chosen.revision}` : " · Songsterr";
+    }
+    el.sourceLabel.hidden = !score.imports?.length;
 
     if (settings.collapsed) {
       // Folded away (the host page's default): fetch nothing until it is opened.
       showMessage("");
-    } else if (score.status === "ready" && score.scoreId) {
-      if (loaded?.scoreId !== score.scoreId && loadingScoreId !== score.scoreId && Date.now() >= loadRetryAt) {
-        void load(score.scoreId);
+    } else if (chosen) {
+      if (loaded?.scoreId !== chosen.scoreId && loadingScoreId !== chosen.scoreId && Date.now() >= loadRetryAt) {
+        void load(chosen.scoreId);
       }
     } else {
       clearScore();
+      const converting = score.imports?.find((entry) => entry.status === "exporting");
+      const waitingImport = score.imports?.find((entry) => entry.detail);
       showMessage(score.status === "exporting"
         ? "The MuseScore laptop is exporting the notes for this song…"
-        : score.detail || "No notes for this song.");
+        : converting
+          ? "The MuseScore laptop is converting the Songsterr import…"
+          : (score.scoreId === undefined && waitingImport?.detail) || score.detail || "No notes for this song.");
     }
     preloadNextSong(next);
     requestDraw();
@@ -217,7 +234,7 @@ export function createScoreView({ root, token, isHost, roomNow }) {
         throw new Error("The export lists no parts.");
       }
       const timing = await fetchTiming(scoreId, part.timing);
-      if (state?.currentScore?.scoreId !== scoreId) {
+      if (resolveScoreSource(state?.currentScore, settings.part, settings.source)?.scoreId !== scoreId) {
         return;
       }
       showScore(scoreId, manifest, part.id, timing);
@@ -599,6 +616,7 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     el.readingLineSelect.value = settings.readingLine;
     el.leadInput.value = String(settings.leadMs);
     el.motionSelect.value = settings.motion;
+    el.sourceSelect.value = settings.source;
     renderFullscreenButton();
     root.classList.toggle("is-collapsed", settings.collapsed);
     el.collapseButton.textContent = settings.collapsed ? "Show notes" : "Hide notes";
@@ -620,7 +638,20 @@ export function createScoreView({ root, token, isHost, roomNow }) {
       }
       settings.part = part.id === "score" ? "" : part.name;
       saveSettings(settings);
+      // Another instrument may read another Songsterr import (the drummer's page).
+      const target = resolveScoreSource(state?.currentScore, settings.part, settings.source);
+      if (state && target && target.scoreId !== loaded.scoreId) {
+        update(state);
+        return;
+      }
       switchPart(part.id);
+    });
+    el.sourceSelect.addEventListener("change", () => {
+      settings.source = el.sourceSelect.value === "songsterr" ? "songsterr" : "musescore";
+      saveSettings(settings);
+      if (state) {
+        update(state);
+      }
     });
     for (const [button, notation] of /** @type {const} */ ([[el.notesButton, "notes"], [el.tabButton, "tab"]])) {
       button.addEventListener("click", () => {
@@ -760,9 +791,11 @@ export function createScoreView({ root, token, isHost, roomNow }) {
     }
     const songs = next.setlist.songs;
     const index = songs.findIndex((song) => song.id === next.currentSong?.song?.id);
-    const ready = (next.setlistScores ?? []).filter((score) => score.status === "ready" && score.scoreId);
+    const scores = next.setlistScores ?? [];
     const upcoming = index >= 0
-      ? songs.slice(index + 1).map((song) => ready.find((score) => score.songId === song.id)).find(Boolean)
+      ? songs.slice(index + 1)
+        .map((song) => resolveScoreSource(scores.find((score) => score.songId === song.id), settings.part, settings.source))
+        .find(Boolean)
       : undefined;
     const key = upcoming?.scoreId ? `${upcoming.scoreId}:${settings.part}:${settings.notation}` : "";
     if (!upcoming?.scoreId || key === preloadedKey) {
@@ -864,6 +897,7 @@ function loadSettings(isHost) {
     if (saved && typeof saved === "object") {
       if (typeof saved.part === "string") settings.part = saved.part.slice(0, 80);
       if (saved.notation === "notes" || saved.notation === "tab") settings.notation = saved.notation;
+      if (saved.source === "musescore" || saved.source === "songsterr") settings.source = saved.source;
       if (Number.isFinite(saved.zoom)) settings.zoom = Math.max(0.5, Math.min(2, saved.zoom));
       if (saved.layout === "scroll" || saved.layout === "pages") settings.layout = saved.layout;
       if (saved.readingLine in READING_LINES) settings.readingLine = saved.readingLine;
@@ -893,6 +927,7 @@ function saveSettings(settings) {
       ...saved,
       part: settings.part,
       notation: settings.notation,
+      source: settings.source,
       zoom: settings.zoom,
       layout: settings.layout,
       readingLine: settings.readingLine,

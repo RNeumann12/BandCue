@@ -18,6 +18,7 @@
  * @typedef {import("../src/shared/protocol.js").ScoreTimingEvent} ScoreTimingEvent
  * @typedef {import("../src/shared/protocol.js").ScoreTimingMeasure} ScoreTimingMeasure
  * @typedef {import("../src/shared/protocol.js").ScoreManifestPart} ScoreManifestPart
+ * @typedef {import("../src/shared/protocol.js").ScoreAvailability} ScoreAvailability
  * @typedef {import("../src/shared/protocol.js").TransportState} TransportState
  */
 
@@ -251,6 +252,37 @@ export function partFamily(name) {
     }
   }
   return "";
+}
+
+/**
+ * Which export of a song this device reads: the band's MuseScore score, or a
+ * score imported from Songsterr. With `source` "songsterr" it takes the import
+ * of the Songsterr page that serves this player's instrument (a drummer's
+ * arrangement may be a different Songsterr song than the main tab), else the
+ * main tab's. Either way it falls back to whatever is ready.
+ *
+ * @param {ScoreAvailability | undefined} score
+ * @param {string | undefined} preferredPart
+ * @param {"musescore" | "songsterr"} source
+ * @returns {{ scoreId: string, origin: "musescore" | "songsterr", revision?: string } | undefined}
+ */
+export function resolveScoreSource(score, preferredPart, source) {
+  if (!score) {
+    return undefined;
+  }
+  const imports = (score.imports ?? []).filter((entry) => entry.status === "ready" && entry.scoreId);
+  const family = partFamily(String(preferredPart ?? ""));
+  const role = family === "drums" || family === "bass" ? family : "main";
+  const imported = imports.find((entry) => entry.roles.includes(role)) ??
+    imports.find((entry) => entry.roles.includes("main")) ??
+    imports[0];
+  const fromImport = imported?.scoreId
+    ? { scoreId: imported.scoreId, origin: /** @type {const} */ ("songsterr"), revision: imported.revision }
+    : undefined;
+  const local = score.status === "ready" && score.scoreId
+    ? { scoreId: score.scoreId, origin: /** @type {const} */ ("musescore") }
+    : undefined;
+  return source === "songsterr" ? fromImport ?? local : local ?? fromImport;
 }
 
 /**

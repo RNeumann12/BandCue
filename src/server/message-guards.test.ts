@@ -30,6 +30,19 @@ describe("server message guards", () => {
       .toBe(true);
   });
 
+  it("passes the Songsterr import messages and capability through, and nothing malformed", () => {
+    expect(sanitizeClientHello({
+      type: "clientHello", deviceName: "Chrome", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canImportScores: true }]
+    })?.capabilities[0]).toEqual({ app: "songsterr", canPlay: true, canStop: true, canImportScores: true });
+    expect(sanitizeClientMessage({ type: "scoreImportRequest", songId: "zombie" }))
+      .toEqual({ type: "scoreImportRequest", songId: "zombie" });
+    expect(sanitizeClientMessage({ type: "scoreImportRequest" })).toBeUndefined();
+    expect(sanitizeClientMessage({ type: "scoreImportProgress", requestId: 3, state: "done", detail: "ok" }))
+      .toEqual({ type: "scoreImportProgress", requestId: 3, state: "done", detail: "ok" });
+    expect(sanitizeClientMessage({ type: "scoreImportProgress", requestId: 3, state: "exploded" })).toBeUndefined();
+  });
+
   it("rejects invalid hello roles and oversized payloads", () => {
     expect(sanitizeClientHello({
       type: "clientHello",

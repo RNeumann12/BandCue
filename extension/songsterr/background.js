@@ -76,6 +76,10 @@ let knownHosts = [];
 // single example URL from the host is enough to build the right URL for everyone.
 // Persisted per-machine.
 let memberInstrument = "auto";
+// Set when this browser's last import found no Guitar Pro download (no
+// Songsterr Plus): it then stops offering to import, so the room's import
+// button only reaches the browsers that can. The popup's button still tries.
+let songsterrPlusMissing = false;
 // What this device calls itself in the room. Chrome gives an extension no way to
 // read the computer's name -- chrome.enterprise.deviceAttributes.getDeviceHostname()
 // is ChromeOS-and-policy-only, and nothing else (userAgent, userAgentData, the
@@ -234,6 +238,12 @@ const LAN_SCAN_SUBNETS = [
 ];
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "popupImportScores") {
+    void importScoresForCurrentSong();
+    sendResponse(getPopupState());
+    return true;
+  }
+
   if (message.type === "popupConnect") {
     roomInput = normalizeRoomLocator(message.roomUrl);
     autoConnectEnabled = true;
@@ -267,6 +277,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "songsterrStatus") {
+    if (sender.tab?.id !== undefined && importTabIds.has(sender.tab.id)) {
+      return false;
+    }
     lastContentScriptStatusAt = Date.now();
     const tabIdentity = getSongsterrTabIdentity(sender.tab);
     publishAdapterStatus({
@@ -324,8 +337,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument", "deviceName"], (stored) => {
+chrome.storage.local.get(["roomInput", "roomUrl", "suppressAutoOpen", "autoConnectEnabled", "knownHosts", "instrument", "deviceName", "songsterrPlusMissing"], (stored) => {
   suppressAutoOpen = Boolean(stored.suppressAutoOpen);
+  songsterrPlusMissing = Boolean(stored.songsterrPlusMissing);
   autoConnectEnabled = Boolean(stored.autoConnectEnabled);
   knownHosts = Array.isArray(stored.knownHosts) ? stored.knownHosts : [];
   memberInstrument = normalizeInstrument(stored.instrument);
@@ -479,7 +493,13 @@ async function connect() {
       type: "clientHello",
       deviceName: resolveDeviceName(),
       role: "desktop-adapter",
-      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canSetTempo: true }]
+      capabilities: [{
+        app: "songsterr",
+        canPlay: true,
+        canStop: true,
+        canSetTempo: true,
+        canImportScores: !songsterrPlusMissing
+      }]
     });
 
     // Warm up with a quick burst so the offset converges within ~2s, then settle
@@ -550,6 +570,11 @@ async function connect() {
         void applyTempoForSong(currentRoomSong);
       }
       reconcileTransportFromRoomState(message);
+      return;
+    }
+
+    if (message.type === "scoreImportCommand") {
+      void importScoresForSong(message.song, message.requestId);
       return;
     }
 
@@ -1438,7 +1463,7 @@ async function findSongsterrTabsForUrl(targetUrl) {
 async function findSongsterrTabsForUrls(targetUrls) {
   const targetKeys = new Set(targetUrls.map(songKey).filter(Boolean));
   const tabs = (await chrome.tabs.query({}))
-    .filter((tab) => isSongsterrUrl(tab.url || ""));
+    .filter((tab) => isSongsterrUrl(tab.url || "") && !importTabIds.has(tab.id));
   return tabs.filter((tab) => tab.url && targetKeys.has(songKey(tab.url)));
 }
 
@@ -1487,7 +1512,7 @@ async function sendMessageToSongsterrTab(tabId, message) {
 async function findSongsterrTabs(currentSong) {
   const targetUrls = songsterrReferences(currentSong).map(normalizeSongsterrUrl).filter(Boolean);
   const tabs = (await chrome.tabs.query({}))
-    .filter((tab) => isSongsterrUrl(tab.url || ""));
+    .filter((tab) => isSongsterrUrl(tab.url || "") && !importTabIds.has(tab.id));
   if (!targetUrls.length) {
     return tabs;
   }
@@ -1517,6 +1542,253 @@ function songsterrReferences(song) {
     song?.songsterrDrumUrl?.trim() ?? ""
   ].filter(Boolean);
   return [...new Set(references)];
+}
+
+// --- Importing notes from Songsterr -------------------------------------------
+//
+// The score view can show a song's notes from Songsterr instead of the band's
+// MuseScore file (a drummer may read a different Songsterr arrangement). With
+// Songsterr Plus, Songsterr's own "Download -> Guitar Pro" builds the file in
+// the page as a blob; this opens each of the song's Songsterr pages in a
+// background tab, takes that blob before it becomes a download, and posts it to
+// the coordinator, which keeps it and has the MuseScore helper convert it.
+// Everything that knows Songsterr's page lives in captureSongsterrGuitarPro().
+
+const importTabIds = new Set();
+let scoreImportStatus = { running: false, detail: "" };
+
+// Mirror of songsterrImportTargets() in src/shared/song-sources.ts.
+function scoreImportTargets(song) {
+  const targets = [];
+  const add = (url, role) => {
+    const key = songsterrSongId(url);
+    if (!key) {
+      return;
+    }
+    const existing = targets.find((target) => target.key === key);
+    if (existing) {
+      existing.roles.push(role);
+    } else {
+      targets.push({ key, url, roles: [role] });
+    }
+  };
+  add(songsterrReference(song), "main");
+  add(song?.songsterrBassUrl?.trim() ?? "", "bass");
+  add(song?.songsterrDrumUrl?.trim() ?? "", "drums");
+  return targets;
+}
+
+// "s<digits>" from a Songsterr tab URL, or "" (unlike songKey(), no path fallback).
+function songsterrSongId(value) {
+  const key = songKey(value);
+  return /^s\d+$/.test(key) ? key : "";
+}
+
+// Songsterr names the file "<artist>-<title>-<M>-<D>-<YYYY>.gp" after the tab's
+// revision date; that date tells the band how fresh an import is.
+function revisionFromFileName(fileName) {
+  const match = String(fileName || "").match(/(\d{1,2})-(\d{1,2})-(\d{4})\.gp\w*$/i);
+  return match ? `${match[3]}-${match[1].padStart(2, "0")}-${match[2].padStart(2, "0")}` : "";
+}
+
+function importScoresForCurrentSong() {
+  if (!currentRoomSong || !scoreImportTargets(currentRoomSong).length) {
+    scoreImportStatus = { running: false, detail: "The room's current song has no Songsterr URL." };
+    return Promise.resolve();
+  }
+  return importScoresForSong(currentRoomSong);
+}
+
+/**
+ * Imports every Songsterr page of a song. `requestId` is set when the room
+ * asked (the host's import button); progress then goes back to the room too.
+ */
+async function importScoresForSong(song, requestId) {
+  const report = (state, detail) => {
+    scoreImportStatus = { running: state === "running", detail };
+    if (requestId !== undefined) {
+      send({ type: "scoreImportProgress", requestId, state, detail });
+    }
+  };
+  if (scoreImportStatus.running) {
+    if (requestId !== undefined) {
+      send({ type: "scoreImportProgress", requestId, state: "failed", detail: "This browser is already importing." });
+    }
+    return;
+  }
+  const targets = scoreImportTargets(song);
+  if (!song || !targets.length) {
+    report("failed", "The song has no Songsterr URL.");
+    return;
+  }
+  if (!wsUrl || !myClientId || socket?.readyState !== WebSocket.OPEN) {
+    report("failed", "Connect to the BandCue room first.");
+    return;
+  }
+  const results = [];
+  let imported = 0;
+  let noPlus = 0;
+  report("running", `Importing notes for ${song.title}…`);
+  for (const target of targets) {
+    const label = target.roles.filter((role) => role !== "main").join("/") || "main tab";
+    report("running", `Fetching the ${label} from Songsterr…`);
+    try {
+      const file = await fetchGuitarProFromSongsterr(target.url);
+      report("running", `Sending the ${label} to BandCue…`);
+      await postScoreImport(song.id, target.key, file);
+      imported += 1;
+      results.push(`${label}: imported${file.revision ? ` (Songsterr ${file.revision})` : ""}`);
+    } catch (error) {
+      if (error?.noPlus) {
+        noPlus += 1;
+      }
+      results.push(`${label}: ${error?.message || error}`);
+    }
+  }
+  report(imported === targets.length ? "done" : "failed", results.join(" · "));
+  rememberSongsterrPlus(imported > 0 ? false : noPlus > 0 ? true : songsterrPlusMissing);
+}
+
+function rememberSongsterrPlus(missing) {
+  if (missing === songsterrPlusMissing) {
+    return;
+  }
+  songsterrPlusMissing = missing;
+  chrome.storage.local.set({ songsterrPlusMissing });
+  // The capability travels in clientHello: reconnect to announce the change.
+  reannounceIdentity();
+}
+
+async function fetchGuitarProFromSongsterr(url) {
+  const tab = await chrome.tabs.create({ url, active: false });
+  importTabIds.add(tab.id);
+  try {
+    await waitForTabReady(tab.id, 20000);
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: "MAIN",
+      func: captureSongsterrGuitarPro
+    });
+    const result = injection?.result;
+    if (!result?.ok) {
+      throw Object.assign(new Error(result?.error || "Songsterr did not hand over the Guitar Pro file."), {
+        noPlus: Boolean(result?.noPlus)
+      });
+    }
+    const binary = atob(result.base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return { bytes, fileName: result.fileName, revision: revisionFromFileName(result.fileName) };
+  } finally {
+    importTabIds.delete(tab.id);
+    chrome.tabs.remove(tab.id).catch(() => undefined);
+  }
+}
+
+async function postScoreImport(songId, key, file) {
+  const endpoint = new URL(wsUrl);
+  const params = new URLSearchParams({
+    token: endpoint.searchParams.get("token") ?? "",
+    songId,
+    key,
+    revision: file.revision
+  });
+  const response = await fetch(
+    `${endpoint.protocol === "wss:" ? "https:" : "http:"}//${endpoint.host}/api/score-imports?${params}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/octet-stream", "x-bandcue-client-id": myClientId },
+      body: file.bytes
+    }
+  );
+  if (!response.ok) {
+    const reason = await response.json().then((body) => body?.error).catch(() => "");
+    throw new Error(reason || `BandCue refused the import (HTTP ${response.status}).`);
+  }
+}
+
+// Runs inside the Songsterr page (MAIN world, so it sees the page's own
+// URL.createObjectURL), and must therefore be self-contained. Opens the
+// download menu, picks Guitar Pro, and keeps the generated file from turning
+// into a download. Songsterr only offers the Guitar Pro download with Plus.
+async function captureSongsterrGuitarPro() {
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const deadline = Date.now() + 30000;
+  const byId = (id) => document.getElementById(id);
+  const isGuitarProName = (name) => /\.(gp\d?|gpx)$/i.test(name || "");
+  while (!byId("control-export") && Date.now() < deadline) {
+    await sleep(250);
+  }
+  if (!byId("control-export")) {
+    return { ok: false, error: "Songsterr's download button did not appear." };
+  }
+
+  /** @type {Blob | undefined} */
+  let blob;
+  /** @type {string | undefined} */
+  let blobUrl;
+  let fileName = "";
+  const originalCreate = URL.createObjectURL;
+  const originalClick = HTMLAnchorElement.prototype.click;
+  const originalDispatch = HTMLAnchorElement.prototype.dispatchEvent;
+  URL.createObjectURL = function (object) {
+    const created = originalCreate.call(URL, object);
+    if (object instanceof Blob) {
+      blob = object;
+      blobUrl = created;
+    }
+    return created;
+  };
+  HTMLAnchorElement.prototype.click = function () {
+    if (isGuitarProName(this.download)) {
+      fileName = this.download;
+      return undefined;
+    }
+    return originalClick.call(this);
+  };
+  HTMLAnchorElement.prototype.dispatchEvent = function (event) {
+    if (event?.type === "click" && isGuitarProName(this.download)) {
+      fileName = this.download;
+      return true;
+    }
+    return originalDispatch.call(this, event);
+  };
+  try {
+    if (!byId("control-export-gp")) {
+      byId("control-export").click();
+    }
+    // The menu opens at once; without Plus it is an upgrade popup instead.
+    const menuDeadline = Math.min(deadline, Date.now() + 5000);
+    let gpButton;
+    while (!(gpButton = byId("control-export-gp")) && Date.now() < menuDeadline) {
+      await sleep(200);
+    }
+    if (!gpButton) {
+      return { ok: false, noPlus: true, error: "Songsterr offers no Guitar Pro download here. Log in to Songsterr (Plus) in this browser." };
+    }
+    gpButton.click();
+    while (!(blob && fileName) && Date.now() < deadline) {
+      await sleep(200);
+    }
+    if (!blob || !fileName) {
+      return { ok: false, error: "Songsterr did not produce the Guitar Pro file. Is this browser logged in to Songsterr Plus?" };
+    }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    }
+    return { ok: true, fileName, base64: btoa(binary) };
+  } finally {
+    URL.createObjectURL = originalCreate;
+    HTMLAnchorElement.prototype.click = originalClick;
+    HTMLAnchorElement.prototype.dispatchEvent = originalDispatch;
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+    }
+  }
 }
 
 // Mirror of sanitizeStartMeasure in src/shared/transport.ts: 0 means "from the
@@ -2209,6 +2481,9 @@ function getPopupState() {
     effectiveDeviceName: resolveDeviceName(),
     roomCode: connectedRoomCode,
     currentSongTitle: currentRoomSong?.title || "",
+    canImportScores: scoreImportTargets(currentRoomSong).length > 0,
+    songsterrPlusMissing,
+    scoreImport: scoreImportStatus,
     status: lastStatus
   };
 }

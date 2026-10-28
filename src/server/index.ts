@@ -20,6 +20,7 @@ import {
   ScoreStoreError,
   scoreStoreDirFor
 } from "./score-store.js";
+import { MAX_IMPORT_BYTES, SONGSTERR_KEY_PATTERN, importIdFor, isGuitarProFile } from "./score-import.js";
 import { selectLanCandidates } from "../shared/lan-address.js";
 import {
   MAX_WS_MESSAGE_BYTES,
@@ -112,6 +113,11 @@ async function handleHttpRequest(
 
   if (url.pathname.startsWith("/api/scores/")) {
     await handleScoreRequest(req, res, url);
+    return;
+  }
+
+  if (url.pathname === "/api/score-imports") {
+    await handleScoreImportRequest(req, res, url);
     return;
   }
 
@@ -253,6 +259,73 @@ async function handleScoreRequest(
   const stream = scoreStore.open(stored);
   stream.on("error", () => res.destroy());
   stream.pipe(res);
+}
+
+/**
+ * `POST /api/score-imports?songId=&key=&revision=` stores a Guitar Pro file a
+ * Songsterr extension fetched from one of the song's Songsterr pages and
+ * records it on the song. Like score uploads, only a connected desktop adapter
+ * may send one.
+ */
+async function handleScoreImportRequest(
+  req: import("node:http").IncomingMessage,
+  res: import("node:http").ServerResponse,
+  url: URL
+): Promise<void> {
+  const reply = (status: number, body: Record<string, unknown>) => {
+    res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(body));
+  };
+  const candidate = url.searchParams.get("token");
+  if (!tokenMatches(candidate, ROOM_TOKEN) && !tokenMatches(candidate, HOST_TOKEN)) {
+    req.resume();
+    reply(401, { error: "Unauthorized" });
+    return;
+  }
+  if (req.method !== "POST") {
+    req.resume();
+    res.writeHead(405, { allow: "POST" });
+    res.end();
+    return;
+  }
+  const clientId = req.headers["x-bandcue-client-id"];
+  if (!room.isDesktopAdapter(typeof clientId === "string" ? clientId : undefined)) {
+    req.resume();
+    reply(403, { error: "Only a connected desktop adapter may import scores." });
+    return;
+  }
+  const songId = url.searchParams.get("songId") ?? "";
+  const key = url.searchParams.get("key") ?? "";
+  if (!songId || !SONGSTERR_KEY_PATTERN.test(key)) {
+    req.resume();
+    reply(400, { error: "songId and a Songsterr key (s<digits>) are required." });
+    return;
+  }
+  const body = await readBody(req, MAX_IMPORT_BYTES);
+  if (!body) {
+    res.writeHead(413, { "content-type": "application/json; charset=utf-8", connection: "close" });
+    res.end(JSON.stringify({ error: "File too large." }));
+    return;
+  }
+  if (!isGuitarProFile(body)) {
+    reply(400, { error: "That is not a Guitar Pro file." });
+    return;
+  }
+  const importId = importIdFor(body);
+  try {
+    await scoreStore.put(importId, "source.gp", body, false);
+  } catch (error) {
+    reply(error instanceof ScoreStoreError ? error.statusCode : 500, {
+      error: error instanceof Error ? error.message : "Storing the import failed."
+    });
+    return;
+  }
+  const result = room.recordScoreImport(songId, key, importId, url.searchParams.get("revision") ?? undefined);
+  if (!result.ok) {
+    reply(409, { error: result.message });
+    return;
+  }
+  reply(200, { importId, roles: result.roles });
 }
 
 function readBody(req: import("node:http").IncomingMessage, limit: number): Promise<Buffer | undefined> {

@@ -334,6 +334,13 @@ elements.setlistItems?.addEventListener("click", (event) => {
   if (button.dataset.setlistAction === "move-down") {
     moveSong(index, index + 1);
   }
+
+  if (button.dataset.setlistAction === "import-notes") {
+    const song = setlist[index];
+    if (song) {
+      send({ type: "scoreImportRequest", songId: song.id });
+    }
+  }
 });
 
 elements.setlistUndoButton?.addEventListener("click", undoSetlistChange);
@@ -2070,7 +2077,7 @@ let lastScoreBadgeSignature = "";
 // The score-view status of each MuseScore song arrives with the room state, not
 // with the setlist, so it gets its own cheap re-render.
 function renderSetlistScoreBadges(state) {
-  const signature = JSON.stringify(state.setlistScores ?? []);
+  const signature = JSON.stringify([state.setlistScores ?? [], state.scoreImportJobs ?? [], canImportFromSongsterr(state)]);
   if (!isHost || signature === lastScoreBadgeSignature) {
     return;
   }
@@ -2085,7 +2092,64 @@ function renderScoreBadge(song) {
   }
   const label = score.status === "ready" ? "Notes ready" : score.status === "exporting" ? "Exporting notes" : "No notes";
   const title = score.detail ? ` title="${escapeHtml(score.detail)}"` : "";
-  return `<span class="score-badge ${escapeHtml(score.status)}"${title}>${label}</span>`;
+  const hasMuseScore = song.sourceType === "musescore" || Boolean(song.museScoreSource?.trim());
+  const local = !hasMuseScore
+    ? ""
+    : `<span class="score-badge ${escapeHtml(score.status)}"${title}>${label}</span>`;
+  return local + (score.imports ?? []).map(renderImportBadge).join("");
+}
+
+/** Whether a connected Songsterr extension can import notes (it has Songsterr Plus). */
+function canImportFromSongsterr(state) {
+  return (state?.clients ?? []).some((client) =>
+    client.capabilities?.some((capability) => capability.app === "songsterr" && capability.canImportScores));
+}
+
+function hasSongsterrUrl(song) {
+  return Boolean(song.songsterrUrl?.trim() || song.songsterrBassUrl?.trim() || song.songsterrDrumUrl?.trim() ||
+    (song.sourceType === "songsterr" && song.source?.trim()));
+}
+
+function renderImportButton(song, index) {
+  if (!hasSongsterrUrl(song)) {
+    return "";
+  }
+  const job = lastState?.scoreImportJobs?.find((candidate) => candidate.songId === song.id);
+  const running = job?.devices.some((device) => device.state === "running");
+  const available = canImportFromSongsterr(lastState);
+  const title = available
+    ? "Import this song's notes from Songsterr (every Songsterr URL of the song) through the BandCue extension"
+    : "Needs the BandCue extension connected in a browser logged in to Songsterr Plus";
+  return `<button class="link-button" type="button" data-setlist-action="import-notes" data-index="${index}"
+            title="${escapeHtml(title)}"${available && !running ? "" : " disabled"}>${running ? "Importing…" : "Import notes"}</button>`;
+}
+
+/** What the last import of this song did, while it runs and when it failed. */
+function renderImportJob(song) {
+  const job = lastState?.scoreImportJobs?.find((candidate) => candidate.songId === song.id);
+  if (!job) {
+    return "";
+  }
+  const running = job.devices.find((device) => device.state === "running");
+  const done = job.devices.find((device) => device.state === "done");
+  const failed = job.devices.filter((device) => device.state === "failed");
+  if (running) {
+    return `<span class="small">Songsterr import: ${escapeHtml(running.detail || "starting…")}</span>`;
+  }
+  if (done || !failed.length) {
+    return "";
+  }
+  const reasons = failed.map((device) => `${device.deviceName}: ${device.detail || "failed"}`).join(" · ");
+  return `<span class="small">Songsterr import did not finish – ${escapeHtml(reasons)}</span>`;
+}
+
+function renderImportBadge(entry) {
+  const roles = entry.roles.filter((role) => role !== "main");
+  const what = roles.length ? `Songsterr ${roles.join("/")} notes` : "Songsterr notes";
+  const label = entry.status === "ready" ? what : entry.status === "exporting" ? `Converting ${what}` : `${what} waiting`;
+  const detail = [entry.revision ? `Songsterr revision ${entry.revision}` : "", entry.detail ?? ""].filter(Boolean).join(" – ");
+  const title = detail ? ` title="${escapeHtml(detail)}"` : "";
+  return ` <span class="score-badge ${escapeHtml(entry.status)}"${title}>${escapeHtml(label)}</span>`;
 }
 
 function renderSetlistItem(song, index) {
@@ -2107,6 +2171,7 @@ function renderSetlistItem(song, index) {
           <button class="link-button" type="button" data-setlist-action="select" data-index="${index}"${isCurrent ? " disabled" : ""}>
             ${isCurrent ? "Current" : "Make Current"}
           </button>
+          ${renderImportButton(song, index)}
           <button class="link-button" type="button" data-setlist-action="edit" data-index="${index}">
             ${isEditing ? "Editing" : "Edit"}
           </button>
@@ -2116,6 +2181,7 @@ function renderSetlistItem(song, index) {
         </div>
       </div>
       <span class="small">${escapeHtml(meta)} ${renderScoreBadge(song)}</span>
+      ${renderImportJob(song)}
       ${notes}
     </div>
   `;

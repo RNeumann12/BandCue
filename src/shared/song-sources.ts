@@ -1,4 +1,4 @@
-import type { SetlistSong } from "./protocol.js";
+import type { ScoreImportRole, SetlistSong } from "./protocol.js";
 
 // A single setlist song can target more than one app at once: a Songsterr URL
 // for band mates and a local MuseScore score for whoever drives playback from
@@ -48,6 +48,50 @@ export function songsterrReferences(song: SetlistSong | undefined): string[] {
     song?.songsterrDrumUrl?.trim() ?? ""
   ].filter(Boolean);
   return [...new Set(references)];
+}
+
+/**
+ * The Songsterr song id in a tab URL (`s<digits>`), or "" without one. The
+ * same id as the extension's songKeyFromPath(): instrument slugs and `t<n>`
+ * track suffixes do not change it.
+ */
+export function songsterrSongKey(url: string | undefined): string {
+  try {
+    const songId = new URL(url ?? "").pathname.match(/-s(\d+)(?:t\d+)?(?:\/|$)/i)?.[1];
+    return songId ? `s${songId}` : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The Songsterr songs a setlist song's notes can be imported from: one per
+ * Songsterr song id, with the URL to open and which roles it serves (the
+ * drummer's arrangement may be a different song than the main tab).
+ */
+export function songsterrImportTargets(song: SetlistSong | undefined): { key: string; url: string; roles: ScoreImportRole[] }[] {
+  const targets: { key: string; url: string; roles: ScoreImportRole[] }[] = [];
+  const add = (url: string, role: ScoreImportRole) => {
+    const key = songsterrSongKey(url);
+    if (!key) {
+      return;
+    }
+    const existing = targets.find((target) => target.key === key);
+    if (existing) {
+      existing.roles.push(role);
+    } else {
+      targets.push({ key, url, roles: [role] });
+    }
+  };
+  add(songsterrReference(song), "main");
+  add(song?.songsterrBassUrl?.trim() ?? "", "bass");
+  add(song?.songsterrDrumUrl?.trim() ?? "", "drums");
+  return targets;
+}
+
+/** Whether a song can show notes: a MuseScore score or a Songsterr import. */
+export function hasScoreView(song: SetlistSong | undefined): boolean {
+  return appliesToMuseScore(song) || Boolean(song?.scoreImports?.length);
 }
 
 export function appliesToMuseScore(song: SetlistSong | undefined): boolean {

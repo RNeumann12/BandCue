@@ -44,6 +44,11 @@ export interface AdapterCapability {
   canStop: boolean;
   /** Whether this adapter can apply and verify a per-song playback tempo. */
   canSetTempo?: boolean;
+  /**
+   * Songsterr extension: it imports notes on the room's `scoreImportCommand`.
+   * Off once the browser was found without Songsterr Plus.
+   */
+  canImportScores?: boolean;
 }
 
 export type AdapterTempoState = "pending" | "applied" | "failed" | "unsupported";
@@ -91,13 +96,31 @@ export interface ScoreExportReport {
   status: "queued" | "exporting" | "ready" | "failed";
   scoreId?: string;
   detail?: string;
+  /** Set for the export of a Songsterr import (`ScoreImport.key`/`importId`). */
+  importKey?: string;
+  importId?: string;
 }
 
-/** What the room tells every device about a song's score view. */
+/**
+ * What the room tells every device about a song's score view: the local
+ * MuseScore score (`status`/`scoreId`) and any Songsterr imports.
+ */
 export interface ScoreAvailability {
   songId: string;
   status: "ready" | "exporting" | "missing";
   scoreId?: string;
+  detail?: string;
+  imports?: ScoreImportAvailability[];
+}
+
+export interface ScoreImportAvailability {
+  key: string;
+  /** Which of the song's Songsterr URLs this import came from. */
+  roles: ScoreImportRole[];
+  status: "ready" | "exporting" | "missing";
+  scoreId?: string;
+  revision?: string;
+  importedAt: number;
   detail?: string;
 }
 
@@ -308,6 +331,35 @@ export interface OpenSongRequest {
   requestedAt: number;
 }
 
+/** Host: have the Songsterr extensions import a song's notes from Songsterr. */
+export interface ScoreImportRequest {
+  type: "scoreImportRequest";
+  songId: string;
+}
+
+/** Room to each Songsterr extension that can import: import this song's Songsterr pages. */
+export interface ScoreImportCommand {
+  type: "scoreImportCommand";
+  requestId: number;
+  song: SetlistSong;
+}
+
+/** Extension to room: how a `scoreImportCommand` is going on this browser. */
+export interface ScoreImportProgress {
+  type: "scoreImportProgress";
+  requestId: number;
+  state: "running" | "done" | "failed";
+  detail?: string;
+}
+
+/** The latest import the host asked for, per song, with each extension's progress. */
+export interface ScoreImportJob {
+  songId: string;
+  requestId: number;
+  requestedAt: number;
+  devices: { clientId: string; deviceName: string; state: ScoreImportProgress["state"]; detail?: string }[];
+}
+
 export interface TransportCommand {
   type: "transportCommand";
   action: TransportAction;
@@ -375,6 +427,32 @@ export interface SetlistSong {
   helixTargetMeasure?: number;
   helixOffsetMs?: number;
   notes?: string;
+  /**
+   * Guitar Pro files imported from this song's Songsterr pages, one per
+   * Songsterr song id. They sit beside the local MuseScore score and never
+   * replace it; each tablet chooses which one it reads.
+   */
+  scoreImports?: ScoreImport[];
+}
+
+/** Which of a song's Songsterr URLs a Songsterr song id serves. */
+export type ScoreImportRole = "main" | "bass" | "drums";
+
+/**
+ * One import of a Songsterr tab (every track, as Guitar Pro). The coordinator
+ * keeps the file as `/api/scores/<importId>/source.gp`; the MuseScore helper
+ * converts and exports it like a local score, and `scoreId` names that export
+ * once it is on the coordinator.
+ */
+export interface ScoreImport {
+  /** Songsterr song id, `s<digits>`. */
+  key: string;
+  /** Content hash of the Guitar Pro file. */
+  importId: string;
+  /** Songsterr's revision date of the tab, as Songsterr names the file. */
+  revision?: string;
+  importedAt: number;
+  scoreId?: string;
 }
 
 export interface CurrentSongState {
@@ -457,6 +535,8 @@ export interface RoomState {
   currentScore?: ScoreAvailability;
   /** Score views of every MuseScore song in the setlist, in setlist order. */
   setlistScores?: ScoreAvailability[];
+  /** Imports from Songsterr the host asked for (see ScoreImportRequest). */
+  scoreImportJobs?: ScoreImportJob[];
   setlist: SetlistState;
   safety: SafetyState;
   companionUrl: string;
@@ -497,6 +577,8 @@ export type ClientMessage =
   | SetlistUpdate
   | SafetyUpdate
   | OpenSongRequest
+  | ScoreImportRequest
+  | ScoreImportProgress
   | TransportRequest
   | ExternalCue;
 
@@ -505,6 +587,7 @@ export type ServerMessage =
   | ClockSyncResult
   | TransportCommand
   | OpenSongCommand
+  | ScoreImportCommand
   | RoomState
   | ErrorMessage
   | HelixScheduleUpdate
