@@ -44,16 +44,16 @@
     "jsqr": "^1.4.0",
     "multicast-dns": "^7.2.5",
     "qrcode": "^1.5.4",
-    "ws": "^8.18.0"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
-    "@types/chrome": "^0.2.2",
+    "@playwright/test": "^1.64.1",
+    "@types/chrome": "^0.3.6",
     "@types/multicast-dns": "^7.2.4",
     "@types/node": "^24.0.0",
     "@types/qrcode": "^1.5.5",
-    "@types/ws": "^8.5.12",
-    "tsx": "^4.19.2",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.2",
     "vitest": "^4.1.9"
   }
