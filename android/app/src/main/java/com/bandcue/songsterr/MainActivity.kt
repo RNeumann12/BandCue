@@ -1,6 +1,7 @@
 package com.bandcue.songsterr
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -50,6 +51,9 @@ class MainActivity : Activity() {
         }
     }
 
+    // Lint wants the export flag on the pre-Tiramisu call too, but that
+    // registerReceiver has no flags and the rule only binds on Android 14+.
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onStart() {
         super.onStart()
         val filter = IntentFilter(BandCueAdapterService.ACTION_STATUS)

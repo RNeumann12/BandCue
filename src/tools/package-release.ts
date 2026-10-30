@@ -63,7 +63,7 @@ console.log("");
 console.log(`BandCue v${version} release folder: ${bundleDir}`);
 console.log(`BandCue v${version} release zip:    ${releaseZip}`);
 console.log(`Extension package:                  ${join(packageDir, `bandcue-songsterr-extension-${version}.zip`)}`);
-console.log(`Android package:                    ${join(packageDir, `bandcue-songsterr-${version}.apk`)}`);
+console.log(`Android package:                    ${existsSync(androidApk) ? join(packageDir, `bandcue-songsterr-${version}.apk`) : "skipped (--skip-android)"}`);
 
 function run(command: string, args: string[]): void {
   const result = process.platform === "win32" && command === "npm"

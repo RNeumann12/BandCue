@@ -55,7 +55,10 @@ jobs:
         shell: powershell
         run: |
           $failed = $false
-          foreach ($file in Get-ChildItem scripts -Filter *.ps1) {
+          $files = @(Get-ChildItem scripts -Filter *.ps1)
+          if ($files.Count -eq 0) { Write-Output "::error::No scripts/*.ps1 found"; exit 1 }
+          foreach ($file in $files) {
+            Write-Output "Parsing scripts/$($file.Name)"
             $problems = $null
             [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$problems)
             foreach ($problem in $problems) {
