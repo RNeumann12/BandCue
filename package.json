@@ -50,7 +50,7 @@
     "@playwright/test": "^1.61.1",
     "@types/chrome": "^0.2.2",
     "@types/multicast-dns": "^7.2.4",
-    "@types/node": "^24.0.0",
+    "@types/node": "^26.6.5",
     "@types/qrcode": "^1.5.5",
     "@types/ws": "^8.5.12",
     "tsx": "^4.19.2",
