@@ -1327,6 +1327,125 @@ body[data-transport="running"] .countdown {
   white-space: nowrap;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The fallback that keeps the screen on (keep-awake.js): playing, never seen. */
+.keep-awake-video {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  pointer-events: none;
+}
+
+.score-jump,
+.score-next,
+.score-awake {
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.score-jump {
+  background: #f2c14e;
+  color: #14130f;
+}
+
+.score-next {
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.2));
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.score-next[data-status="missing"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.score-awake {
+  background: var(--ink);
+  color: var(--surface);
+}
+
+.score-settings-body .score-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Page numbers: shown on page turns, where the next page may sit on the left. */
+.score-page-number {
+  display: none;
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  background: rgba(20, 19, 15, 0.7);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.score-view[data-layout="pages"] .score-page-number {
+  display: block;
+}
+
+/* Count-in beats flash along the top edge of the notes, never over them. */
+.score-beat-flash {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 2;
+  height: 8px;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 60ms linear;
+}
+
+.score-beat-flash.is-on {
+  opacity: 1;
+}
+
+.score-measure-mark.is-before-jump {
+  background: rgba(242, 193, 78, 0.22);
+}
+
+/* Night mode: the white pages turn dark, the notes light; the cursor keeps its colours. */
+.score-view.is-night .score-scroller {
+  background: #1c1d1a;
+}
+
+.score-view.is-night .score-page {
+  background: #111;
+}
+
+.score-view.is-night .score-page img {
+  filter: invert(0.92) hue-rotate(180deg);
+}
+
+/* The host choosing a start bar: every tap on the notes picks one. */
+.score-view.is-picking .score-scroller {
+  cursor: crosshair;
+  outline: 3px dashed var(--accent);
+  outline-offset: -3px;
+}
+
 /* In the bar, not over the notes: the start measure must stay readable. */
 .score-countdown {
   border-radius: 999px;
@@ -1338,6 +1457,10 @@ body[data-transport="running"] .countdown {
   font-variant-numeric: tabular-nums;
   font-weight: 800;
   white-space: nowrap;
+}
+
+.score-countdown.is-beat {
+  font-size: 1.15rem;
 }
 
 .score-follow {

@@ -11,7 +11,9 @@ import type {
   ScoreManifestPart,
   ScoreTiming,
   ScoreTimingEvent,
-  ScoreTimingMeasure
+  ScoreTimingMeasure,
+  ScoreTimingMeter,
+  ScoreTimingSection
 } from "../shared/protocol.js";
 
 // Exports a MuseScore score for the companion page's score view: SVG pages,
@@ -23,7 +25,7 @@ import type {
 // file the browser can use without parsing XML. See docs/Adapters.md.
 
 /** Bump when the export output changes shape, so cached exports are redone. */
-export const SCORE_EXPORTER_VERSION = 2;
+export const SCORE_EXPORTER_VERSION = 3;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;
@@ -114,7 +116,8 @@ export function parseSvgPageSize(svg: string): { width: number; height: number }
 export function buildScoreTiming(
   mpos: PositionsFile,
   spos: PositionsFile | undefined,
-  pages: { width: number; height: number }[]
+  pages: { width: number; height: number }[],
+  marks: ScoreMarks = { sections: [], meters: [] }
 ): ScoreTiming {
   const scale = POSITION_UNITS_PER_SVG_UNIT;
   const maxId = Math.max(-1, ...mpos.elements.keys());
@@ -188,8 +191,54 @@ export function buildScoreTiming(
     pages,
     measures,
     events,
-    durationMs: events.length ? events[events.length - 1]!.e : 0
+    durationMs: events.length ? events[events.length - 1]!.e : 0,
+    ...(marks.sections.length ? { sections: marks.sections.filter((section) => section.m < measures.length) } : {}),
+    ...(marks.meters.length ? { meters: marks.meters.filter((meter) => meter.m < measures.length) } : {})
   };
+}
+
+export interface ScoreMarks {
+  sections: ScoreTimingSection[];
+  meters: ScoreTimingMeter[];
+}
+
+/**
+ * Rehearsal marks ("A", "Chorus") and time signatures, by measure index, from
+ * the top staff of the music -- MuseScore keeps system items like rehearsal
+ * marks there. Measure N of that staff is the mpos's measure N (frames such as
+ * `<VBox>` are not measures and are skipped).
+ */
+export function readScoreMarks(xml: string): ScoreMarks {
+  const music = xml.slice(Math.max(0, xml.lastIndexOf("</Part>")));
+  const start = music.indexOf("<Staff id=\"1\">");
+  if (start < 0) {
+    return { sections: [], meters: [] };
+  }
+  const next = music.indexOf("<Staff id=", start + 10);
+  const staff = music.slice(start, next < 0 ? undefined : next);
+  const sections: ScoreTimingSection[] = [];
+  const meters: ScoreTimingMeter[] = [];
+  const measures = staff.split(/<Measure\b/).slice(1);
+  measures.forEach((measure, index) => {
+    const body = measure.slice(0, Math.max(0, measure.indexOf("</Measure>")));
+    const mark = /<RehearsalMark>[\s\S]*?<text>([\s\S]*?)<\/text>/.exec(body)?.[1];
+    if (mark !== undefined) {
+      const label = decodeXml(mark.replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim().slice(0, 40);
+      if (label) {
+        sections.push({ m: index, label });
+      }
+    }
+    const time = /<TimeSig>[\s\S]*?<sigN>(\d+)<\/sigN>[\s\S]*?<sigD>(\d+)<\/sigD>/.exec(body);
+    if (time) {
+      const n = Number(time[1]);
+      const d = Number(time[2]);
+      const last = meters[meters.length - 1];
+      if (n > 0 && n <= 64 && d > 0 && d <= 64 && (last?.n !== n || last?.d !== d)) {
+        meters.push({ m: index, n, d });
+      }
+    }
+  });
+  return { sections, meters };
 }
 
 function firstAnchorX(
@@ -567,7 +616,9 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
     if (!scoreEntry) {
       throw new Error("No score inside the .mscz.");
     }
-    const voices = planVoices(readScoreInstruments(entryContent(scoreEntry).toString("utf8")));
+    const scoreXml = entryContent(scoreEntry).toString("utf8");
+    const voices = planVoices(readScoreInstruments(scoreXml));
+    const marks = readScoreMarks(scoreXml);
     for (const voice of voices) {
       const copy = rewriteZipText(paged, (name) => isScoreFile(name) || name === "score_style.mss",
         (text) => withoutMultimeasureRests(voice.stem === "score" ? text : voice.transform(text)));
@@ -594,7 +645,7 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
     const workFiles = await readdir(work);
     const manifestParts: ScoreManifestPart[] = [];
     for (const voice of voices) {
-      const part = await collectVoice(work, workFiles, staging, voice.stem, voice.name);
+      const part = await collectVoice(work, workFiles, staging, voice.stem, voice.name, marks);
       if (part) {
         manifestParts.push({ ...part, instrument: voice.instrument, notation: voice.notation });
       }
@@ -627,7 +678,8 @@ async function collectVoice(
   workFiles: string[],
   target: string,
   stem: string,
-  name: string
+  name: string,
+  marks: ScoreMarks
 ): Promise<ScoreManifestPart | undefined> {
   const pagePattern = new RegExp(`^${stem}-(\\d+)\\.svg$`);
   const pageFiles = workFiles
@@ -656,7 +708,7 @@ async function collectVoice(
   const spos = workFiles.includes(`${stem}.spos`)
     ? parsePositionsXml(await readFile(join(work, `${stem}.spos`), "utf8"))
     : undefined;
-  const timing = buildScoreTiming(mpos, spos, sizes);
+  const timing = buildScoreTiming(mpos, spos, sizes, marks);
   const timingFile = `${stem}.timing.json`;
   await writeFile(join(target, timingFile), JSON.stringify(timing));
 

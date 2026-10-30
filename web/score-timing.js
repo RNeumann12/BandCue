@@ -20,6 +20,7 @@
  * @typedef {import("../src/shared/protocol.js").ScoreManifestPart} ScoreManifestPart
  * @typedef {import("../src/shared/protocol.js").ScoreAvailability} ScoreAvailability
  * @typedef {import("../src/shared/protocol.js").TransportState} TransportState
+ * @typedef {import("../src/shared/protocol.js").ScoreTimingSection} ScoreTimingSection
  */
 
 /**
@@ -174,35 +175,188 @@ export function passNumberOf(events, passIndex) {
  * - `countdown`: a Play is scheduled; the cursor waits on the start measure.
  * - `running`: the cursor moves.
  * - `stopped`: a Play of this song ended; the cursor stays where it stopped.
+ * - `elsewhere`: the room is playing another song (the host moved on while it
+ *   ran); this song's cursor waits on its start measure.
  *
  * `lastPlay` is the caller's memory of the latest Play it saw for the current
- * song: the stopped room state alone no longer says where playback began.
+ * song (see playOfSong): the stopped room state alone no longer says where
+ * playback began.
  *
  * @param {TransportState | undefined} transport
- * @param {{ sequenceId: number, downbeatServerTime: number } | undefined} lastPlay
+ * @param {PlayOfSong | undefined} lastPlay
  * @param {number} roomNowMs
- * @returns {{ mode: "idle" | "countdown" | "running" | "stopped", downbeatServerTime?: number, stoppedAtServerTime?: number, remainingMs?: number }}
+ * @param {string} [songId] the current song; a play of another song is `elsewhere`
+ * @returns {{ mode: "idle" | "countdown" | "running" | "stopped" | "elsewhere", downbeatServerTime?: number, stoppedAtServerTime?: number, remainingMs?: number, play?: PlayOfSong }}
  */
-export function resolvePlayhead(transport, lastPlay, roomNowMs) {
+export function resolvePlayhead(transport, lastPlay, roomNowMs, songId) {
   if (transport && transport.action === "play" && (transport.status === "scheduled" || transport.status === "running")) {
-    const downbeat = transport.status === "running"
-      ? transport.startedServerTime ?? transport.scheduledServerTime
-      : transport.scheduledServerTime;
-    if (downbeat === undefined) {
-      return { mode: "idle" };
+    const play = playOfSong(transport, songId);
+    if (!play) {
+      return transport.song && songId !== undefined && transport.song.id !== songId ? { mode: "elsewhere" } : { mode: "idle" };
     }
-    return roomNowMs < downbeat
-      ? { mode: "countdown", downbeatServerTime: downbeat, remainingMs: downbeat - roomNowMs }
-      : { mode: "running", downbeatServerTime: downbeat };
+    return roomNowMs < play.downbeatServerTime
+      ? { mode: "countdown", downbeatServerTime: play.downbeatServerTime, remainingMs: play.downbeatServerTime - roomNowMs, play }
+      : { mode: "running", downbeatServerTime: play.downbeatServerTime, play };
   }
   if (transport?.status === "stopped" && lastPlay && transport.sequenceId > lastPlay.sequenceId) {
     return {
       mode: "stopped",
       downbeatServerTime: lastPlay.downbeatServerTime,
-      stoppedAtServerTime: transport.scheduledServerTime ?? roomNowMs
+      stoppedAtServerTime: transport.scheduledServerTime ?? roomNowMs,
+      play: lastPlay
     };
   }
   return { mode: "idle" };
+}
+
+/**
+ * @typedef {{ sequenceId: number, downbeatServerTime: number, startMeasure?: number, tempoPercent?: number }} PlayOfSong
+ */
+
+/**
+ * The Play the transport describes, if it is a play of `songId`: its downbeat
+ * and the start measure and tempo it was started with. A transport without a
+ * song (an older coordinator) counts as the current song's.
+ *
+ * @param {TransportState | undefined} transport
+ * @param {string | undefined} songId
+ * @returns {PlayOfSong | undefined}
+ */
+export function playOfSong(transport, songId) {
+  if (!transport || transport.action !== "play" || (transport.status !== "scheduled" && transport.status !== "running")) {
+    return undefined;
+  }
+  if (transport.song && songId !== undefined && transport.song.id !== songId) {
+    return undefined;
+  }
+  const downbeat = transport.status === "running"
+    ? transport.startedServerTime ?? transport.scheduledServerTime
+    : transport.scheduledServerTime;
+  if (downbeat === undefined) {
+    return undefined;
+  }
+  return {
+    sequenceId: transport.sequenceId,
+    downbeatServerTime: downbeat,
+    ...(transport.song ? { startMeasure: transport.song.startMeasure, tempoPercent: transport.song.tempoPercent } : {})
+  };
+}
+
+/**
+ * The rehearsal mark the measure belongs to ("Chorus"), if the score has any.
+ *
+ * @param {ScoreTiming} timing
+ * @param {number} measureIndex
+ * @returns {string | undefined}
+ */
+export function sectionAt(timing, measureIndex) {
+  let label;
+  for (const section of timing.sections ?? []) {
+    if (section.m > measureIndex) {
+      break;
+    }
+    label = section.label;
+  }
+  return label;
+}
+
+/**
+ * Where playback goes after this pass when it does not simply carry on with
+ * the next measure: back for a repeat, or a jump (volta, D.S., Coda).
+ *
+ * @param {ScoreTimingEvent[]} events
+ * @param {number} passIndex
+ * @returns {{ kind: "repeat" | "jump", toMeasureIndex: number } | undefined}
+ */
+export function jumpAfter(events, passIndex) {
+  const pass = events[passIndex];
+  const next = events[passIndex + 1];
+  if (!pass || !next || next.m === pass.m + 1) {
+    return undefined;
+  }
+  return { kind: next.m <= pass.m ? "repeat" : "jump", toMeasureIndex: next.m };
+}
+
+/**
+ * The beat a count-in counts in, in room milliseconds: the start measure's
+ * length divided by its time signature's beats, stretched by the tempo. A
+ * pickup measure is shorter than its time signature, so the measure after it
+ * is measured instead. Undefined when the export says nothing about meters.
+ *
+ * @param {ScoreTiming} timing
+ * @param {number | undefined} startMeasure
+ * @param {number | undefined} tempoPercent
+ * @returns {{ beatMs: number, beatsPerMeasure: number } | undefined}
+ */
+export function countInBeat(timing, startMeasure, tempoPercent) {
+  if (!timing.meters?.length || !timing.events.length) {
+    return undefined;
+  }
+  const index = Math.max(0, Math.round(startMeasure ?? 1) - 1);
+  let passIndex = Math.max(0, timing.events.findIndex((event) => event.m === index));
+  if (timing.events[passIndex].m === 0 && timing.events.length > passIndex + 1) {
+    passIndex += 1;
+  }
+  const pass = timing.events[passIndex];
+  let meter = timing.meters[0];
+  for (const candidate of timing.meters) {
+    if (candidate.m > pass.m) {
+      break;
+    }
+    meter = candidate;
+  }
+  const measureMs = pass.e - pass.t;
+  if (!(measureMs > 0) || !(meter.n > 0)) {
+    return undefined;
+  }
+  return { beatMs: (measureMs / meter.n) * 100 / normalizedTempo(tempoPercent), beatsPerMeasure: meter.n };
+}
+
+/**
+ * The count-in as beats: how many are left before the downbeat (the number to
+ * show) and how far into the current beat it is (0..1, for a flash on the beat).
+ * Only the last two measures are counted in beats; longer waits show seconds.
+ *
+ * @param {number} remainingMs
+ * @param {{ beatMs: number, beatsPerMeasure: number } | undefined} beat
+ * @returns {{ beatsLeft: number, phase: number } | undefined}
+ */
+export function countInState(remainingMs, beat) {
+  if (!beat || remainingMs <= 0 || remainingMs > beat.beatMs * beat.beatsPerMeasure * 2) {
+    return undefined;
+  }
+  const beatsLeft = Math.ceil(remainingMs / beat.beatMs - 1e-6);
+  const phase = 1 - (remainingMs / beat.beatMs - (beatsLeft - 1));
+  return { beatsLeft, phase: Math.min(1, Math.max(0, phase)) };
+}
+
+/**
+ * The measure under a point of a page, in that page's SVG units -- for the
+ * host's "tap a bar to start there".
+ *
+ * @param {ScoreTiming} timing
+ * @param {number} page
+ * @param {number} x
+ * @param {number} y
+ * @returns {number | undefined} measure index (0-based)
+ */
+export function measureAtPoint(timing, page, x, y) {
+  /** @type {number | undefined} */
+  let best;
+  let bestDistance = Infinity;
+  timing.measures.forEach((measure, index) => {
+    if (!measure || measure.page !== page || x < measure.x || x > measure.x + measure.w) {
+      return;
+    }
+    // Inside the box, or the nearest system above or below (a tap between
+    // staves, on a chord symbol or a lyric still means that measure).
+    const distance = y < measure.y ? measure.y - y : y > measure.y + measure.h ? y - measure.y - measure.h : 0;
+    if (distance < bestDistance) {
+      best = index;
+      bestDistance = distance;
+    }
+  });
+  return bestDistance <= 400 ? best : undefined;
 }
 
 /**
@@ -286,17 +440,20 @@ export function resolveScoreSource(score, preferredPart, source) {
 }
 
 /**
- * Picks the part to show: the one the player chose by name, else one of the
- * same instrument family, else the full score.
+ * Picks the part to show: the one the player chose by name, else the one at
+ * the same place among the instruments of its family (the second guitarist
+ * reads the second guitar part, whatever it is called), else the first of that
+ * family, else the full score.
  *
  * Guitar and bass come as notes and as tab; `notation` picks between them.
  *
  * @param {Pick<ScoreManifestPart, "id" | "name" | "instrument" | "notation">[]} parts
  * @param {string | undefined} preferredName
  * @param {"notes" | "tab"} [notation]
+ * @param {number} [familyIndex] which of the family's instruments, 0-based
  * @returns {string | undefined} part id
  */
-export function choosePart(parts, preferredName, notation = "tab") {
+export function choosePart(parts, preferredName, notation = "tab", familyIndex = 0) {
   if (!parts.length) {
     return undefined;
   }
@@ -305,10 +462,51 @@ export function choosePart(parts, preferredName, notation = "tab") {
   if (wanted) {
     const exact = parts.find((part) => part.name.trim().toLowerCase() === wanted);
     const family = partFamily(wanted);
-    const sameFamily = family ? parts.find((part) => part.id !== "score" && partFamily(part.name) === family) : undefined;
+    const relatives = family ? familyInstruments(parts, family) : [];
+    const sameFamily = relatives.length
+      ? relatives[Math.min(Math.max(0, Math.round(familyIndex) || 0), relatives.length - 1)]
+      : undefined;
     pick = exact ?? sameFamily ?? pick;
   }
   return partInNotation(parts, pick.instrument ?? pick.id, notation) ?? pick.id;
+}
+
+/**
+ * The parts of one instrument family, one per instrument, in score order.
+ *
+ * @template {Pick<ScoreManifestPart, "id" | "name" | "instrument">} T
+ * @param {T[]} parts
+ * @param {string} family
+ * @returns {T[]}
+ */
+export function familyInstruments(parts, family) {
+  /** @type {T[]} */
+  const found = [];
+  for (const part of parts) {
+    if (part.id === "score" || partFamily(part.name) !== family) {
+      continue;
+    }
+    if (!found.some((other) => (other.instrument ?? other.id) === (part.instrument ?? part.id))) {
+      found.push(part);
+    }
+  }
+  return found;
+}
+
+/**
+ * Where a part stands among its family's instruments (0 for the first guitar).
+ *
+ * @param {Pick<ScoreManifestPart, "id" | "name" | "instrument">[]} parts
+ * @param {string} partId
+ */
+export function familyIndexOf(parts, partId) {
+  const part = parts.find((candidate) => candidate.id === partId);
+  const family = part ? partFamily(part.name) : "";
+  if (!part || !family) {
+    return 0;
+  }
+  return Math.max(0, familyInstruments(parts, family)
+    .findIndex((other) => (other.instrument ?? other.id) === (part.instrument ?? part.id)));
 }
 
 /**
@@ -346,23 +544,33 @@ export function partInNotation(parts, instrument, notation) {
 }
 
 /**
- * Pages to show in page mode: the cursor's page, and the next one beside it.
- * With two slots, even pages sit left and odd pages right, so once the cursor
- * reaches the right-hand page the left one already turns to the page after:
- * the next page is always in view (a half-page turn, as on a music stand).
+ * Pages to show in page mode.
+ *
+ * - `half` (default): the cursor's page and the next one beside it. With two
+ *   slots, even pages sit left and odd pages right, so once the cursor reaches
+ *   the right-hand page the left one already turns to the page after: the next
+ *   page is always in view (a half-page turn, as on a music stand). The page
+ *   after then sits left of the one being played, so every page carries its
+ *   number.
+ * - `whole`: an open book -- pages 1+2, then 3+4 -- always in reading order.
  *
  * @param {number} page current page index
  * @param {number} pageCount
  * @param {1 | 2} slots
+ * @param {"half" | "whole"} [turn]
  * @returns {number[]} page indices, in left-to-right order
  */
-export function visiblePages(page, pageCount, slots) {
+export function visiblePages(page, pageCount, slots, turn = "half") {
   if (pageCount <= 0) {
     return [];
   }
   const current = Math.min(Math.max(0, page), pageCount - 1);
   if (slots === 1 || pageCount === 1) {
     return [current];
+  }
+  if (turn === "whole") {
+    const left = current - (current % 2);
+    return left + 1 < pageCount ? [left, left + 1] : [left];
   }
   const next = current + 1 < pageCount ? current + 1 : current - 1;
   return [current, next].sort((left, right) => (left % 2) - (right % 2) || left - right);

@@ -415,9 +415,16 @@ and exported setlist files.
   // Measures as played, repeats and jumps unrolled: start/end in ms at 100 % tempo,
   // and the cursor anchors [ms, x] of every note onset in that pass.
   "events": [{ "m": 1, "t": 500, "e": 2500, "b": [[500, 2176.4], [1000, 2490.2], [2500, 3701.6]] }],
-  "durationMs": 34500
+  "durationMs": 34500,
+  // Exporter v3 on, both optional: rehearsal marks and time signatures by measure index.
+  "sections": [{ "m": 2, "label": "Verse" }],
+  "meters": [{ "m": 0, "n": 4, "d": 4 }]
 }
 ```
+
+A play's `TransportState` carries the song it started: `song: { id, startMeasure?, tempoPercent? }`
+(scheduled and running only). The current song may change while it plays; the score view moves a
+song's cursor only for a play of that song, from that play's own start measure and tempo.
 
 ### `SongCatalogStatus` / `SongCatalogEntry` / `SongCatalogMatch`
 Privacy-safe local MuseScore library data published by a bridge/helper. Entries carry only a

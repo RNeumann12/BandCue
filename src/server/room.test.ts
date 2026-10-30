@@ -56,6 +56,42 @@ describe("RoomController", () => {
     room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1050 }, 1050);
     expect(room.getState(1050).transport.status).toBe("scheduled");
   });
+  it("records which song a play started, so a later song change cannot borrow its downbeat", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
+    const song = { id: "creep", title: "Creep", sourceType: "musescore" as const, source: "Creep.mscz", startMeasure: 9 };
+    room.handleMessage(host.id, { type: "currentSongUpdate", updatedAt: 1010, song }, 1010);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1020 }, 1020);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1030 }, 1030);
+    expect(room.getState(1030).transport).toMatchObject({ status: "scheduled", song: { id: "creep", startMeasure: 9 } });
+    room.handleMessage(host.id, { type: "currentSongUpdate", updatedAt: 1040, song: { ...song, id: "next", startMeasure: undefined } }, 1040);
+    expect(room.getState(1040).transport.song).toEqual({ id: "creep", startMeasure: 9, tempoPercent: 100 });
+    room.handleMessage(host.id, { type: "transportRequest", action: "stop", requestedAt: 1050 }, 1050);
+    expect(room.getState(1050).transport.song).toBeUndefined();
+  });
+
+  it("names the stored scores the setlist uses", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
+    const helper = room.addClient(undefined, {
+      type: "clientHello", deviceName: "MuseScore", role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1000);
+    const songs = [
+      { id: "a", title: "A", sourceType: "musescore" as const, source: "A.mscz" },
+      { id: "b", title: "B", sourceType: "musescore" as const, source: "B.mscz" }
+    ];
+    room.handleMessage(host.id, { type: "setlistUpdate", updatedAt: 1010, songs }, 1010);
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [
+        { songId: "a", relativePath: "A.mscz", status: "ready", scoreId: "1".repeat(32) },
+        { songId: "gone", relativePath: "Gone.mscz", status: "ready", scoreId: "2".repeat(32) }
+      ]
+    }, 1020);
+    expect([...room.scoresInUse()]).toEqual(["1".repeat(32)]);
+  });
+
   it("broadcast state reflects a scheduled mock transport command", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const client = room.addClient(undefined, {

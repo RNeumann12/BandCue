@@ -65,6 +65,10 @@
             <strong id="scoreTitle"></strong>
             <span class="score-position" id="scorePosition" aria-live="off"></span>
             <span class="score-countdown" id="scoreCountdown" role="timer" hidden></span>
+            <span class="score-jump" id="scoreJump" hidden></span>
+            <span class="score-next" id="scoreNext" hidden></span>
+            <span class="score-awake" id="scoreAwake" hidden>Tap the notes once to keep this screen on</span>
+            <span class="visually-hidden" id="scoreAnnounce" aria-live="polite"></span>
           </div>
           <span class="score-connection" id="scoreConnection" role="status" hidden></span>
           <div class="score-actions">
@@ -83,6 +87,7 @@
               <button class="secondary compact" id="scoreNotesButton" type="button" aria-pressed="false">Notes</button>
               <button class="secondary compact" id="scoreTabButton" type="button" aria-pressed="false">Tab</button>
             </div>
+            <button class="secondary compact" id="scorePickStartButton" type="button" aria-pressed="false" title="Tap a bar of the notes to make it this song's start measure" hidden>Set start bar</button>
             <button class="secondary compact" id="scoreFullscreenButton" type="button" aria-pressed="false" hidden>Full screen</button>
             <button class="secondary compact" id="scoreFocusButton" type="button" aria-pressed="false">Notes only</button>
             <button class="secondary compact" id="scoreCollapseButton" type="button" aria-expanded="true">Hide notes</button>
@@ -94,6 +99,13 @@
                   <select id="scoreLayoutSelect">
                     <option value="scroll">Scroll</option>
                     <option value="pages">Page turns</option>
+                  </select>
+                </label>
+                <label id="scorePageTurnLabel" hidden>
+                  <span>Turn</span>
+                  <select id="scorePageTurnSelect">
+                    <option value="half">Half pages (next page always in view)</option>
+                    <option value="whole">Whole pages (book order)</option>
                   </select>
                 </label>
                 <label>
@@ -110,6 +122,10 @@
                     <option value="even">Steady through each bar</option>
                     <option value="notes">Note by note</option>
                   </select>
+                </label>
+                <label class="score-check">
+                  <input id="scoreNightInput" type="checkbox" />
+                  <span>Night mode (light notes on dark)</span>
                 </label>
                 <div class="score-zoom">
                   <span>Zoom</span>

@@ -161,7 +161,9 @@ const scoreView = createScoreView({
   root: $("#scoreView"),
   token: token ?? "",
   isHost,
-  roomNow: () => (serverOffsetMs === undefined ? undefined : Date.now() + serverOffsetMs)
+  roomNow: () => (serverOffsetMs === undefined ? undefined : Date.now() + serverOffsetMs),
+  // The host taps a bar of the notes to rehearse from there.
+  onPickStart: isHost ? (measure) => setCurrentSongStartMeasure(measure) : undefined
 });
 
 const SETLIST_STORAGE_KEY = "bandcue:setlist";
@@ -1825,6 +1827,26 @@ function undoSetlistChange() {
   }
   setlist = snapshot.setlist;
   currentSongIndex = snapshot.currentSongIndex;
+  persistSetlist();
+  publishSetlist();
+  publishCurrentSong();
+  renderSetlist();
+}
+
+/**
+ * Makes `measure` the current song's start measure, as if typed into its form.
+ *
+ * @param {number} measure 1-based
+ */
+function setCurrentSongStartMeasure(measure) {
+  if (!isHost || currentSongIndex < 0 || currentSongIndex >= setlist.length) {
+    return;
+  }
+  const startMeasure = sanitizeStartMeasure(measure);
+  setlist[currentSongIndex] = { ...setlist[currentSongIndex], startMeasure };
+  if (editingSongIndex === currentSongIndex && elements.songStartMeasureInput) {
+    elements.songStartMeasureInput.value = startMeasure ? String(startMeasure) : "";
+  }
   persistSetlist();
   publishSetlist();
   publishCurrentSong();

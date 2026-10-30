@@ -12,8 +12,15 @@ import {
   followScrollTop,
   partFamily,
   passNumberOf,
+  countInBeat,
+  countInState,
+  familyIndexOf,
+  jumpAfter,
+  measureAtPoint,
+  playOfSong,
   resolvePlayhead,
   resolveScoreSource,
+  sectionAt,
   songTimeMs,
   startOffsetMs,
   systemsOf,
@@ -112,17 +119,36 @@ describe("resolvePlayhead", () => {
   const scheduled: TransportState = { status: "scheduled", action: "play", sequenceId: 3, scheduledServerTime: 10_000 };
 
   it("waits on the start measure during the count-in, then runs from the downbeat", () => {
-    expect(resolvePlayhead(scheduled, undefined, 9_000)).toEqual({ mode: "countdown", downbeatServerTime: 10_000, remainingMs: 1000 });
+    expect(resolvePlayhead(scheduled, undefined, 9_000))
+      .toMatchObject({ mode: "countdown", downbeatServerTime: 10_000, remainingMs: 1000 });
     // The room may not have flipped to running yet; the downbeat still counts.
-    expect(resolvePlayhead(scheduled, undefined, 10_050)).toEqual({ mode: "running", downbeatServerTime: 10_000 });
+    expect(resolvePlayhead(scheduled, undefined, 10_050)).toMatchObject({ mode: "running", downbeatServerTime: 10_000 });
     expect(resolvePlayhead({ ...scheduled, status: "running", startedServerTime: 10_000 }, undefined, 12_000))
-      .toEqual({ mode: "running", downbeatServerTime: 10_000 });
+      .toMatchObject({ mode: "running", downbeatServerTime: 10_000 });
   });
 
   it("freezes where a stop caught the song", () => {
     const stopped: TransportState = { status: "stopped", action: "stop", sequenceId: 4, scheduledServerTime: 15_000, stopReason: "manual" };
     expect(resolvePlayhead(stopped, { sequenceId: 3, downbeatServerTime: 10_000 }, 20_000))
-      .toEqual({ mode: "stopped", downbeatServerTime: 10_000, stoppedAtServerTime: 15_000 });
+      .toMatchObject({ mode: "stopped", downbeatServerTime: 10_000, stoppedAtServerTime: 15_000 });
+  });
+
+  it("does not run this song's cursor from another song's downbeat", () => {
+    const running: TransportState = {
+      status: "running", action: "play", sequenceId: 3, scheduledServerTime: 10_000, startedServerTime: 10_000,
+      song: { id: "song-a", startMeasure: 5, tempoPercent: 80 }
+    };
+    // The host moved on to song B while A plays.
+    expect(resolvePlayhead(running, undefined, 12_000, "song-b")).toEqual({ mode: "elsewhere" });
+    expect(playOfSong(running, "song-b")).toBeUndefined();
+    // Back on A, A's run (with the start and tempo it began with) still counts.
+    expect(resolvePlayhead(running, undefined, 12_000, "song-a")).toMatchObject({
+      mode: "running", downbeatServerTime: 10_000, play: { startMeasure: 5, tempoPercent: 80 }
+    });
+    // A coordinator that does not say which song plays: the current one.
+    const legacy: TransportState = { ...running, song: undefined };
+    expect(resolvePlayhead(legacy, undefined, 12_000, "song-b")).toMatchObject({ mode: "running" });
+    expect("startMeasure" in (playOfSong(legacy, "song-b") ?? {})).toBe(false);
   });
 
   it("knows nothing of a play it never saw", () => {
@@ -231,5 +257,93 @@ describe("resolveScoreSource", () => {
     expect(resolveScoreSource(converting, "Drums", "songsterr")?.scoreId).toBe("local");
     const noLocal: ScoreAvailability = { songId: "creep", status: "missing", imports: [score.imports![0]!] };
     expect(resolveScoreSource(noLocal, "Drums", "musescore")?.scoreId).toBe("main-import");
+  });
+});
+
+describe("reading aids", () => {
+  const marked: ScoreTiming = {
+    ...timing,
+    sections: [{ m: 1, label: "Intro" }, { m: 2, label: "Verse" }, { m: 5, label: "Chorus" }],
+    meters: [{ m: 0, n: 4, d: 4 }]
+  };
+
+  it("names the section a measure is in", () => {
+    expect(sectionAt(marked, 0)).toBeUndefined();
+    expect(sectionAt(marked, 2)).toBe("Verse");
+    expect(sectionAt(marked, 4)).toBe("Verse");
+    expect(sectionAt(marked, 9)).toBe("Chorus");
+    expect(sectionAt(timing, 3)).toBeUndefined();
+  });
+
+  it("warns before a repeat or a jump", () => {
+    const events = timing.events;
+    const kinds = events.map((_, index) => jumpAfter(events, index)).filter(Boolean);
+    // The example repeats measures 3-4 and jumps D.S. al Coda.
+    expect(kinds).toContainEqual({ kind: "repeat", toMeasureIndex: 2 });
+    expect(kinds.length).toBeGreaterThanOrEqual(2);
+    expect(jumpAfter(events, events.length - 1)).toBeUndefined();
+    expect(jumpAfter([{ m: 0, t: 0, e: 1, b: [] }, { m: 1, t: 1, e: 2, b: [] }], 0)).toBeUndefined();
+  });
+
+  it("counts the count-in in the start measure's beats, at the song's tempo", () => {
+    // 120 BPM in 4/4: a 2 s measure, 500 ms beats; the pickup is skipped.
+    expect(countInBeat(marked, 1, 100)).toEqual({ beatMs: 500, beatsPerMeasure: 4 });
+    expect(countInBeat(marked, 3, 50)).toEqual({ beatMs: 1000, beatsPerMeasure: 4 });
+    expect(countInBeat(timing, 3, 100)).toBeUndefined();
+    const beat = { beatMs: 500, beatsPerMeasure: 4 };
+    expect(countInState(1_999, beat)).toMatchObject({ beatsLeft: 4 });
+    expect(countInState(1_500, beat)).toMatchObject({ beatsLeft: 3, phase: 0 });
+    expect(countInState(1_450, beat)?.phase).toBeCloseTo(0.1);
+    expect(countInState(10, beat)).toMatchObject({ beatsLeft: 1 });
+    // More than two measures away: seconds, not beats.
+    expect(countInState(4_500, beat)).toBeUndefined();
+    expect(countInState(0, beat)).toBeUndefined();
+  });
+
+  it("finds the measure under a tap", () => {
+    const measure = timing.measures[3]!;
+    expect(measureAtPoint(timing, measure.page, measure.x + measure.w / 2, measure.y + measure.h / 2)).toBe(3);
+    // Just above the staff (a chord symbol) still picks it.
+    expect(measureAtPoint(timing, measure.page, measure.x + 5, measure.y - 100)).toBe(3);
+    expect(measureAtPoint(timing, measure.page + 1, measure.x + 5, measure.y)).toBeUndefined();
+    expect(measureAtPoint(timing, measure.page, -50, measure.y)).toBeUndefined();
+  });
+});
+
+describe("part memory", () => {
+  const parts = [
+    { id: "score", name: "Full score", instrument: "score" },
+    { id: "part-1-notes", name: "Lead Guitar", instrument: "part-1", notation: "notes" as const },
+    { id: "part-1-tab", name: "Lead Guitar", instrument: "part-1", notation: "tab" as const },
+    { id: "part-2-notes", name: "Rhythm Guitar", instrument: "part-2", notation: "notes" as const },
+    { id: "part-2-tab", name: "Rhythm Guitar", instrument: "part-2", notation: "tab" as const },
+    { id: "part-3", name: "Drums", instrument: "part-3" }
+  ];
+
+  it("gives the second guitarist the second guitar part in a song that names them differently", () => {
+    expect(familyIndexOf(parts, "part-2-tab")).toBe(1);
+    expect(familyIndexOf(parts, "part-1-notes")).toBe(0);
+    expect(familyIndexOf(parts, "part-3")).toBe(0);
+    const other = [
+      { id: "score", name: "Full score" },
+      { id: "part-1", name: "Guitar 1" },
+      { id: "part-2", name: "Guitar 2" }
+    ];
+    expect(choosePart(other, "Rhythm Guitar", "tab", 1)).toBe("part-2");
+    expect(choosePart(other, "Rhythm Guitar", "tab", 0)).toBe("part-1");
+    // Fewer guitars than that: the last one there is.
+    expect(choosePart(other, "Guitar 3", "tab", 4)).toBe("part-2");
+    // An exact name beats the position.
+    expect(choosePart(parts, "Rhythm Guitar", "notes", 0)).toBe("part-2-notes");
+  });
+});
+
+describe("page turns", () => {
+  it("can turn whole pages in book order", () => {
+    expect(visiblePages(0, 5, 2, "whole")).toEqual([0, 1]);
+    expect(visiblePages(1, 5, 2, "whole")).toEqual([0, 1]);
+    expect(visiblePages(3, 5, 2, "whole")).toEqual([2, 3]);
+    expect(visiblePages(4, 5, 2, "whole")).toEqual([4]);
+    expect(visiblePages(3, 5, 1, "whole")).toEqual([3]);
   });
 });

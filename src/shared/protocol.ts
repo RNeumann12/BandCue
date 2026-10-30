@@ -171,12 +171,29 @@ export interface ScoreTimingEvent {
   b: [number, number][];
 }
 
+/** A rehearsal mark ("A", "Chorus") at the start of measure `m` (0-based). */
+export interface ScoreTimingSection {
+  m: number;
+  label: string;
+}
+
+/** A time signature `n`/`d` from measure `m` (0-based) on. */
+export interface ScoreTimingMeter {
+  m: number;
+  n: number;
+  d: number;
+}
+
 export interface ScoreTiming {
   version: 1;
   pages: { width: number; height: number }[];
   measures: (ScoreTimingMeasure | null)[];
   events: ScoreTimingEvent[];
   durationMs: number;
+  /** Exporter v3 on: rehearsal marks, in measure order. */
+  sections?: ScoreTimingSection[];
+  /** Exporter v3 on: time signatures, in measure order (for the count-in beats). */
+  meters?: ScoreTimingMeter[];
 }
 
 export interface ClientHello {
@@ -522,6 +539,13 @@ export interface TransportState {
   scheduledServerTime?: number;
   startedServerTime?: number;
   stopReason?: StopReason;
+  /**
+   * A play's song as it was when the play was scheduled: which song, from which
+   * measure, at which tempo. The current song can change while it runs (the
+   * players keep playing what they started); the score view must not move the
+   * new song's cursor from the old song's downbeat.
+   */
+  song?: { id: string; startMeasure?: number; tempoPercent?: number };
 }
 
 export interface RoomState {

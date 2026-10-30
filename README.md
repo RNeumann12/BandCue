@@ -496,9 +496,18 @@ extension or MuseScore is needed on that device.
 - **Read ahead like on Songsterr.** The line being played sits near the top of the screen and the
   next lines fill the rest. Pick *View › Current line at › Top* for the most read-ahead. *Page
   turns* shows two pages side by side in landscape and turns the left page as soon as you reach
-  the right one, so the next page is always in view.
+  the right one, so the next page is always in view (each page shows its number); *Turn › Whole
+  pages* keeps book order instead. Swipe, tap an edge or use a page-turn pedal (arrow or Page
+  keys) to turn by hand, also while a song runs; the view follows the cursor again after a few
+  seconds.
+- **Know where you are and what comes.** The bar label names the section from the score's
+  rehearsal marks (*Bar 12 / 40 · Chorus*); the bar before a repeat or a D.S./Coda jump shows
+  where the music goes next (*↻ back to bar 9*); the count-in counts the start measure's beats
+  and flashes along the top edge; and the next song shows whether its notes are ready.
+- **Night mode** (*View*) shows light notes on dark pages for a dark stage.
 - **Your part, not the whole score.** Pick *Part* once (say *Drums*); the choice is kept on that
-  device and carried to the next song, even if that score calls the part *Schlagzeug*. Guitar and
+  device and carried to the next song, even if that score calls the part *Schlagzeug*, and a second
+  guitarist keeps the second guitar part. A choice made for one song is kept for that song. Guitar and
   bass switch between **Notes** and **Tab** next to it, whichever way the score was written;
   every other instrument reads from notes.
 - **The notes are the companion's main view:** it opens on the score, filling the window (*Show
@@ -506,6 +515,10 @@ extension or MuseScore is needed on that device.
   allows it (desktop, iPad Safari).
 - Touch or scroll the score to look around: following pauses for a few seconds. While nothing
   plays, tap the left or right edge to page back and forth.
+- **On the host page**, *Set start bar* and a tap on a bar makes it the current song's start
+  measure.
+- If the host moves on while the band still plays a song, the new song's notes wait on its start
+  (*Band is on another song*) instead of running along with the old one.
 
 Where the notes come from: the MuseScore helper (`npm run dev:musescore`, also part of
 `npm run dev:all`) exports every MuseScore song of the setlist with MuseScore itself, the current
@@ -541,8 +554,10 @@ setlist: *Export* writes them into the setlist file, and loading that file later
 
 **On the iPad:** add the companion page to the home screen (*Share › Add to Home Screen*) to start
 it full screen; the saved link keeps the room token. Set *Settings › Display & Brightness ›
-Auto-Lock* to *Never* for the rehearsal: the browser cannot keep the screen on by itself over the
-coordinator's plain `http://` address.
+Auto-Lock* to *Never* for the rehearsal if the screen still dims. Over the coordinator's plain
+`http://` address the browser offers no Wake Lock, so the score view keeps the screen on with a
+tiny muted video loop instead, which starts with the first tap on the page (*Tap the notes once to
+keep this screen on* says when it waits for one).
 
 ## V1 Limits
 

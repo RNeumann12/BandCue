@@ -11,6 +11,7 @@ import {
   parsePositionsXml,
   planVoices,
   readScoreInstruments,
+  readScoreMarks,
   withoutMultimeasureRests,
   parseSvgPageSize,
   readCachedExport,
@@ -334,5 +335,38 @@ describe("ScoreExportQueue", () => {
     queue.sync([{ songId: "a", source: sources.A! }]);
     await vi.waitFor(() => expect(queue.reports()[0]).toMatchObject({ status: "failed", detail: "MuseScore crashed" }));
     expect(queue.reports()[0]!.scoreId).toBeUndefined();
+  });
+});
+
+describe("rehearsal marks and time signatures", () => {
+  const xml = [
+    "<Part id=\"1\"><Staff id=\"1\"></Staff></Part>",
+    "<Staff id=\"1\">",
+    "<VBox><Text><text>Title</text></Text></VBox>",
+    "<Measure len=\"1/4\"><voice><TimeSig><sigN>4</sigN><sigD>4</sigD></TimeSig><Chord/></voice></Measure>",
+    "<Measure><voice><RehearsalMark><eid>x</eid><text><b>Verse</b> 1 &amp; 2</text></RehearsalMark><Chord/></voice></Measure>",
+    "<Measure><voice><Chord/></voice></Measure>",
+    "<Measure><voice><TimeSig><sigN>3</sigN><sigD>4</sigD></TimeSig><RehearsalMark><text>B</text></RehearsalMark></voice></Measure>",
+    "<Measure><voice><TimeSig><sigN>3</sigN><sigD>4</sigD></TimeSig></voice></Measure>",
+    "</Staff>",
+    "<Staff id=\"2\"><Measure><voice><RehearsalMark><text>Not top staff</text></RehearsalMark></voice></Measure></Staff>"
+  ].join("\n");
+
+  it("reads them from the top staff, by measure index, frames skipped", () => {
+    expect(readScoreMarks(xml)).toEqual({
+      sections: [{ m: 1, label: "Verse 1 & 2" }, { m: 3, label: "B" }],
+      meters: [{ m: 0, n: 4, d: 4 }, { m: 3, n: 3, d: 4 }]
+    });
+    expect(readScoreMarks("<Score></Score>")).toEqual({ sections: [], meters: [] });
+  });
+
+  it("puts them into the timing map, within its measures", () => {
+    const timing = buildScoreTiming(mpos, spos, [A4], {
+      sections: [{ m: 2, label: "A" }, { m: 500, label: "Nowhere" }],
+      meters: [{ m: 0, n: 4, d: 4 }]
+    });
+    expect(timing.sections).toEqual([{ m: 2, label: "A" }]);
+    expect(timing.meters).toEqual([{ m: 0, n: 4, d: 4 }]);
+    expect(buildScoreTiming(mpos, spos, [A4]).sections).toBeUndefined();
   });
 });

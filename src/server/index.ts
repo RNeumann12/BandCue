@@ -66,7 +66,9 @@ room.onPersistedStateChange((state) => roomStateWriter.schedule(state));
 // Score-view exports uploaded by the MuseScore helper (see score-store.ts).
 const SCORE_STORE_DIR = process.env.BANDCUE_SCORE_DIR ?? scoreStoreDirFor(IDENTITY_FILE);
 const scoreStore = new ScoreStore(SCORE_STORE_DIR, {
-  maxTotalBytes: parseMegabytes(process.env.BANDCUE_SCORE_STORE_MB) ?? DEFAULT_MAX_TOTAL_BYTES
+  maxTotalBytes: parseMegabytes(process.env.BANDCUE_SCORE_STORE_MB) ?? DEFAULT_MAX_TOTAL_BYTES,
+  inUse: () => room.scoresInUse(),
+  onEvict: (scoreIds) => room.scoresRemoved(scoreIds)
 });
 room.setScoreAvailability((scoreId) => scoreStore.has(scoreId));
 

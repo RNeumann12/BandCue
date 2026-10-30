@@ -502,6 +502,54 @@ export class RoomController {
     this.scoreAvailabilityCache.clear();
   }
 
+  /**
+   * The score store dropped scores: forget what was known about them and tell
+   * the band, so no tablet keeps asking for files that are gone.
+   */
+  scoresRemoved(scoreIds: string[]): void {
+    for (const scoreId of scoreIds) {
+      this.scoreAvailabilityCache.delete(scoreId);
+    }
+    if (scoreIds.length) {
+      this.broadcastState();
+    }
+  }
+
+  /**
+   * Every stored score the setlist uses -- exports of its songs (reported or
+   * remembered) and Songsterr imports with their exports. The score store
+   * never evicts these to make room.
+   */
+  scoresInUse(): Set<string> {
+    const ids = new Set<string>();
+    const songIds = new Set(this.setlist.songs.map((song) => song.id));
+    const current = this.currentSong?.song;
+    if (current) {
+      songIds.add(current.id);
+    }
+    for (const reports of this.scoreReports.values()) {
+      for (const report of reports) {
+        if (songIds.has(report.songId) && report.scoreId) {
+          ids.add(report.scoreId);
+        }
+      }
+    }
+    for (const [songId, remembered] of this.rememberedScores) {
+      if (songIds.has(songId)) {
+        ids.add(remembered.scoreId);
+      }
+    }
+    for (const song of [...this.setlist.songs, ...(current ? [current] : [])]) {
+      for (const entry of song.scoreImports ?? []) {
+        ids.add(entry.importId);
+        if (entry.scoreId) {
+          ids.add(entry.scoreId);
+        }
+      }
+    }
+    return ids;
+  }
+
   /** Only connected desktop adapters may upload score-view exports. */
   isDesktopAdapter(clientId: string | undefined): boolean {
     return Boolean(clientId && this.clients.get(clientId)?.role === "desktop-adapter");
@@ -936,7 +984,17 @@ export class RoomController {
       return;
     }
 
-    this.transport = decision.nextState;
+    const playing = request.action === "play" ? this.currentSong?.song : undefined;
+    this.transport = playing
+      ? {
+          ...decision.nextState,
+          song: {
+            id: playing.id,
+            ...(playing.startMeasure !== undefined ? { startMeasure: playing.startMeasure } : {}),
+            ...(playing.tempoPercent !== undefined ? { tempoPercent: playing.tempoPercent } : {})
+          }
+        }
+      : decision.nextState;
     if (request.action === "stop") {
       this.clearAutoStopTimer();
       this.clearPlaybackEndTracking();

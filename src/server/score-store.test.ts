@@ -70,6 +70,38 @@ describe("ScoreStore", () => {
     expect(scores.has(ID_C)).toBe(true);
   });
 
+  it("never evicts a score the setlist uses, and says which ones it dropped", async () => {
+    let now = 1;
+    const evicted: string[][] = [];
+    const { store: scores } = store({
+      maxTotalBytes: 1500,
+      now: () => now,
+      inUse: () => new Set([ID_A]),
+      onEvict: (ids) => evicted.push(ids)
+    });
+    await scores.put(ID_A, "manifest.json", Buffer.alloc(1000), false);
+    now = 2;
+    await scores.put(ID_B, "manifest.json", Buffer.alloc(1000), false);
+    // A is older but in use: B, written just now, stays too (over budget).
+    expect(scores.has(ID_A)).toBe(true);
+    expect(scores.has(ID_B)).toBe(true);
+    now = 3;
+    await scores.put(ID_C, "manifest.json", Buffer.alloc(1000), false);
+    expect(scores.has(ID_A)).toBe(true);
+    expect(scores.has(ID_B)).toBe(false);
+    expect(evicted).toEqual([[ID_B]]);
+  });
+
+  it("keeps a complete export as it is: a second upload changes nothing", async () => {
+    const { store: scores } = store();
+    await scores.put(ID_A, "score-1.svg", Buffer.from("<svg>real</svg>"), false);
+    await scores.put(ID_A, "manifest.json", Buffer.from("{}"), false);
+    await scores.put(ID_A, "score-1.svg", Buffer.from("<svg>swapped</svg>"), false);
+    await scores.put(ID_A, "score-2.svg", Buffer.from("<svg>added</svg>"), false);
+    expect(readFileSync(scores.get(ID_A, "score-1.svg")!.path, "utf8")).toBe("<svg>real</svg>");
+    expect(scores.get(ID_A, "score-2.svg")).toBeUndefined();
+  });
+
   it("lives next to the room's state file", () => {
     expect(scoreStoreDirFor(join("srv", "bandcue", ".bandcue-room.json"))).toBe(join("srv", "bandcue", ".bandcue-scores"));
   });

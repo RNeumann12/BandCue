@@ -21,6 +21,10 @@ export interface ScoreStoreOptions {
   maxFileBytes?: number;
   maxTotalBytes?: number;
   now?: () => number;
+  /** Scores in use (the setlist's): never evicted to make room. */
+  inUse?: () => Set<string>;
+  /** Told which scores eviction removed. */
+  onEvict?: (scoreIds: string[]) => void;
 }
 
 export interface StoredScoreFile {
@@ -45,6 +49,8 @@ export class ScoreStore {
   private readonly maxFileBytes: number;
   private readonly maxTotalBytes: number;
   private readonly now: () => number;
+  private readonly inUse: () => Set<string>;
+  private readonly onEvict?: (scoreIds: string[]) => void;
   /** Last read or write per score, for evicting the least recently used. */
   private readonly lastUsed = new Map<string, number>();
 
@@ -52,6 +58,8 @@ export class ScoreStore {
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.maxTotalBytes = options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES;
     this.now = options.now ?? Date.now;
+    this.inUse = options.inUse ?? (() => new Set());
+    this.onEvict = options.onEvict;
   }
 
   get maxUploadBytes(): number {
@@ -101,6 +109,13 @@ export class ScoreStore {
       throw new ScoreStoreError(400, "Body is not gzip.");
     }
 
+    // A complete export never changes under its id (the id is its content's
+    // hash): a second upload is a no-op, so no client can swap the files of a
+    // score the band already reads.
+    if (this.has(scoreId)) {
+      this.lastUsed.set(scoreId, this.now());
+      return;
+    }
     const dir = join(this.root, scoreId);
     mkdirSync(dir, { recursive: true });
     const target = join(dir, gzip ? `${file}.gz` : file);
@@ -114,20 +129,33 @@ export class ScoreStore {
     this.evict(scoreId);
   }
 
-  /** Drops whole scores, least recently used first, until the store fits. */
+  /**
+   * Drops whole scores, least recently used first, until the store fits --
+   * but never one the setlist uses: a full store then grows past its budget
+   * rather than lose a song the band is about to play.
+   */
   private evict(keep: string): void {
     const scores = this.listScores();
     let total = scores.reduce((sum, score) => sum + score.bytes, 0);
+    if (total <= this.maxTotalBytes) {
+      return;
+    }
+    const inUse = this.inUse();
     const candidates = scores
-      .filter((score) => score.id !== keep)
+      .filter((score) => score.id !== keep && !inUse.has(score.id))
       .sort((left, right) => left.usedAt - right.usedAt);
+    const removed: string[] = [];
     for (const score of candidates) {
       if (total <= this.maxTotalBytes) {
         break;
       }
       rmSync(join(this.root, score.id), { recursive: true, force: true });
       this.lastUsed.delete(score.id);
+      removed.push(score.id);
       total -= score.bytes;
+    }
+    if (removed.length) {
+      this.onEvict?.(removed);
     }
   }
 

@@ -448,7 +448,11 @@ helper's MuseScore warm-up is still looking for a running MuseScore.
 order*: repeats, voltas, D.S./D.C. and Coda jumps are already unrolled, and every pass carries its
 time in milliseconds with all tempo changes applied. `spos` does the same for every note onset.
 The score view therefore never interprets the notation itself. Coordinates in both files are 12×
-the SVG's units (checked against the staff lines of the exported SVG).
+the SVG's units (checked against the staff lines of the exported SVG). The only thing read from the
+`.mscx` for the timing map (exporter v3) is the top staff's rehearsal marks and time signatures, by
+measure index: the section names in the bar label and the beat length the count-in counts in.
+[`examples/score-view/export-multipage/`](../examples/score-view/export-multipage) is MuseScore
+4.7.5's export of `multipage-example.mscz` (three pages, rehearsal marks), used by the e2e tests.
 
 **The cursor.** The companion computes
 `songMs = startOffset + (roomNow − downbeat) × tempoPercent / 100` on every animation frame from its

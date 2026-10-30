@@ -25,6 +25,39 @@
   offline from then on; Songsterr-only songs get a score view too. The host setlist has an *Import
   notes* button per song that hands the job to the connected extension with Plus and shows its
   progress.
+- **Reading aids in the score view.** The bar label names the section (*Bar 12 / 40 · Chorus*,
+  from the score's rehearsal marks), a yellow pill warns on the bar before a repeat or a jump
+  (*↻ back to bar 9*), the count-in counts the start measure's beats (*Count-in 3*) and flashes
+  along the top edge on each beat, and the bar shows the next song and whether its notes are ready.
+  *View › Night mode* shows light notes on dark pages. Page turns can be *Half pages* (next page
+  always in view, now with page numbers) or *Whole pages* in book order, and turn with a swipe,
+  an edge tap or a page-turn pedal (arrow / Page keys), also while a song runs.
+- **The host can tap a bar to start there.** *Set start bar* on the host page's notes, then tap a
+  bar: it becomes the current song's start measure.
+- **The screen stays on over plain `http://`.** Where the Wake Lock API is unavailable (a
+  coordinator on a LAN address), the score view plays a tiny muted video loop after the first tap,
+  which keeps phones and tablets awake while the notes fill the screen.
+- A part choice is remembered per song as well as per device, and a second guitarist gets the
+  second guitar part in a song that names its guitars differently.
+
+### Fixed
+
+- **After the host switched songs during playback, the new song's cursor ran** from the old
+  song's downbeat although nobody played it. The room now records which song (start measure,
+  tempo) a Play started; the score view says *Band is on another song* and waits on the new song's
+  start, and picks the run up again when the host switches back.
+- **The previous song's notes stayed on screen** under the new song's title while the new song
+  loaded, and under the error when it could not load.
+- **Browsing the notes while nothing plays no longer snaps back** to the start bar when the iPad
+  turns, the window resizes or the tab comes back.
+- A song whose notes failed to load no longer delays the next song's notes by three seconds; the
+  cursor lead no longer jumps back when Stop freezes the cursor; state changes are announced to
+  screen readers.
+- The coordinator never evicts the setlist's scores to make room (its store may grow past the
+  budget instead), tells the band at once when it evicts others, and keeps a complete export as it
+  is: a second upload under the same id changes nothing.
+- The exporter version is 3 (rehearsal marks and time signatures in the timing map), so every
+  score is exported again once.
 
 ## 1.8.2 - 2026-10-11
 

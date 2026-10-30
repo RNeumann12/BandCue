@@ -24,7 +24,7 @@ export default defineConfig({
     { name: "chromium", use: { browserName: "chromium" } },
     // The score view is meant for an iPad on a music stand: Safari's engine at
     // an iPad's size and touch input.
-    { name: "webkit-ipad", use: { ...devices["iPad Pro 11"] }, testMatch: /score-view\.spec\.ts/ }
+    { name: "webkit-ipad", use: { ...devices["iPad Pro 11"] }, testMatch: /score-view(-[a-z]+)?\.spec\.ts/ }
   ],
   webServer: {
     command: "npx tsx src/server/index.ts",
