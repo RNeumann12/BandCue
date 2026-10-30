@@ -62,7 +62,7 @@ echo "==> Restarting the service"
 ssh "$PI" "sudo -n service bandcue restart"
 
 echo "==> Waiting for the coordinator to answer (checked on the Pi itself)"
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   if ssh "$PI" "curl -fsS --max-time 3 http://127.0.0.1:4173/api/room" >/dev/null 2>&1; then
     echo "Up. Room state:"
     ssh "$PI" "curl -fsS http://127.0.0.1:4173/api/room"; echo

@@ -11,14 +11,24 @@ const PORT = 4599;
 // A fresh state directory per run: the coordinator now saves the setlist, and
 // one run's songs must not show up in the next.
 const STATE_DIR = process.env.BANDCUE_E2E_STATE_DIR ??= mkdtempSync(join(tmpdir(), "bandcue-e2e-"));
+const CI = Boolean(process.env.CI);
 
 export default defineConfig({
   testDir: "e2e",
   timeout: 30_000,
   // Every spec shares the one coordinator (and its one room), so they take turns.
   workers: 1,
+  // On CI: a stray test.only fails the run, and a timing test that loses a
+  // race on a busy runner gets one more go. It is still reported as flaky, and
+  // the uploaded report holds the failure's screenshot and the retry's trace
+  // (tracing every first attempt would slow the very timing tests it is for).
+  forbidOnly: CI,
+  retries: CI ? 1 : 0,
+  reporter: CI ? [["github"], ["dot"], ["html", { open: "never" }]] : "list",
   use: {
-    baseURL: `http://127.0.0.1:${PORT}`
+    baseURL: `http://127.0.0.1:${PORT}`,
+    trace: "on-first-retry",
+    screenshot: "only-on-failure"
   },
   projects: [
     { name: "chromium", use: { browserName: "chromium" } },

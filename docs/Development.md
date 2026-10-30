@@ -48,6 +48,20 @@ npm run test:smoke  # build, then start the compiled coordinator and check HTTP,
 CI runs the smoke test on **Node 18** as well, because the Raspberry Pi coordinator is pinned to
 Node 18 while the development tooling needs Node 20+.
 
+CI (`.github/workflows/ci.yml`) runs on every branch push and pull request:
+
+| Job | Checks |
+| --- | --- |
+| Node 20 / 22 / 24 / 26 | `npm run verify` on Linux |
+| Windows host and release package | `npm run verify`, a Windows PowerShell parse of `scripts/*.ps1`, `package-release.ts --skip-android`, and that the committed icons match `assets/brand/bandcue-icon.svg`; uploads the release zip |
+| Browser smoke test | `npm run test:e2e` in Chromium and iPad WebKit; uploads the Playwright report |
+| Coordinator smoke test (Node 18, Pi) | ShellCheck of `scripts/deploy-pi.sh`, then the built coordinator on Node 18 |
+| Android unit tests, lint and build | `gradle testDebugUnitTest lintDebug assembleDebug` |
+
+On CI a failing browser test is retried once. If it then passes, it is reported as flaky; the
+report artifact holds the failure's screenshot and the retry's trace
+(`npx playwright show-report <unzipped folder>` opens it).
+
 ### Deploying the coordinator to the Raspberry Pi
 
 ```bash

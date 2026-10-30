@@ -176,6 +176,10 @@ desktop-adapter over a raw WebSocket, arms, plays, asserts `/api/room` reaches
 
 ### 4.3 (P3) Release packaging is never exercised in CI
 
+Status: `Done 2026-10-30` (without the APK, which needs the release keystore)
+
+The `windows` CI job runs `package-release.ts --skip-android` and uploads the zip.
+
 `npm run package:release` and `package:extension` only run on a maintainer machine.
 A CI job (or a job on tag push) that runs them and uploads the artifacts would catch
 packaging regressions and double as the release pipeline.

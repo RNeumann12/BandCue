@@ -59,6 +59,16 @@
 - The exporter version is 3 (rehearsal marks and time signatures in the timing map), so every
   score is exported again once.
 
+### Changed
+
+- CI now also runs on Windows, where the host runs: the unit suite, a Windows PowerShell parse of
+  the launcher scripts, and the release package (without the APK), which every run uploads. The
+  Android job lints and builds the debug APK as well; Node 26 joins the matrix. A browser test that
+  fails on CI is retried once and reported as flaky, and the uploaded Playwright report holds its
+  screenshot and the retry's trace. Tests check that the `.cmd` launchers only pass parameters
+  their scripts declare, and that CI and `build-android.ps1` use the same Gradle version.
+  Dependabot proposes action and npm updates monthly.
+
 ## 1.8.2 - 2026-10-11
 
 ### Fixed

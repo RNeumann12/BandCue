@@ -1,0 +1,24 @@
+# One grouped PR per ecosystem a month keeps the CI actions and the npm
+# toolchain current without a PR per package. Dependabot security updates (a
+# repository setting) do not wait for this schedule.
+#
+# Gradle is left out on purpose: an Android Gradle Plugin bump usually needs a
+# newer Gradle, which is pinned by hand in ci.yml and scripts/build-android.ps1.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      # Majors come one PR each: they are the ones that need a look.
+      npm-minor-and-patch:
+        update-types: [minor, patch]

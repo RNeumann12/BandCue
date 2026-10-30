@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -78,7 +78,50 @@ describe("cross-platform project metadata", () => {
     expect(adapter).toContain("startMeasure: command.startMeasure");
     expect(adapter).toContain("function prepareBridgeStartMeasure(");
   });
+
+  // The repo ships no Gradle wrapper: CI and the local bootstrap each pin a
+  // Gradle version, and the two must build the app the same way.
+  it("keeps CI on the Gradle version the Android build script bootstraps", () => {
+    const workflow = read(".github/workflows/ci.yml");
+    const buildScript = read("scripts/build-android.ps1");
+
+    expect(requiredMatch(workflow, /gradle-version:\s*"([^"]+)"/u, "CI Gradle version"))
+      .toBe(requiredMatch(buildScript, /\$GradleVersion\s*=\s*"([^"]+)"/u, "build script Gradle version"));
+  });
+
+  // PowerShell refuses a parameter its script does not declare, so renaming one
+  // would break a double-clicked launcher with nothing but a flashing window.
+  it("keeps the Windows launchers calling scripts and parameters that exist", () => {
+    const launchers = readdirSync(root).filter((name) => name.endsWith(".cmd"));
+    expect(launchers.length).toBeGreaterThan(0);
+    let checked = 0;
+
+    for (const launcher of launchers) {
+      const command = read(launcher).match(/^powershell\.exe .*-File "%~dp0([^"]+)"(.*)$/mu);
+      if (!command) {
+        throw new Error(`Could not read the PowerShell command of ${launcher}.`);
+      }
+      const script = command[1].replace(/\\/gu, "/");
+      const declared = scriptParameters(read(script));
+      const passed = [...command[2].matchAll(/(?:^|\s)-([A-Za-z]\w*)/gu)].map((match) => match[1].toLowerCase());
+
+      expect(passed.filter((name) => !declared.includes(name)), `${launcher} -> ${script}`).toEqual([]);
+      checked += passed.length;
+    }
+    // The Helix launcher alone passes a handful; none found means the pattern broke.
+    expect(checked).toBeGreaterThan(0);
+  });
 });
+
+/** A PowerShell script's parameter names and aliases, lowercase. */
+function scriptParameters(script: string): string[] {
+  const block = requiredMatch(script, /^param\(([\s\S]*?)^\)/mu, "param block")
+    .replace(/#.*$/gmu, "");
+  return [
+    ...[...block.matchAll(/\$(\w+)/gu)].map((match) => match[1]),
+    ...[...block.matchAll(/\[Alias\(([^)]*)\)\]/gu)].flatMap((match) => extractStringList(match[1], /([\s\S]*)/u, "alias"))
+  ].map((name) => name.toLowerCase());
+}
 
 function read(relativePath: string): string {
   return readFileSync(join(root, relativePath), "utf8");
