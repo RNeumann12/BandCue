@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { untilDrawing } from "./drawing.js";
 
 // Matches playwright.config.ts webServer env.
 const PORT = 4599;
@@ -111,6 +112,7 @@ test("a companion reads along with the room's cursor", async ({ page, request })
   await page.click("#scoreFocusButton");
   await expect(page.locator("body")).toHaveClass(/score-focus/);
 
+  await untilDrawing(page);
   host.socket.send(JSON.stringify({ type: "safetyUpdate", armed: true, updatedAt: Date.now() }));
   host.socket.send(JSON.stringify({ type: "transportRequest", action: "play", requestedAt: Date.now() }));
   await expect(view).toHaveAttribute("data-mode", "countdown");

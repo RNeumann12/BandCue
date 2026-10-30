@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { untilDrawing } from "./drawing.js";
 
 // Matches playwright.config.ts webServer env.
 const PORT = 4599;
@@ -127,6 +128,7 @@ test("a companion reads a multi-page score: sections, count-in, page following, 
   // The cursor runs a second ahead; a Stop must freeze it there, not jump back.
   await setControl(page, "#scoreLeadInput", "1000");
 
+  await untilDrawing(page);
   room.send({ type: "safetyUpdate", armed: true });
   room.send({ type: "transportRequest", action: "play" });
   await expect(page.locator("#scoreCountdown")).toHaveText(/^Count-in [1-4]$/);
