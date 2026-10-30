@@ -483,6 +483,13 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     const following = playhead.mode === "running" || playhead.mode === "countdown";
     el.follow.hidden = !(following && Date.now() < followPausedUntil);
     el.pickStartButton.disabled = following;
+    if (!following && scrollAnimation) {
+      // Only a run animates the view. Land its last line now: left to a later
+      // frame (a busy tablet can be slow to draw one), it would pull the view
+      // back after the player has scrolled away from the stopped cursor.
+      el.scroller.scrollTop = scrollAnimation.to;
+      scrollAnimation = undefined;
+    }
 
     if (position) {
       follow(position, following);

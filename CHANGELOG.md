@@ -49,7 +49,8 @@
 - **The previous song's notes stayed on screen** under the new song's title while the new song
   loaded, and under the error when it could not load.
 - **Browsing the notes while nothing plays no longer snaps back** to the start bar when the iPad
-  turns, the window resizes or the tab comes back.
+  turns, the window resizes or the tab comes back, nor to the stopped cursor when Stop came during
+  a scroll to the next line (a busy tablet finished that scroll after the player had scrolled away).
 - A song whose notes failed to load no longer delays the next song's notes by three seconds; the
   cursor lead no longer jumps back when Stop freezes the cursor; state changes are announced to
   screen readers.
