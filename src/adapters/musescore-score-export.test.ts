@@ -243,6 +243,8 @@ describe("export files and ids", () => {
     expect(id).toMatch(/^[a-f0-9]{32}$/);
     expect(scoreIdFor(Buffer.from("score"))).toBe(id);
     expect(scoreIdFor(Buffer.from("score!"))).not.toBe(id);
+    // A Guitar Pro import is prepared differently (drum voices), so it has its own id.
+    expect(scoreIdFor(Buffer.from("score"), true)).not.toBe(id);
   });
 
   it("finds a cached export and lists its files manifest last", async () => {

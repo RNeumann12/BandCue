@@ -15,17 +15,26 @@
 // left page as soon as the cursor reaches the right one.
 
 import {
+  CURSOR_STYLES,
   choosePart,
   countInBeat,
   countInState,
+  createSteadyClock,
   cursorAt,
+  detectBarOffset,
   familyIndexOf,
+  findPassIndex,
   followScrollTop,
+  importedSongMs,
   instrumentsOf,
   jumpAfter,
+  leadFromTaps,
   measureAtPoint,
+  nearestBeatMs,
+  normalizedTempo,
   partInNotation,
   playOfSong,
+  referenceMeasureOf,
   resolvePlayhead,
   resolveScoreSource,
   sectionAt,
@@ -60,6 +69,19 @@ const CURSOR_WIDTH = 64;
 const CURSOR_OVERHANG = 70;
 // A horizontal swipe this long (CSS px) turns pages.
 const SWIPE_PX = 60;
+// Scroll-ahead choices, ms: how long before the cursor reaches a new line the
+// view starts moving to it. Readers' eyes run about a second ahead of their
+// hands, so the line they are about to read must already stand still.
+const SCROLL_AHEAD_CHOICES = [0, 500, 1000, 1500];
+// Taps a lead calibration takes.
+const CALIBRATION_TAPS = 8;
+const CURSOR_STYLE_NAMES = {
+  beats: "Beat glide",
+  step: "Beat step",
+  even: "Steady bar",
+  notes: "Note by note",
+  bar: "Bar + beats"
+};
 
 const DEFAULT_SETTINGS = {
   /** Name of the part this player reads, carried from song to song. */
@@ -84,8 +106,15 @@ const DEFAULT_SETTINGS = {
   readingLine: "upper",
   /** Shifts only this page's cursor, ms; positive runs ahead of the band. */
   leadMs: 0,
-  /** @type {"even" | "notes"} how the cursor crosses a measure (see cursorAt) */
-  motion: "even",
+  /** @type {import("./score-timing.js").CursorStyle} how the cursor moves (see cursorAt) */
+  motion: "beats",
+  /** How long before the cursor reaches a new line the view moves to it, ms. */
+  scrollAheadMs: 1000,
+  /**
+   * @type {Record<string, number>} by song id: the band's bar that a Songsterr
+   * import's first bar is (2 with one count-in bar); unset is detected.
+   */
+  songsterrStarts: {},
   /** Light notes on a dark page, for dark stages. */
   night: false,
   /** Notes only: the score fills the screen. A companion's default. */
@@ -121,6 +150,12 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     focusButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreFocusButton")),
     fullscreenButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreFullscreenButton")),
     motionSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scoreMotionSelect")),
+    styleButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreStyleButton")),
+    scrollAheadSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scoreScrollAheadSelect")),
+    songsterrStartLabel: /** @type {HTMLElement} */ (root.querySelector("#scoreSongsterrStartLabel")),
+    songsterrStartSelect: /** @type {HTMLSelectElement} */ (root.querySelector("#scoreSongsterrStartSelect")),
+    calibrateButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreCalibrateButton")),
+    calibrate: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreCalibrate")),
     collapseButton: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreCollapseButton")),
     zoomOut: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreZoomOut")),
     zoomIn: /** @type {HTMLButtonElement} */ (root.querySelector("#scoreZoomIn")),
@@ -150,7 +185,13 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
   /** @type {PlayOfSong | undefined} */
   let lastPlay;
 
-  /** @type {{ scoreId: string, manifest: ScoreManifest, partId: string, timing: ScoreTiming, systems: ReturnType<typeof systemsOf>, pages: { el: HTMLElement, img: HTMLImageElement, width: number, height: number }[] } | undefined} */
+  /**
+   * The score on screen. A Songsterr import also carries the band's own score
+   * (`reference`): the room plays that one, so its bars and tempos drive the
+   * cursor, mapped bar by bar onto the import (see importedSongMs).
+   *
+   * @type {{ scoreId: string, manifest: ScoreManifest, partId: string, timing: ScoreTiming, reference?: ScoreTiming, detectedShift: number, systems: ReturnType<typeof systemsOf>, pages: { el: HTMLElement, img: HTMLImageElement, width: number, height: number }[] } | undefined}
+   */
   let loaded;
   /** @type {string | undefined} the scoreId being loaded */
   let loadingScoreId;
@@ -176,9 +217,29 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
   beatFlash.className = "score-beat-flash";
   beatFlash.setAttribute("aria-hidden", "true");
   el.stage.append(beatFlash);
+  // The beats of the current bar, lit one by one (the "bar + beats" style).
+  const beatDots = document.createElement("div");
+  beatDots.className = "score-beat-dots";
+  beatDots.setAttribute("aria-hidden", "true");
+  // Where the eye goes next at the end of a line, a repeat or a jump.
+  const nextMark = document.createElement("div");
+  nextMark.className = "score-next-mark";
+  nextMark.setAttribute("aria-hidden", "true");
+
+  const steadyNow = createSteadyClock(roomNow);
+  /** Tap errors (room ms) while calibrating the cursor lead; undefined when not. */
+  /** @type {number[] | undefined} */
+  let calibration;
 
   let frame = 0;
   let lastSystem = -1;
+  /**
+   * The line still being played when the view scrolled early to the next one
+   * but had to stop short to keep it in view; it scrolls the rest of the way
+   * once the cursor leaves it.
+   */
+  /** @type {number | undefined} */
+  let heldBackFor;
   let lastMode = "";
   /**
    * Whether the view should bring the cursor's line into view although nothing
@@ -223,6 +284,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       lastSystem = -1;
       pendingIdleScroll = true;
       setPicking(false);
+      renderSongsterrStart();
     }
     // Only a play of this song moves this song's cursor: after the host moves
     // on mid-song the room still plays the old one.
@@ -306,10 +368,11 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
         throw new Error("The export lists no parts.");
       }
       const timing = await fetchTiming(scoreId, part.timing);
+      const reference = await referenceTimingFor(scoreId);
       if (resolveScoreSource(state?.currentScore, preferredPart(), settings.source)?.scoreId !== scoreId) {
         return;
       }
-      showScore(scoreId, manifest, part.id, timing);
+      showScore(scoreId, manifest, part.id, timing, reference);
       if (failed?.scoreId === scoreId) {
         failed = undefined;
       }
@@ -328,12 +391,37 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
   }
 
   /**
+   * The band's own score's timing when `scoreId` is a Songsterr import of the
+   * current song that has one: the room plays the band's score, so its bars
+   * are the truth. Any of its parts will do -- they share bars and tempos.
+   *
+   * @param {string} scoreId
+   * @returns {Promise<ScoreTiming | undefined>}
+   */
+  async function referenceTimingFor(scoreId) {
+    const score = state?.currentScore;
+    const own = score?.status === "ready" ? score.scoreId : undefined;
+    if (!own || own === scoreId || !score?.imports?.some((entry) => entry.scoreId === scoreId)) {
+      return undefined;
+    }
+    try {
+      const manifest = await fetchManifest(own);
+      const part = manifest.parts[0];
+      return part ? await fetchTiming(own, part.timing) : undefined;
+    } catch {
+      // Without it the import runs on its own timing, as before.
+      return undefined;
+    }
+  }
+
+  /**
    * @param {string} scoreId
    * @param {ScoreManifest} manifest
    * @param {string} partId
    * @param {ScoreTiming} timing
+   * @param {ScoreTiming} [reference] see `loaded`
    */
-  function showScore(scoreId, manifest, partId, timing) {
+  function showScore(scoreId, manifest, partId, timing, reference) {
     const part = manifest.parts.find((candidate) => candidate.id === partId);
     if (!part) {
       return;
@@ -361,7 +449,17 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       el.pages.append(page);
       return { el: page, img, width: size.width, height: size.height };
     });
-    loaded = { scoreId, manifest, partId, timing, systems: systemsOf(timing), pages };
+    loaded = {
+      scoreId,
+      manifest,
+      partId,
+      timing,
+      reference,
+      detectedShift: reference ? detectBarOffset(reference, timing) : 0,
+      systems: systemsOf(timing),
+      pages
+    };
+    renderSongsterrStart();
 
     const instruments = instrumentsOf(manifest.parts);
     const current = manifest.parts.find((candidate) => candidate.id === partId);
@@ -421,19 +519,36 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     }
   }
 
-  function draw() {
-    frame = 0;
-    if (!loaded || !state || root.hidden) {
-      return;
+  /**
+   * How many bars the Songsterr import on screen is shifted against the band's
+   * score: the player's choice for this song, else the detected shift.
+   */
+  function barShift() {
+    if (!loaded?.reference) {
+      return 0;
     }
-    const synced = roomNow();
+    const songId = state?.currentSong?.song?.id;
+    const start = songId ? settings.songsterrStarts[songId] : undefined;
+    return start ? start - 1 : loaded.detectedShift;
+  }
+
+  /**
+   * Where the song is at room time `synced`, on the band's score (an import's
+   * reference, else the score on screen).
+   *
+   * @param {number | undefined} synced room time, undefined until the clock syncs
+   * @param {number} leadMs
+   */
+  function songClock(synced, leadMs) {
+    const current = /** @type {NonNullable<typeof loaded>} */ (loaded);
     const now = synced ?? Date.now();
-    const song = state.currentSong?.song;
-    const playhead = resolvePlayhead(state.transport, lastPlay, now, song?.id);
+    const song = state?.currentSong?.song;
+    const playhead = resolvePlayhead(state?.transport, lastPlay, now, song?.id);
     // The run's own start and tempo when the room says what they were (the
     // host may edit the song while it plays); else the song's.
     const run = playhead.play && "startMeasure" in playhead.play ? playhead.play : song;
-    const offset = startOffsetMs(loaded.timing, run?.startMeasure);
+    const timeline = current.reference ?? current.timing;
+    const offset = startOffsetMs(timeline, run?.startMeasure);
     let songMs = offset;
     if (synced !== undefined && playhead.downbeatServerTime !== undefined &&
         (playhead.mode === "running" || playhead.mode === "stopped")) {
@@ -445,16 +560,39 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
         downbeatServerTime: playhead.downbeatServerTime,
         startOffsetMs: offset,
         tempoPercent: run?.tempoPercent,
-        leadMs: settings.leadMs
+        leadMs
       }));
     }
+    return { playhead, run, timeline, offset, songMs, rate: normalizedTempo(run?.tempoPercent) / 100 };
+  }
 
-    const position = cursorAt(loaded.timing, songMs, { motion: settings.motion });
+  /** @param {number} songMs the band's song time; returns the time of the score on screen */
+  function viewMs(songMs) {
+    const current = /** @type {NonNullable<typeof loaded>} */ (loaded);
+    return current.reference ? importedSongMs(current.reference, current.timing, songMs, barShift()) : songMs;
+  }
+
+  function draw() {
+    frame = 0;
+    if (!loaded || !state || root.hidden) {
+      return;
+    }
+    const synced = steadyNow();
+    const { playhead, run, timeline, offset, songMs, rate } = songClock(synced, settings.leadMs);
+    const following = playhead.mode === "running" || playhead.mode === "countdown";
+
+    const position = cursorAt(loaded.timing, viewMs(songMs), { motion: settings.motion });
     if (position) {
       placeCursor(position);
-      const total = loaded.manifest.parts.find((part) => part.id === loaded?.partId)?.measureCount ?? 0;
+      placeNextMark(position, playhead.mode === "running");
+      // On an import the bar number is the band's, so everyone calls out the same bar.
+      const bandPass = timeline.events[Math.max(0, findPassIndex(timeline.events, songMs))];
+      const bar = loaded.reference ? (bandPass?.m ?? 0) + 1 : position.measureIndex + 1;
+      const total = loaded.reference
+        ? loaded.reference.measures.length
+        : loaded.manifest.parts.find((part) => part.id === loaded?.partId)?.measureCount ?? 0;
       const section = sectionAt(loaded.timing, position.measureIndex);
-      el.position.textContent = `Bar ${position.measureIndex + 1}${total ? ` / ${total}` : ""}` +
+      el.position.textContent = `Bar ${bar}${total ? ` / ${total}` : ""}` +
         (section ? ` · ${section}` : "") +
         (position.passNumber > 1 ? ` · ${ordinal(position.passNumber)} time` : "");
       // Where the music goes next when it does not just carry on: shown on the
@@ -462,12 +600,30 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       const jump = jumpAfter(loaded.timing.events, position.passIndex);
       el.jump.hidden = !jump;
       if (jump) {
-        el.jump.textContent = jump.kind === "repeat" ? `↻ back to bar ${jump.toMeasureIndex + 1}` : `→ jump to bar ${jump.toMeasureIndex + 1}`;
+        const to = loaded.reference
+          ? (referenceMeasureOf(loaded.reference, loaded.timing, jump.toMeasureIndex, barShift()) ?? jump.toMeasureIndex)
+          : jump.toMeasureIndex;
+        el.jump.textContent = jump.kind === "repeat" ? `↻ back to bar ${to + 1}` : `→ jump to bar ${to + 1}`;
       }
       measureMark.classList.toggle("is-before-jump", Boolean(jump));
     }
 
-    renderCountdown(playhead, run);
+    // A Songsterr score starts where the band's count-in bars end: count those
+    // in too, in one run with the wait before the downbeat.
+    const shift = barShift();
+    const musicStart = shift > 0 ? timeline.events[shift]?.t : undefined;
+    const countsBars = musicStart !== undefined && musicStart > offset;
+    /** @type {number | undefined} room ms left until the first bar of the notes on screen */
+    let countInMs = playhead.mode === "countdown" ? playhead.remainingMs ?? 0 : undefined;
+    if (countsBars && playhead.mode === "countdown") {
+      countInMs = (countInMs ?? 0) + (/** @type {number} */ (musicStart) - offset) / rate;
+    } else if (countsBars && playhead.mode === "running" && songMs < /** @type {number} */ (musicStart)) {
+      countInMs = (/** @type {number} */ (musicStart) - songMs) / rate;
+    }
+    const firstBar = countsBars ? (timeline.events[shift]?.m ?? 0) + 1 : run?.startMeasure;
+    renderCountdown(playhead, countInMs, timeline, firstBar, run?.tempoPercent);
+    renderCalibration(playhead.mode);
+
     if (playhead.mode !== lastMode) {
       if (playhead.mode === "countdown") {
         // A new run: show its start, wherever the player had scrolled.
@@ -480,7 +636,6 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       lastMode = playhead.mode;
     }
     root.dataset.mode = playhead.mode;
-    const following = playhead.mode === "running" || playhead.mode === "countdown";
     el.follow.hidden = !(following && Date.now() < followPausedUntil);
     el.pickStartButton.disabled = following;
     if (!following && scrollAnimation) {
@@ -492,7 +647,12 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     }
 
     if (position) {
-      follow(position, following);
+      // The line the eyes need next: where the cursor will be a moment from
+      // now (scroll ahead), so the view stands still before the cursor gets there.
+      const ahead = playhead.mode === "running" && settings.scrollAheadMs > 0
+        ? cursorAt(loaded.timing, viewMs(songMs + settings.scrollAheadMs * rate), { motion: "even" })
+        : undefined;
+      follow(position, following, ahead);
     }
     if (following || scrollAnimation) {
       frame = requestAnimationFrame(draw);
@@ -501,9 +661,12 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
 
   /**
    * @param {ReturnType<typeof resolvePlayhead>} playhead
-   * @param {{ startMeasure?: number, tempoPercent?: number } | undefined} run
+   * @param {number | undefined} countInMs room ms left until the notes start; undefined: no count-in now
+   * @param {ScoreTiming} timeline the band's score
+   * @param {number | undefined} firstBar the bar counted in to
+   * @param {number | undefined} tempoPercent
    */
-  function renderCountdown(playhead, run) {
+  function renderCountdown(playhead, countInMs, timeline, firstBar, tempoPercent) {
     beatFlash.classList.remove("is-on");
     if (playhead.mode === "elsewhere") {
       el.countdown.hidden = false;
@@ -511,7 +674,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       el.countdown.textContent = "Band is on another song";
       return;
     }
-    if (playhead.mode !== "countdown" || !loaded) {
+    if (countInMs === undefined || !loaded) {
       el.countdown.hidden = true;
       return;
     }
@@ -521,8 +684,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       el.countdown.textContent = "Syncing clock…";
       return;
     }
-    const remainingMs = playhead.remainingMs ?? 0;
-    const beats = countInState(remainingMs, countInBeat(loaded.timing, run?.startMeasure, run?.tempoPercent));
+    const beats = countInState(countInMs, countInBeat(timeline, firstBar, tempoPercent));
     if (beats) {
       // The count-in in beats, flashing on each one -- in the bar and along the
       // top edge, never over the start measure.
@@ -531,7 +693,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       beatFlash.classList.toggle("is-on", beats.phase < 0.22);
     } else {
       el.countdown.classList.remove("is-beat");
-      el.countdown.textContent = `Starts in ${(remainingMs / 1000).toFixed(1)} s`;
+      el.countdown.textContent = `Starts in ${(countInMs / 1000).toFixed(1)} s`;
     }
   }
 
@@ -562,8 +724,9 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     }
     loadPagesAround(position.page);
     if (cursor.parentElement !== page.el) {
-      page.el.append(measureMark, cursor);
+      page.el.append(measureMark, cursor, beatDots);
     }
+    root.dataset.cursorStyle = settings.motion;
     const scale = page.el.clientWidth / page.width;
     const { measure } = position;
     const top = (measure.y - CURSOR_OVERHANG) * scale;
@@ -575,6 +738,50 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     measureMark.style.width = `${measure.w * scale}px`;
     measureMark.style.height = `${height}px`;
     measureMark.style.transform = `translate3d(${measure.x * scale}px, ${top}px, 0)`;
+
+    beatDots.hidden = settings.motion !== "bar";
+    if (settings.motion === "bar") {
+      // One dot per beat under the bar; the one being played is lit.
+      const { count, index } = position.beat;
+      if (beatDots.childElementCount !== count) {
+        beatDots.replaceChildren(...Array.from({ length: count }, () => document.createElement("span")));
+      }
+      [...beatDots.children].forEach((dot, dotIndex) => {
+        dot.classList.toggle("is-now", dotIndex === index);
+        dot.classList.toggle("is-past", dotIndex < index);
+      });
+      beatDots.style.width = `${measure.w * scale}px`;
+      beatDots.style.transform = `translate3d(${measure.x * scale}px, ${top + height}px, 0)`;
+    }
+  }
+
+  /**
+   * In the last beat before the music leaves the line (or repeats, or jumps),
+   * a faint box on the bar that comes next, so the eye knows where to go.
+   *
+   * @param {NonNullable<ReturnType<typeof cursorAt>>} position
+   * @param {boolean} running
+   */
+  function placeNextMark(position, running) {
+    const timing = loaded?.timing;
+    const next = timing?.events[position.passIndex + 1];
+    const measure = next ? timing?.measures[next.m] : undefined;
+    const page = measure ? loaded?.pages[measure.page] : undefined;
+    const systems = loaded?.systems.systemOfMeasure ?? [];
+    const flows = next !== undefined && next.m === position.measureIndex + 1 &&
+      systems[next.m] === systems[position.measureIndex];
+    const show = running && !flows && Boolean(measure && page) && position.beat.index >= position.beat.count - 1;
+    nextMark.hidden = !show;
+    if (!show || !measure || !page) {
+      return;
+    }
+    if (nextMark.parentElement !== page.el) {
+      page.el.append(nextMark);
+    }
+    const scale = page.el.clientWidth / page.width;
+    nextMark.style.width = `${measure.w * scale}px`;
+    nextMark.style.height = `${(measure.h + CURSOR_OVERHANG * 2) * scale}px`;
+    nextMark.style.transform = `translate3d(${measure.x * scale}px, ${(measure.y - CURSOR_OVERHANG) * scale}px, 0)`;
   }
 
   /**
@@ -595,28 +802,48 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
   /**
    * @param {NonNullable<ReturnType<typeof cursorAt>>} position
    * @param {boolean} following
+   * @param {ReturnType<typeof cursorAt>} [ahead] where the cursor will be a moment from now
    */
-  function follow(position, following) {
+  function follow(position, following, ahead) {
     if (!loaded) {
       return;
     }
     const paused = Date.now() < followPausedUntil;
     if (settings.layout === "pages") {
       const byHand = manualPage !== undefined && (!following || paused);
-      showPages(byHand ? /** @type {number} */ (manualPage) : position.page);
+      // Turn early to the page coming up, as long as the page being played
+      // stays in view beside it.
+      const early = ahead && visiblePages(ahead.page, loaded.pages.length, pageSlots(), settings.pageTurn).includes(position.page);
+      showPages(byHand ? /** @type {number} */ (manualPage) : early ? /** @type {NonNullable<typeof ahead>} */ (ahead).page : position.page);
       pendingIdleScroll = false;
       return;
     }
 
-    const systemIndex = loaded.systems.systemOfMeasure[position.measureIndex] ?? 0;
-    // Scroll on a new line (or a fresh layout) while the song runs; while
+    const currentSystem = loaded.systems.systemOfMeasure[position.measureIndex] ?? 0;
+    const systemIndex = following && ahead ? loaded.systems.systemOfMeasure[ahead.measureIndex] ?? currentSystem : currentSystem;
+    // Scroll on a new line (or a fresh layout) while the song runs -- a moment
+    // before the cursor gets there -- and once more when it does if the early
+    // scroll had to hold back to keep the line being played in view. While
     // nothing runs, only when asked to (a new song, zoom, layout) -- never
     // because the window changed size.
-    const wanted = following ? systemIndex !== lastSystem : pendingIdleScroll;
+    const wanted = following
+      ? systemIndex !== lastSystem || (heldBackFor !== undefined && heldBackFor !== currentSystem)
+      : pendingIdleScroll;
     if (wanted && !paused) {
       lastSystem = systemIndex;
       pendingIdleScroll = false;
-      const target = followTargetFor(systemIndex);
+      heldBackFor = undefined;
+      let target = followTargetFor(systemIndex);
+      const playing = loaded.systems.systems[currentSystem];
+      if (target !== undefined && systemIndex !== currentSystem && playing) {
+        const line = systemBox(playing);
+        const margin = 8;
+        const held = Math.max(line.bottom - el.scroller.clientHeight + margin, Math.min(target, line.top - margin));
+        if (Math.abs(held - target) > 1) {
+          heldBackFor = currentSystem;
+          target = held;
+        }
+      }
       if (target !== undefined) {
         scrollTo(target, following && lastMode === "running");
       }
@@ -818,6 +1045,97 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
         : "Keep this screen on: tap the notes once, or set Auto-Lock to Never (iPad: Settings › Display & Brightness).";
   }
 
+  /** Shows the cursor style's name on its button. */
+  function renderCursorStyle() {
+    el.motionSelect.value = settings.motion;
+    el.styleButton.textContent = `Cursor: ${CURSOR_STYLE_NAMES[settings.motion]}`;
+    root.dataset.cursorStyle = settings.motion;
+  }
+
+  /** @param {import("./score-timing.js").CursorStyle} style */
+  function setCursorStyle(style) {
+    settings.motion = style;
+    saveSettings(settings);
+    renderCursorStyle();
+    requestDraw();
+  }
+
+  /**
+   * "Songsterr bar 1 is the band's bar …": shown for an import that runs on the
+   * band's score, with the detected bar as "auto".
+   */
+  function renderSongsterrStart() {
+    const reference = loaded?.reference;
+    el.songsterrStartLabel.hidden = !reference;
+    if (!reference || !loaded) {
+      return;
+    }
+    const songId = state?.currentSong?.song?.id;
+    const chosen = songId ? settings.songsterrStarts[songId] : undefined;
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = `Auto (bar ${loaded.detectedShift + 1})`;
+    el.songsterrStartSelect.replaceChildren(auto, ...[1, 2, 3, 4, 5].map((bar) => {
+      const option = document.createElement("option");
+      option.value = String(bar);
+      option.textContent = `Bar ${bar}`;
+      return option;
+    }));
+    el.songsterrStartSelect.value = chosen ? String(chosen) : "";
+  }
+
+  /**
+   * Tap along with the beat while the band plays; the cursor lead is set from
+   * where the taps landed (see leadFromTaps).
+   *
+   * @param {string} mode
+   */
+  function renderCalibration(mode) {
+    el.calibrate.hidden = calibration === undefined;
+    if (calibration === undefined) {
+      return;
+    }
+    el.calibrate.textContent = mode === "running"
+      ? `Tap with the beat · ${calibration.length} / ${CALIBRATION_TAPS} · tap here`
+      : "Start the song, then tap with the beat here";
+  }
+
+  /** @param {number} eventTimeStamp the tap's event.timeStamp (performance clock) */
+  function calibrationTap(eventTimeStamp) {
+    if (!loaded || calibration === undefined) {
+      return;
+    }
+    const synced = steadyNow();
+    if (synced === undefined) {
+      return;
+    }
+    const tapAt = synced - Math.max(0, performance.now() - eventTimeStamp);
+    const { playhead, timeline, songMs, rate } = songClock(tapAt, 0);
+    if (playhead.mode !== "running") {
+      return;
+    }
+    const beat = nearestBeatMs(timeline, songMs);
+    if (beat === undefined) {
+      return;
+    }
+    calibration.push((songMs - beat) / rate);
+    if (calibration.length < CALIBRATION_TAPS) {
+      renderCalibration(playhead.mode);
+      return;
+    }
+    const lead = leadFromTaps(calibration);
+    calibration = undefined;
+    el.calibrateButton.textContent = "Calibrate";
+    if (lead !== undefined) {
+      settings.leadMs = lead;
+      el.leadInput.value = String(lead);
+      saveSettings(settings);
+      announce(`Cursor lead set to ${lead} ms.`);
+    }
+    renderCalibration(playhead.mode);
+    requestDraw();
+  }
+
   /** @param {boolean} on */
   function setPicking(on) {
     picking = on && Boolean(onPickStart) && Boolean(loaded);
@@ -845,9 +1163,16 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       announce("No bar there. Tap a bar of music.");
       return;
     }
+    const bandMeasure = loaded.reference
+      ? referenceMeasureOf(loaded.reference, loaded.timing, measureIndex, barShift())
+      : measureIndex;
+    if (bandMeasure === undefined) {
+      announce("That bar is not in the band's score.");
+      return;
+    }
     setPicking(false);
-    onPickStart(measureIndex + 1);
-    announce(`Start bar set to ${measureIndex + 1}.`);
+    onPickStart(bandMeasure + 1);
+    announce(`Start bar set to ${bandMeasure + 1}.`);
   }
 
   function applySettingsToControls() {
@@ -855,7 +1180,8 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     el.pageTurnSelect.value = settings.pageTurn;
     el.readingLineSelect.value = settings.readingLine;
     el.leadInput.value = String(settings.leadMs);
-    el.motionSelect.value = settings.motion;
+    renderCursorStyle();
+    el.scrollAheadSelect.value = String(settings.scrollAheadMs);
     el.sourceSelect.value = settings.source;
     el.nightInput.checked = settings.night;
     root.classList.toggle("is-night", settings.night);
@@ -923,9 +1249,46 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     document.addEventListener("fullscreenchange", renderFullscreenButton);
     document.addEventListener("webkitfullscreenchange", renderFullscreenButton);
     el.motionSelect.addEventListener("change", () => {
-      settings.motion = el.motionSelect.value === "notes" ? "notes" : "even";
+      const style = CURSOR_STYLES.find((candidate) => candidate === el.motionSelect.value);
+      setCursorStyle(style ?? "beats");
+    });
+    // Next style in one tap (or the C key), to compare them while the band plays.
+    el.styleButton.addEventListener("click", () =>
+      setCursorStyle(CURSOR_STYLES[(CURSOR_STYLES.indexOf(settings.motion) + 1) % CURSOR_STYLES.length]));
+    el.scrollAheadSelect.addEventListener("change", () => {
+      const value = Number(el.scrollAheadSelect.value);
+      settings.scrollAheadMs = SCROLL_AHEAD_CHOICES.includes(value) ? value : 1000;
       saveSettings(settings);
+      lastSystem = -1;
       requestDraw();
+    });
+    el.songsterrStartSelect.addEventListener("change", () => {
+      const songId = state?.currentSong?.song?.id;
+      if (!songId) {
+        return;
+      }
+      const bar = Number(el.songsterrStartSelect.value);
+      if (bar >= 1 && bar <= 5) {
+        settings.songsterrStarts[songId] = bar;
+      } else {
+        delete settings.songsterrStarts[songId];
+      }
+      const ids = Object.keys(settings.songsterrStarts);
+      for (const old of ids.slice(0, Math.max(0, ids.length - SONG_PART_LIMIT))) {
+        delete settings.songsterrStarts[old];
+      }
+      saveSettings(settings);
+      lastSystem = -1;
+      requestDraw();
+    });
+    el.calibrateButton.addEventListener("click", () => {
+      calibration = calibration === undefined ? [] : undefined;
+      el.calibrateButton.textContent = calibration ? "Cancel" : "Calibrate";
+      renderCalibration(lastMode);
+    });
+    el.calibrate.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      calibrationTap(event.timeStamp);
     });
     el.nightInput.addEventListener("change", () => {
       settings.night = el.nightInput.checked;
@@ -1041,7 +1404,19 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       requestDraw();
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && picking) {
+      const typing = event.target instanceof HTMLElement && event.target.closest("input, select, textarea");
+      if (calibration !== undefined && event.key === " " && !typing) {
+        event.preventDefault();
+        calibrationTap(event.timeStamp);
+        return;
+      }
+      if ((event.key === "c" || event.key === "C") && !typing && !event.ctrlKey && !event.metaKey && !event.altKey && loaded && !root.hidden) {
+        el.styleButton.click();
+        return;
+      }
+      if (event.key === "Escape" && calibration !== undefined) {
+        el.calibrateButton.click();
+      } else if (event.key === "Escape" && picking) {
         setPicking(false);
       } else if (event.key === "Escape" && document.body.classList.contains("score-focus")) {
         setFocus(false);
@@ -1076,9 +1451,10 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     if (!part) {
       return;
     }
+    const reference = loaded.reference;
     void fetchTiming(scoreId, part.timing).then((timing) => {
       if (loaded?.scoreId === scoreId) {
-        showScore(scoreId, manifest, part.id, timing);
+        showScore(scoreId, manifest, part.id, timing, reference);
       }
     }).catch((error) => showMessage(`Could not load ${part.name}: ${error instanceof Error ? error.message : error}`));
   }
@@ -1255,7 +1631,7 @@ function ordinal(value) {
 
 /** @param {boolean} isHost */
 function loadSettings(isHost) {
-  const settings = { ...DEFAULT_SETTINGS, songParts: {}, collapsed: isHost, focus: !isHost };
+  const settings = { ...DEFAULT_SETTINGS, songParts: {}, songsterrStarts: {}, collapsed: isHost, focus: !isHost };
   try {
     const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? "null");
     if (saved && typeof saved === "object") {
@@ -1273,7 +1649,14 @@ function loadSettings(isHost) {
       if (saved.pageTurn === "half" || saved.pageTurn === "whole") settings.pageTurn = saved.pageTurn;
       if (saved.readingLine in READING_LINES) settings.readingLine = saved.readingLine;
       if (Number.isFinite(saved.leadMs)) settings.leadMs = Math.max(-500, Math.min(1000, Math.round(saved.leadMs)));
-      if (saved.motion === "even" || saved.motion === "notes") settings.motion = saved.motion;
+      // `motion` was "even" or "notes" before the cursor styles: both remain.
+      if (CURSOR_STYLES.includes(saved.motion)) settings.motion = saved.motion;
+      if (SCROLL_AHEAD_CHOICES.includes(saved.scrollAheadMs)) settings.scrollAheadMs = saved.scrollAheadMs;
+      if (saved.songsterrStarts && typeof saved.songsterrStarts === "object") {
+        for (const [songId, bar] of Object.entries(saved.songsterrStarts).slice(-SONG_PART_LIMIT)) {
+          if (Number.isInteger(bar) && bar >= 1 && bar <= 5) settings.songsterrStarts[songId.slice(0, 120)] = bar;
+        }
+      }
       if (typeof saved.night === "boolean") settings.night = saved.night;
       // `notesFirst` replaced `focus`, whose default was off: older saved
       // values say nothing about what the player wants now.
@@ -1308,6 +1691,8 @@ function saveSettings(settings) {
       readingLine: settings.readingLine,
       leadMs: settings.leadMs,
       motion: settings.motion,
+      scrollAheadMs: settings.scrollAheadMs,
+      songsterrStarts: settings.songsterrStarts,
       night: settings.night,
       ...(isHost ? { hostCollapsed: settings.collapsed } : { collapsed: settings.collapsed, notesFirst: settings.focus })
     }));

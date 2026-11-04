@@ -290,3 +290,87 @@ test("the host taps a bar to make it the song's start", async ({ page, request }
   await expect.poll(() => room.host.states.at(-1)?.setlist?.songs?.find((song: { id: string }) => song.id === VERSE.id)?.startMeasure).toBe(7);
   room.close();
 });
+
+test("a Songsterr import without the band's count-in bar runs on the band's bars", async ({ page, request }) => {
+  test.setTimeout(60_000);
+  // The import: the same notes without the band's first bar (here its pickup,
+  // standing in for the count-in bar), with times starting at its own zero.
+  const IMPORT_ID = "5a".repeat(16);
+  const shiftMs = timing.events[1].t;
+  const imported = {
+    ...timing,
+    measures: timing.measures.slice(1),
+    events: timing.events.slice(1).map((pass: { m: number; t: number; e: number; b: [number, number][] }) => ({
+      m: pass.m - 1, t: pass.t - shiftMs, e: pass.e - shiftMs, b: pass.b.map(([time, x]) => [time - shiftMs, x])
+    })),
+    durationMs: timing.durationMs - shiftMs,
+    sections: (timing.sections ?? []).map((section: { m: number }) => ({ ...section, m: section.m - 1 })),
+    meters: (timing.meters ?? []).map((meter: { m: number }) => ({ ...meter, m: Math.max(0, meter.m - 1) }))
+  };
+  const score = manifest.parts[0];
+  const importManifest = { ...manifest, scoreId: IMPORT_ID, parts: [{ ...score, measureCount: imported.measures.length }] };
+  const room = await setUpRoom(request);
+  for (const [file, body] of [
+    ...score.pages.map((file: string) => [file, readFileSync(join(EXPORT_DIR, file))]),
+    [score.timing, Buffer.from(JSON.stringify(imported))],
+    ["manifest.json", Buffer.from(JSON.stringify(importManifest))]
+  ] as [string, Buffer][]) {
+    const response = await request.put(fileUrl(IMPORT_ID, file), { headers: { "x-bandcue-client-id": room.helper.clientId }, data: body });
+    expect(response.status()).toBe(204);
+  }
+  const song = {
+    ...VERSE,
+    id: "reading-songsterr",
+    title: "Reading Songsterr",
+    songsterrUrl: "https://www.songsterr.com/a/wsa/band-song-tab-s4242",
+    scoreImports: [{ key: "s4242", importId: "ab".repeat(16), importedAt: 1, scoreId: IMPORT_ID }]
+  };
+  room.send({ type: "setlistUpdate", songs: [song, ...SONGS] });
+  room.send({ type: "currentSongUpdate", song, index: 1, total: SONGS.length + 1 });
+  room.helper.socket.send(JSON.stringify({
+    type: "adapterStatus", app: "musescore", ready: true,
+    scores: [{ songId: song.id, relativePath: song.source, status: "ready", scoreId: SCORE_ID }]
+  }));
+
+  await page.addInitScript(() => localStorage.setItem("bandcue:score-view", JSON.stringify({ source: "songsterr" })));
+  await page.goto(`/?token=${TOKEN}`);
+  await expect(page.locator("#scoreTitle")).toContainText("Songsterr");
+  // The band's bar 4 is Songsterr's third bar; the label keeps the band's number.
+  const position = page.locator("#scorePosition");
+  await expect(position).toHaveText("Bar 4 / 10 · Verse");
+  await expect(page.locator("#scoreSongsterrStartLabel")).toHaveJSProperty("hidden", false);
+  await expect(page.locator("#scoreSongsterrStartSelect option").first()).toHaveText("Auto (bar 2)");
+  const markX = () => page.locator(".score-measure-mark").evaluate((mark) =>
+    Number(/translate3d\(([-\d.]+)px/.exec((mark as HTMLElement).style.transform)?.[1]));
+  const pageScale = await page.locator(".score-page").first().evaluate((element, width) => element.clientWidth / width, timing.pages[0].width);
+  expect(Math.abs(await markX() - imported.measures[2].x * pageScale)).toBeLessThan(1);
+
+  // Told by hand that Songsterr starts on the band's bar 3: bar 4 is its second bar.
+  await setControl(page, "#scoreSongsterrStartSelect", "3");
+  await expect.poll(async () => Math.abs(await markX() - imported.measures[1].x * pageScale)).toBeLessThan(1);
+  await setControl(page, "#scoreSongsterrStartSelect", "");
+
+  // Cursor styles cycle with the C key.
+  await expect(page.locator("#scoreStyleButton")).toHaveText("Cursor: Beat glide");
+  await page.keyboard.press("c");
+  await expect(page.locator("#scoreStyleButton")).toHaveText("Cursor: Beat step");
+  await expect(page.locator("#scoreView")).toHaveAttribute("data-cursor-style", "step");
+  for (let index = 0; index < 3; index += 1) {
+    await page.keyboard.press("c");
+  }
+  await expect(page.locator("#scoreView")).toHaveAttribute("data-cursor-style", "bar");
+  await expect(page.locator(".score-beat-dots span")).toHaveCount(4);
+
+  room.send({ type: "safetyUpdate", armed: true });
+  room.send({ type: "transportRequest", action: "play" });
+  await expect(page.locator("#scoreView")).toHaveAttribute("data-mode", "running", { timeout: 10_000 });
+  // In the last beat before the repeat, the bar it goes back to is marked.
+  await expect(page.locator(".score-next-mark")).toBeVisible({ timeout: 6_000 });
+  const nextX = await page.locator(".score-next-mark").evaluate((mark) =>
+    Number(/translate3d\(([-\d.]+)px/.exec((mark as HTMLElement).style.transform)?.[1]));
+  expect(Math.abs(nextX - imported.measures[1].x * pageScale)).toBeLessThan(1);
+  await expect(position).toHaveText("Bar 3 / 10 · Verse · 2nd time", { timeout: 6_000 });
+  await expect(page.locator(".score-beat-dots span.is-now")).toHaveCount(1);
+  room.send({ type: "transportRequest", action: "stop" });
+  room.close();
+});

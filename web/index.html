@@ -89,6 +89,7 @@
             </div>
             <button class="secondary compact" id="scorePickStartButton" type="button" aria-pressed="false" title="Tap a bar of the notes to make it this song's start measure" hidden>Set start bar</button>
             <button class="secondary compact" id="scoreFullscreenButton" type="button" aria-pressed="false" hidden>Full screen</button>
+            <button class="secondary compact" id="scoreStyleButton" type="button" title="Next cursor style (key C)">Cursor: Beat glide</button>
             <button class="secondary compact" id="scoreFocusButton" type="button" aria-pressed="false">Notes only</button>
             <button class="secondary compact" id="scoreCollapseButton" type="button" aria-expanded="true">Hide notes</button>
             <details class="score-settings">
@@ -117,11 +118,27 @@
                   </select>
                 </label>
                 <label>
-                  <span>Cursor motion</span>
+                  <span>Cursor style</span>
                   <select id="scoreMotionSelect">
+                    <option value="beats">Beat glide (steady within each beat)</option>
+                    <option value="step">Beat step (jumps on each beat)</option>
                     <option value="even">Steady through each bar</option>
                     <option value="notes">Note by note</option>
+                    <option value="bar">Bar + beats (no line)</option>
                   </select>
+                </label>
+                <label title="How long before the cursor reaches a new line the view moves to it.">
+                  <span>Scroll ahead</span>
+                  <select id="scoreScrollAheadSelect">
+                    <option value="0">Off (when the cursor gets there)</option>
+                    <option value="500">0.5 s</option>
+                    <option value="1000">1 s</option>
+                    <option value="1500">1.5 s</option>
+                  </select>
+                </label>
+                <label id="scoreSongsterrStartLabel" title="The band's bar that Songsterr's first bar is (2 when the band's score has one count-in bar)." hidden>
+                  <span>Songsterr bar 1 is band bar</span>
+                  <select id="scoreSongsterrStartSelect"></select>
                 </label>
                 <label class="score-check">
                   <input id="scoreNightInput" type="checkbox" />
@@ -137,6 +154,7 @@
                   <span>Cursor lead ms</span>
                   <input id="scoreLeadInput" type="number" inputmode="numeric" min="-500" max="1000" step="10" value="0" />
                 </label>
+                <button class="secondary compact" id="scoreCalibrateButton" type="button" title="Tap along with the beat while the band plays; sets the cursor lead">Calibrate</button>
                 <p class="score-hint" id="scoreWakeHint">Keep this screen on: set Auto-Lock to Never (iPad: Settings &rsaquo; Display &amp; Brightness).</p>
               </div>
             </details>
@@ -147,6 +165,7 @@
             <div class="score-pages" id="scorePages"></div>
           </div>
           <button class="score-follow" id="scoreFollowButton" type="button" hidden>Follow the cursor</button>
+          <button class="score-calibrate" id="scoreCalibrate" type="button" hidden>Tap with the beat</button>
           <p class="score-message" id="scoreMessage" hidden></p>
         </div>
       </section>
