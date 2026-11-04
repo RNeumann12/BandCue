@@ -488,11 +488,21 @@ extension or MuseScore is needed on that device.
 
 ![Score view in "Notes only" mode on an iPad: the cursor stands on the note being played, inside a repeat taken the second time](assets/score-view/score-view-running.png)
 
-- **The cursor moves with the music.** It crosses each bar at a steady speed and is exactly on
-  every bar line; *View › Cursor motion › Note by note* makes it stop on each note instead. It
+- **The cursor moves with the music.** By default (*Beat glide*) it is exactly on every beat and
+  moves at a steady speed within each beat. *View › Cursor style* offers *Beat step* (it jumps on
+  each beat, like a metronome on the page), *Steady through each bar*, *Note by note* and *Bar +
+  beats* (no line; the bar is lit, with a dot per beat under it). The *Cursor:* button, or the **C**
+  key, switches to the next style while the band plays, so you can compare them. The cursor
   follows repeats, D.S./Coda jumps and tempo changes, and honours the song's tempo and start
   measure. During the count-in it waits on the start measure; Stop freezes it where the band
   stopped.
+- **The next line is still before you get there.** The view moves to a new line a moment before
+  the cursor reaches it (*View › Scroll ahead*, 1 s by default; readers' eyes run about a second
+  ahead of their hands), never scrolling away the line still being played. In the last beat before
+  a line ends, a repeat or a jump, the bar that comes next is outlined.
+- **On the beat you hear.** If the cursor seems early or late on one device (Bluetooth speakers,
+  a far-away amp), press *View › Calibrate* while the band plays and tap along with the beat eight
+  times on the big target (or the space bar): the *Cursor lead* is set from your taps.
 - **Read ahead like on Songsterr.** The line being played sits near the top of the screen and the
   next lines fill the rest. Pick *View › Current line at › Top* for the most read-ahead. *Page
   turns* shows two pages side by side in landscape and turns the left page as soon as you reach
@@ -546,7 +556,15 @@ The band's MuseScore files are never touched: the import lives beside them. Each
 **Notes from › MuseScore file / Songsterr import** (shown on songs with an import, kept per
 device): the drummer chooses *Songsterr import* once and reads the drum arrangement's own notes and
 timing, everyone else keeps the hand-edited MuseScore file. A song without a MuseScore file gets a
-score view too once it has an import. After the import nothing goes online again: the coordinator
+score view too once it has an import.
+
+The import follows the band's own score bar by bar: the band's MuseScore files start with a
+count-in bar that Songsterr does not have, so the score view finds how many bars Songsterr lacks
+(*View › Songsterr bar 1 is band bar*, *Auto* by default; set it by hand when it guesses wrong) and
+runs the Songsterr cursor on the band's bars and tempo. It counts the count-in bar in, shows the
+band's bar numbers, and does not drift where Songsterr's tempo differs. Imported drum parts are
+written as drummers read them: hands stems up, bass drum and hi-hat pedal stems down in a second
+voice, as Songsterr shows them (MuseScore's Guitar Pro import puts them all in one voice). After the import nothing goes online again: the coordinator
 keeps the files and serves them with the MuseScore laptop switched off. Import again when the tab
 changes on Songsterr (the newer import replaces the older one). The imports travel with the
 setlist: *Export* writes them into the setlist file, and loading that file later brings them back

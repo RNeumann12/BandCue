@@ -1285,7 +1285,9 @@ body[data-transport="running"] .countdown {
 /* The cursor: a bar on the note being played. Moved by transform only, so a
    frame never re-lays out the page. */
 .score-cursor,
-.score-measure-mark {
+.score-measure-mark,
+.score-next-mark,
+.score-beat-dots {
   position: absolute;
   top: 0;
   left: 0;
@@ -1302,6 +1304,46 @@ body[data-transport="running"] .countdown {
 .score-measure-mark {
   border-radius: 4px;
   background: rgba(47, 95, 159, 0.08);
+}
+
+/* "Bar + beats": no line; the bar itself and a row of beat dots under it. */
+.score-view[data-cursor-style="bar"] .score-cursor {
+  visibility: hidden;
+}
+
+.score-view[data-cursor-style="bar"] .score-measure-mark {
+  background: rgba(216, 59, 45, 0.1);
+  box-shadow: inset 0 0 0 2px rgba(216, 59, 45, 0.45);
+}
+
+.score-beat-dots {
+  display: flex;
+  justify-content: space-around;
+  padding-top: 4px;
+}
+
+.score-beat-dots span {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: rgba(47, 95, 159, 0.2);
+}
+
+.score-beat-dots span.is-past {
+  background: rgba(216, 59, 45, 0.35);
+}
+
+.score-beat-dots span.is-now {
+  background: #d83b2d;
+  box-shadow: 0 0 8px rgba(216, 59, 45, 0.6);
+}
+
+/* The bar the eye goes to next, shown in the last beat before a line ends,
+   a repeat or a jump. */
+.score-next-mark {
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 2px rgba(47, 95, 159, 0.5);
+  background: rgba(47, 95, 159, 0.06);
 }
 
 .score-view[data-mode="idle"] .score-cursor,
@@ -1467,6 +1509,21 @@ body[data-transport="running"] .countdown {
   top: auto;
   bottom: 14px;
   flex: none;
+}
+
+/* Calibrating the cursor lead: one big target for taps along with the beat. */
+.score-calibrate {
+  position: absolute;
+  inset: auto 16px 16px;
+  min-height: 30%;
+  border: 3px dashed var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 800;
+  touch-action: manipulation;
 }
 
 .score-message {

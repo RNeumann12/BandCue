@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { entryContent, forcePageLayout, readZipEntries, rewriteZipText } from "./mscz-page-layout.js";
+import { splitDrumVoices } from "./mscx-drum-voices.js";
 import type {
   ScoreExportReport,
   ScoreManifest,
@@ -266,10 +267,17 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
+/**
+ * How a converted Guitar Pro import is prepared on top of a normal export (see
+ * prepareImport); part of an import's export id, so a change redoes only imports.
+ */
+export const IMPORT_PREPARATION_VERSION = 1;
+
 /** Content-addressed: the id changes whenever the score or the exporter does. */
-export function scoreIdFor(content: Buffer): string {
+export function scoreIdFor(content: Buffer, imported = false): string {
   return createHash("sha256")
     .update(`bandcue-score-export-v${SCORE_EXPORTER_VERSION}\n`)
+    .update(imported ? `bandcue-import-v${IMPORT_PREPARATION_VERSION}\n` : "")
     .update(content)
     .digest("hex")
     .slice(0, 32);
@@ -603,7 +611,7 @@ let cachedMuseScoreVersion: string | undefined;
 export async function exportScore(source: ScoreExportSource, options: ScoreExportOptions): Promise<ExportedScore> {
   const run = options.run ?? runMuseScore;
   const content = await readFile(source.absolutePath);
-  const scoreId = scoreIdFor(content);
+  const scoreId = scoreIdFor(content, source.force);
   const cached = await readCachedExport(options.cacheDir, scoreId);
   if (cached) {
     return cached;
@@ -611,7 +619,8 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
 
   const work = await mkdtemp(join(tmpdir(), "bandcue-export-"));
   try {
-    const paged = forcePageLayout(content) ?? content;
+    const layout = forcePageLayout(content) ?? content;
+    const paged = source.force ? prepareImport(layout) : layout;
     const scoreEntry = readZipEntries(paged).find((entry) => isScoreFile(entry.name));
     if (!scoreEntry) {
       throw new Error("No score inside the .mscz.");
@@ -671,6 +680,21 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
   } finally {
     await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/**
+ * A converted Guitar Pro import, made to read like the band's own scores: its
+ * drum kits get hands and feet in two voices (see splitDrumVoices). The band's
+ * own MuseScore files are exported as they are written.
+ */
+function prepareImport(mscz: Buffer): Buffer {
+  return rewriteZipText(mscz, isScoreFile, (xml) => {
+    const drumStaves = readScoreInstruments(xml)
+      .flatMap((instrument) => instrument.staves)
+      .filter((staff) => staff.kind === "percussion")
+      .map((staff) => staff.number);
+    return splitDrumVoices(xml, drumStaves);
+  }) ?? mscz;
 }
 
 async function collectVoice(

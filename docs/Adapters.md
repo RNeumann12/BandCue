@@ -456,11 +456,25 @@ measure index: the section names in the bar label and the beat length the count-
 
 **The cursor.** The companion computes
 `songMs = startOffset + (roomNow − downbeat) × tempoPercent / 100` on every animation frame from its
-synced room clock, looks the pass up by binary search and moves between the note onsets of that
-pass, reaching each note at its time. It is never counted up, so a throttled background tab or a
+synced room clock (read through the monotonic `performance.now()` and pulled toward the synced clock
+over ~200 ms, so a sync correction never makes the cursor twitch), looks the pass up by binary
+search and places the cursor in that pass by the chosen style: on the beats (the beat's x is
+interpolated between the note onsets around it; compound time counts dotted beats, a pickup the
+beat of the bar after it), on the notes, or steadily across the bar. It is never counted up, so a throttled background tab or a
 Wi-Fi drop cannot make it drift. Measured against the timing file in the browser it sat within
 ±3 ms. The leader's calibration still decides when the audio really starts; a per-device
-*Cursor lead* nudges only that screen's cursor.
+*Cursor lead* nudges only that screen's cursor; *Calibrate* sets it from taps along with the beat
+(the median distance to the nearest beat, plus ~30 ms for the habit of tapping early).
+
+**Songsterr imports on the band's bars.** An import is timed by Songsterr's file, and the band's
+scores start with a count-in bar the import lacks. When the song also has a MuseScore export, the
+view loads its timing as the reference: song time is computed on it as above, and its pass p, at a
+fraction f of the bar, maps to the import's pass p − k at the same fraction. k is detected as the
+shift that makes the pass counts equal and the time signatures agree (else 1), and can be set per
+song. Before the import's first bar the view counts in. For imports only, the exporter also splits
+every drum kit's notes into hands (voice 1, stems up) and feet (bass drums and hi-hat pedal, voice 2,
+stems down) and merges the rests this leaves (`src/adapters/mscx-drum-voices.ts`); those exports
+carry their own id (`IMPORT_PREPARATION_VERSION`).
 
 **Measure numbers.** `startMeasure` and the score view's *Bar N* count the score's measures from 1,
 **pickup included** — measure N is the `mpos` measure index N − 1. That is the numbering the bridge

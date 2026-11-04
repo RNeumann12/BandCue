@@ -88,25 +88,38 @@ export function findPassIndex(events, songMs) {
   return found;
 }
 
+/** How the cursor moves; see cursorAt. */
+export const CURSOR_STYLES = /** @type {const} */ (["beats", "step", "even", "notes", "bar"]);
+/** @typedef {typeof CURSOR_STYLES[number]} CursorStyle */
+
+/** How long the `step` cursor takes to slide to the next beat. */
+export const STEP_EASE_MS = 60;
+
 /**
- * The cursor at songMs: which pass and measure, and the x position on that
- * measure's page.
+ * The cursor at songMs: which pass and measure, the x position on that
+ * measure's page, and which beat of the measure it is on.
  *
  * `motion` decides how it crosses a measure:
- * - `even` (default): at one steady speed from the measure's first note to
- *   where the next measure begins. Engraving spaces short notes wider than
- *   their share of the time, so following the notes would make the cursor
- *   sprint through a 16th-note run and crawl over a half note; a steady
- *   cursor is easier to read along with. It is still exact on every bar.
+ * - `beats` (default): at a steady speed within each beat, from where one beat
+ *   is engraved to where the next is -- exactly on every beat, like a beat
+ *   cursor that glides (alphaTab's animated beat cursor). Steady enough to read
+ *   along with, and never off the beat the band is on.
+ * - `step`: stands on each beat and moves on to the next one on the beat, in a
+ *   quick slide (STEP_EASE_MS): a metronome on the page.
+ * - `even`: at one steady speed from the measure's first note to where the next
+ *   measure begins. Engraving spaces short notes wider than their share of the
+ *   time, so following the notes would make the cursor sprint through a
+ *   16th-note run and crawl over a half note. It is exact on every bar only.
  * - `notes`: glides from note to note and stands on each one exactly when it
  *   sounds, speeding up and slowing down with the engraving.
+ * - `bar`: like `step`; the view shows the bar and its beats instead of a line.
  *
  * @param {ScoreTiming} timing
  * @param {number} songMs
- * @param {{ motion?: "even" | "notes" }} [options]
- * @returns {{ passIndex: number, measureIndex: number, page: number, x: number, measure: ScoreTimingMeasure, passNumber: number } | undefined}
+ * @param {{ motion?: CursorStyle }} [options]
+ * @returns {{ passIndex: number, measureIndex: number, page: number, x: number, measure: ScoreTimingMeasure, passNumber: number, beat: { index: number, count: number, startMs: number, endMs: number } } | undefined}
  */
-export function cursorAt(timing, songMs, { motion = "even" } = {}) {
+export function cursorAt(timing, songMs, { motion = "beats" } = {}) {
   const events = timing.events;
   if (!events.length) {
     return undefined;
@@ -118,14 +131,276 @@ export function cursorAt(timing, songMs, { motion = "even" } = {}) {
   if (!measure) {
     return undefined;
   }
+  const beats = beatsOf(timing, passIndex);
+  let beatIndex = 0;
+  while (beatIndex + 1 < beats.length && beats[beatIndex + 1] <= clamped) {
+    beatIndex += 1;
+  }
+  const beat = {
+    index: beatIndex,
+    count: beats.length,
+    startMs: beats[beatIndex],
+    endMs: beats[beatIndex + 1] ?? pass.e
+  };
   return {
     passIndex,
     measureIndex: pass.m,
     page: measure.page,
-    x: anchorX(motion === "notes" || pass.b.length < 3 ? pass.b : [pass.b[0], pass.b[pass.b.length - 1]], clamped),
+    x: cursorX(pass, beats, beatIndex, clamped, motion),
     measure,
-    passNumber: passNumberOf(events, passIndex)
+    passNumber: passNumberOf(events, passIndex),
+    beat
   };
+}
+
+/**
+ * @param {ScoreTimingEvent} pass
+ * @param {number[]} beats
+ * @param {number} beatIndex
+ * @param {number} songMs
+ * @param {CursorStyle} motion
+ */
+function cursorX(pass, beats, beatIndex, songMs, motion) {
+  if (motion === "notes" || pass.b.length < 2) {
+    return anchorX(pass.b, songMs);
+  }
+  if (motion === "even") {
+    return anchorX(pass.b.length < 3 ? pass.b : [pass.b[0], pass.b[pass.b.length - 1]], songMs);
+  }
+  // Where each beat is engraved: between the notes around it.
+  const beatAnchors = beats.map((time) => /** @type {[number, number]} */ ([time, anchorX(pass.b, time)]));
+  beatAnchors.push(pass.b[pass.b.length - 1]);
+  if (motion === "beats") {
+    return anchorX(beatAnchors, songMs);
+  }
+  // step / bar: on the beat, with a short slide from the beat before (none
+  // onto a new bar: that may be a new line).
+  const target = beatAnchors[beatIndex][1];
+  if (beatIndex === 0) {
+    return target;
+  }
+  const from = beatAnchors[beatIndex - 1][1];
+  const progress = Math.min(1, Math.max(0, (songMs - beats[beatIndex]) / STEP_EASE_MS));
+  return from + (target - from) * (1 - (1 - progress) ** 3);
+}
+
+/**
+ * The time signature of a measure; 4/4 when the export says nothing.
+ *
+ * @param {ScoreTiming} timing
+ * @param {number} measureIndex
+ * @returns {{ n: number, d: number }}
+ */
+export function meterAt(timing, measureIndex) {
+  let meter = { n: 4, d: 4 };
+  for (const candidate of timing.meters ?? []) {
+    if (candidate.m > measureIndex) {
+      break;
+    }
+    meter = candidate;
+  }
+  return meter;
+}
+
+/**
+ * Beats of a time signature: compound time (6/8, 9/8, 12/8) counts dotted
+ * quarters, everything else its own unit.
+ *
+ * @param {{ n: number, d: number }} meter
+ */
+export function beatsPerMeasure(meter) {
+  return meter.d === 8 && meter.n > 3 && meter.n % 3 === 0 ? meter.n / 3 : Math.max(1, meter.n);
+}
+
+/**
+ * When each beat of a measure pass starts, in song ms (the first is the
+ * pass's start). A pass shorter than its time signature -- a pickup, a bar
+ * cut short -- is counted with the beat of a full neighbouring pass of the
+ * same meter.
+ *
+ * @param {ScoreTiming} timing
+ * @param {number} passIndex
+ * @returns {number[]}
+ */
+export function beatsOf(timing, passIndex) {
+  const events = timing.events;
+  const pass = events[passIndex];
+  if (!pass) {
+    return [];
+  }
+  const meter = meterAt(timing, pass.m);
+  const count = beatsPerMeasure(meter);
+  const length = pass.e - pass.t;
+  if (!(length > 0)) {
+    return [pass.t];
+  }
+  let beatMs = length / count;
+  for (const neighbour of [events[passIndex + 1], events[passIndex - 1]]) {
+    if (!neighbour) {
+      continue;
+    }
+    const other = meterAt(timing, neighbour.m);
+    const otherMs = (neighbour.e - neighbour.t) / beatsPerMeasure(other);
+    if (other.n === meter.n && other.d === meter.d && otherMs > beatMs * 1.15) {
+      beatMs = otherMs;
+    }
+    break;
+  }
+  const beats = Math.max(1, Math.min(count, Math.round(length / beatMs)));
+  return Array.from({ length: beats }, (_, index) => pass.t + (length / beats) * index);
+}
+
+/**
+ * The beat nearest to songMs, in song ms -- what a tap along with the band was
+ * meant to hit.
+ *
+ * @param {ScoreTiming} timing
+ * @param {number} songMs
+ * @returns {number | undefined}
+ */
+export function nearestBeatMs(timing, songMs) {
+  const passIndex = findPassIndex(timing.events, songMs);
+  if (passIndex < 0) {
+    return timing.events[0]?.t;
+  }
+  let best;
+  for (const index of [passIndex - 1, passIndex, passIndex + 1]) {
+    const beats = timing.events[index] ? [...beatsOf(timing, index), timing.events[index].e] : [];
+    for (const beat of beats) {
+      if (best === undefined || Math.abs(beat - songMs) < Math.abs(best - songMs)) {
+        best = beat;
+      }
+    }
+  }
+  return best;
+}
+
+// People tapping along with a beat tap slightly early, by about this much
+// ("negative mean asynchrony", typically 20-50 ms).
+export const TAP_ANTICIPATION_MS = 30;
+
+/**
+ * The cursor lead that puts the cursor on the beat this player hears, from
+ * how far their taps landed after the beats the cursor showed (room ms, lead
+ * 0). The median, so a missed tap does not count.
+ *
+ * @param {number[]} tapErrorsMs
+ * @returns {number | undefined}
+ */
+export function leadFromTaps(tapErrorsMs) {
+  if (tapErrorsMs.length < 4) {
+    return undefined;
+  }
+  const sorted = [...tapErrorsMs].sort((left, right) => left - right);
+  const middle = sorted.length >> 1;
+  const median = sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+  const lead = -Math.round((median + TAP_ANTICIPATION_MS) / 5) * 5;
+  return Math.max(-500, Math.min(1000, lead)) || 0;
+}
+
+/**
+ * Room time that moves as smoothly as the display: read from the monotonic
+ * performance clock and pulled toward the synced room clock over ~200 ms, so a
+ * clock-sync correction or a coarse Date.now() never makes the cursor twitch.
+ * A jump of more than 250 ms (a resync after sleep) is taken at once.
+ *
+ * @param {() => number | undefined} read the synced room clock
+ * @param {() => number} [perfNow]
+ * @returns {() => number | undefined}
+ */
+export function createSteadyClock(read, perfNow = () => performance.now()) {
+  /** @type {{ room: number, perf: number } | undefined} */
+  let last;
+  return () => {
+    const raw = read();
+    if (raw === undefined) {
+      last = undefined;
+      return undefined;
+    }
+    const perf = perfNow();
+    if (!last) {
+      last = { room: raw, perf };
+      return raw;
+    }
+    const predicted = last.room + (perf - last.perf);
+    const error = raw - predicted;
+    const room = Math.abs(error) > 250 ? raw : predicted + error * Math.min(1, (perf - last.perf) / 200);
+    last = { room, perf };
+    return room;
+  };
+}
+
+/**
+ * How many bars a Songsterr import lacks at its start compared with the band's
+ * own score (the band writes a count-in bar into every song): the shift k
+ * where the band's pass i + k is the import's pass i. Prefers a shift that
+ * makes both scores the same length and agrees on every time signature; then
+ * one that only makes them the same length; else 1, the band's habit.
+ *
+ * @param {ScoreTiming} reference the band's MuseScore score
+ * @param {ScoreTiming} imported
+ * @returns {number}
+ */
+export function detectBarOffset(reference, imported) {
+  const fits = [];
+  for (let shift = 0; shift <= 4; shift += 1) {
+    if (reference.events.length - shift === imported.events.length) {
+      fits.push(shift);
+    }
+  }
+  const metersAgree = (/** @type {number} */ shift) => imported.events.every((pass, index) => {
+    const ours = meterAt(reference, reference.events[index + shift].m);
+    const theirs = meterAt(imported, pass.m);
+    return ours.n === theirs.n && ours.d === theirs.d;
+  });
+  return fits.find(metersAgree) ?? fits[0] ?? 1;
+}
+
+/**
+ * The import's song time for the band's song time: bar by bar, so the cursor
+ * on a Songsterr score stays on the bar the band plays even where Songsterr's
+ * tempo differs from the band's. The band's pass p is the import's pass
+ * p - shift, at the same fraction of the bar; before that (the count-in) the
+ * import waits on its start.
+ *
+ * @param {ScoreTiming} reference
+ * @param {ScoreTiming} imported
+ * @param {number} referenceMs
+ * @param {number} shift see detectBarOffset
+ */
+export function importedSongMs(reference, imported, referenceMs, shift) {
+  const events = imported.events;
+  if (!events.length) {
+    return referenceMs;
+  }
+  const passIndex = findPassIndex(reference.events, referenceMs);
+  const ours = reference.events[passIndex];
+  const index = passIndex - shift;
+  if (!ours || index < 0) {
+    return events[0].t;
+  }
+  const theirs = events[index];
+  if (!theirs) {
+    return imported.durationMs;
+  }
+  const length = ours.e - ours.t;
+  const fraction = length > 0 ? Math.min(1, Math.max(0, (referenceMs - ours.t) / length)) : 0;
+  return theirs.t + fraction * (theirs.e - theirs.t);
+}
+
+/**
+ * The band's measure (0-based) for a measure of the import, for "tap a bar to
+ * start there" on a Songsterr score: its first pass, shifted. Undefined for a
+ * measure the band's score does not have.
+ *
+ * @param {ScoreTiming} reference
+ * @param {ScoreTiming} imported
+ * @param {number} importedMeasureIndex
+ * @param {number} shift
+ */
+export function referenceMeasureOf(reference, imported, importedMeasureIndex, shift) {
+  const index = imported.events.findIndex((pass) => pass.m === importedMeasureIndex);
+  return index < 0 ? undefined : reference.events[index + shift]?.m;
 }
 
 /**

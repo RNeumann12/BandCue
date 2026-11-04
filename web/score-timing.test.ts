@@ -4,8 +4,17 @@ import { describe, expect, it } from "vitest";
 
 import {
   anchorX,
+  beatsOf,
   choosePart,
+  createSteadyClock,
   cursorAt,
+  detectBarOffset,
+  importedSongMs,
+  leadFromTaps,
+  nearestBeatMs,
+  referenceMeasureOf,
+  STEP_EASE_MS,
+  TAP_ANTICIPATION_MS,
   findPassIndex,
   instrumentsOf,
   partInNotation,
@@ -74,19 +83,20 @@ describe("score view timing", () => {
     expect(cursorAt(timing, 750, { motion: "notes" })?.measureIndex).toBe(1);
   });
 
-  it("steady by default: one speed across a measure, exact on its first note and its end", () => {
+  it("even: one speed across a measure, exact on its first note and its end", () => {
     // A measure whose notes are spaced unevenly, like a 16th run after a half note.
     const uneven: ScoreTiming = {
       ...timing,
       events: [{ m: 1, t: 0, e: 2000, b: [[0, 100], [1000, 150], [1250, 400], [1500, 650], [1750, 900], [2000, 1000]] }],
       durationMs: 2000
     };
-    const xs = [0, 250, 500, 1000, 1500, 1750, 2000].map((time) => cursorAt(uneven, time)!.x);
+    const xs = [0, 250, 500, 1000, 1500, 1750, 2000].map((time) => cursorAt(uneven, time, { motion: "even" })!.x);
     expect(xs).toEqual([100, 212.5, 325, 550, 775, 887.5, 1000]);
     // Note by note it would sprint through the run instead.
     expect(cursorAt(uneven, 1500, { motion: "notes" })!.x).toBe(650);
     // On every measure of the example, start and end are the same either way.
     for (const event of timing.events) {
+      expect(cursorAt(timing, event.t, { motion: "even" })?.x).toBeCloseTo(event.b[0]![1], 5);
       expect(cursorAt(timing, event.t)?.x).toBeCloseTo(event.b[0]![1], 5);
     }
   });
@@ -345,5 +355,119 @@ describe("page turns", () => {
     expect(visiblePages(3, 5, 2, "whole")).toEqual([2, 3]);
     expect(visiblePages(4, 5, 2, "whole")).toEqual([4]);
     expect(visiblePages(3, 5, 1, "whole")).toEqual([3]);
+  });
+});
+
+// Bars of 2000 ms in 4/4 (120 BPM): a run of plain passes, measure i at i * 2000.
+function plainTiming(bars: number, barMs = 2000, meters = [{ m: 0, n: 4, d: 4 }]): ScoreTiming {
+  return {
+    version: 1,
+    pages: [{ width: 1000, height: 1000 }],
+    measures: Array.from({ length: bars }, (_, index) => ({ page: 0, x: index * 100, y: 0, w: 100, h: 50 })),
+    events: Array.from({ length: bars }, (_, index) => ({
+      m: index,
+      t: index * barMs,
+      e: (index + 1) * barMs,
+      b: [[index * barMs, index * 100 + 10], [(index + 1) * barMs, index * 100 + 100]]
+    })),
+    durationMs: bars * barMs,
+    meters
+  };
+}
+
+describe("cursor styles", () => {
+  // Notes engraved unevenly: a half note, then four 16ths... in one 4/4 bar of 2000 ms.
+  const uneven: ScoreTiming = {
+    ...plainTiming(1),
+    events: [{ m: 0, t: 0, e: 2000, b: [[0, 100], [1000, 150], [1250, 400], [1500, 650], [1750, 900], [2000, 1000]] }]
+  };
+
+  it("beats: on each beat where the notes put it, steady within the beat", () => {
+    // Beats at 0, 500, 1000, 1500 ms; beat 2 sits between the first two notes.
+    expect([0, 500, 1000, 1500, 2000].map((time) => cursorAt(uneven, time)!.x)).toEqual([100, 125, 150, 650, 1000]);
+    expect(cursorAt(uneven, 1250)!.x).toBe(400);
+    expect(cursorAt(uneven, 250)!.x).toBe(112.5);
+    expect(cursorAt(uneven, 1250)!.beat).toMatchObject({ index: 2, count: 4, startMs: 1000, endMs: 1500 });
+  });
+
+  it("step: stands on the beat, then slides quickly to the next", () => {
+    expect(cursorAt(uneven, 400, { motion: "step" })!.x).toBe(100);
+    expect(cursorAt(uneven, 1000 + STEP_EASE_MS, { motion: "step" })!.x).toBe(150);
+    expect(cursorAt(uneven, 1499, { motion: "step" })!.x).toBe(150);
+    const sliding = cursorAt(uneven, 1500 + STEP_EASE_MS / 2, { motion: "step" })!.x;
+    expect(sliding).toBeGreaterThan(150);
+    expect(sliding).toBeLessThan(650);
+  });
+
+  it("counts compound time in dotted beats and a pickup by its neighbour's beat", () => {
+    expect(beatsOf(plainTiming(2, 1500, [{ m: 0, n: 6, d: 8 }]), 0)).toEqual([0, 750]);
+    const pickup = plainTiming(3);
+    pickup.events = [{ m: 0, t: 0, e: 500, b: [[0, 10], [500, 100]] }, ...pickup.events.slice(1).map((pass) => ({
+      ...pass, t: pass.t - 1500, e: pass.e - 1500, b: pass.b.map(([time, x]) => [time - 1500, x] as [number, number])
+    }))];
+    expect(beatsOf(pickup, 0)).toEqual([0]);
+    expect(beatsOf(pickup, 1)).toEqual([500, 1000, 1500, 2000]);
+  });
+
+  it("finds the nearest beat and turns taps into a lead", () => {
+    const plain = plainTiming(4);
+    expect(nearestBeatMs(plain, 2240)).toBe(2000);
+    expect(nearestBeatMs(plain, 2260)).toBe(2500);
+    expect(nearestBeatMs(plain, 1990)).toBe(2000);
+    // Taps 50 ms after the beats the cursor showed: the sound reaches this
+    // player late, so the cursor should run that much (plus tapping habit) behind.
+    expect(leadFromTaps([50, 45, 55, 50, 300, 48, 52, 50])).toBe(-(50 + TAP_ANTICIPATION_MS));
+    expect(leadFromTaps([10, 10])).toBeUndefined();
+  });
+
+  it("moves room time smoothly toward the synced clock", () => {
+    let perf = 0;
+    let room: number | undefined = 10_000;
+    const clock = createSteadyClock(() => room, () => perf);
+    expect(clock()).toBe(10_000);
+    perf = 16;
+    room = 10_016 + 40; // a sync correction of 40 ms
+    expect(clock()).toBeCloseTo(10_016 + 40 * (16 / 200), 5);
+    perf = 216;
+    room = 10_256;
+    expect(clock()).toBeCloseTo(10_256, 0);
+    room = 20_000; // a big jump is taken at once
+    perf = 232;
+    expect(clock()).toBe(20_000);
+    room = undefined;
+    expect(clock()).toBeUndefined();
+  });
+});
+
+describe("Songsterr imports on the band's bars", () => {
+  const band = plainTiming(10);
+  // Songsterr without the count-in bar, and a little slower (2100 ms bars).
+  const songsterr = plainTiming(9, 2100);
+
+  it("detects the band's count-in bar", () => {
+    expect(detectBarOffset(band, songsterr)).toBe(1);
+    expect(detectBarOffset(band, plainTiming(10, 2100))).toBe(0);
+    // Two count-in bars, and a 3/4 bar that only fits one way.
+    const withMeters = plainTiming(12, 2000, [{ m: 0, n: 4, d: 4 }, { m: 5, n: 3, d: 4 }, { m: 6, n: 4, d: 4 }]);
+    expect(detectBarOffset(withMeters, plainTiming(10, 2000, [{ m: 0, n: 4, d: 4 }, { m: 3, n: 3, d: 4 }, { m: 4, n: 4, d: 4 }]))).toBe(2);
+    // Nothing fits: the band's habit, one bar.
+    expect(detectBarOffset(band, plainTiming(3))).toBe(1);
+  });
+
+  it("runs the import bar by bar from the band's time, waiting during the count-in", () => {
+    expect(importedSongMs(band, songsterr, 0, 1)).toBe(0);
+    expect(importedSongMs(band, songsterr, 1999, 1)).toBe(0);
+    expect(importedSongMs(band, songsterr, 2000, 1)).toBe(0);
+    // Halfway through the band's bar 3 is halfway through Songsterr's bar 2.
+    expect(importedSongMs(band, songsterr, 5000, 1)).toBe(2100 + 1050);
+    // No drift at the end despite the different tempo.
+    expect(importedSongMs(band, songsterr, 19_000, 1)).toBe(8 * 2100 + 1050);
+    expect(cursorAt(songsterr, importedSongMs(band, songsterr, 5000, 1))!.measureIndex).toBe(1);
+  });
+
+  it("maps a tapped Songsterr bar to the band's bar", () => {
+    expect(referenceMeasureOf(band, songsterr, 0, 1)).toBe(1);
+    expect(referenceMeasureOf(band, songsterr, 8, 1)).toBe(9);
+    expect(referenceMeasureOf(band, songsterr, 8, 2)).toBeUndefined();
   });
 });
