@@ -446,7 +446,29 @@ describe("Songsterr imports on the band's bars", () => {
 
   it("detects the band's count-in bar", () => {
     expect(detectBarOffset(band, songsterr)).toBe(1);
-    expect(detectBarOffset(band, plainTiming(10, 2100))).toBe(0);
+    // Equal length proves nothing (the band's score may end a bar longer): with
+    // one tempo throughout, the band's empty bars before the first note decide.
+    const withNotes = (timing: ScoreTiming, empty: number) => ({
+      ...timing,
+      events: timing.events.map((pass, index) => index < empty ? pass : { ...pass, b: [pass.b[0]!, [pass.t + 100, 0], pass.b[1]!] as [number, number][] })
+    });
+    expect(detectBarOffset(withNotes(plainTiming(12), 2), plainTiming(10, 2100))).toBe(2);
+    expect(detectBarOffset(withNotes(plainTiming(12), 1), plainTiming(10, 2100))).toBe(1);
+    // A tempo change only lines up one way: here the band's count-in is one bar
+    // although its score is two bars longer.
+    const changing = (bars: number, slowFrom: number) => {
+      const timing = plainTiming(bars);
+      let t = 0;
+      timing.events = timing.events.map((pass, index) => {
+        const length = index >= slowFrom ? 3000 : 2000;
+        const event = { ...pass, t, e: t + length, b: [[t, pass.b[0]![1]], [t + length, pass.b[1]![1]]] as [number, number][] };
+        t += length;
+        return event;
+      });
+      timing.durationMs = t;
+      return timing;
+    };
+    expect(detectBarOffset(withNotes(changing(12, 5), 2), changing(10, 4))).toBe(1);
     // Two count-in bars, and a 3/4 bar that only fits one way.
     const withMeters = plainTiming(12, 2000, [{ m: 0, n: 4, d: 4 }, { m: 5, n: 3, d: 4 }, { m: 6, n: 4, d: 4 }]);
     expect(detectBarOffset(withMeters, plainTiming(10, 2000, [{ m: 0, n: 4, d: 4 }, { m: 3, n: 3, d: 4 }, { m: 4, n: 4, d: 4 }]))).toBe(2);
