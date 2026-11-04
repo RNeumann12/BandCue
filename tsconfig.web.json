@@ -12,6 +12,8 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "allowJs": true,
     "checkJs": true,
+    // Spelled out: TypeScript 7 turns "strict" on by default.
+    "strict": false,
     "noEmit": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
