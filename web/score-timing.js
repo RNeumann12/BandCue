@@ -330,30 +330,75 @@ export function createSteadyClock(read, perfNow = () => performance.now()) {
   };
 }
 
+/** Bars compared when lining a Songsterr import up with the band's score. */
+const ALIGN_BARS = 32;
+
 /**
  * How many bars a Songsterr import lacks at its start compared with the band's
  * own score (the band writes a count-in bar into every song): the shift k
- * where the band's pass i + k is the import's pass i. Prefers a shift that
- * makes both scores the same length and agrees on every time signature; then
- * one that only makes them the same length; else 1, the band's habit.
+ * where the band's pass i + k is the import's pass i.
+ *
+ * The evidence is where the two disagree bar by bar: a time signature, or a
+ * bar whose length breaks the ratio between the two scores' tempos (a tempo
+ * change, a 2/4 bar). The shift with the fewest disagreements wins. Where the
+ * music gives none (one tempo, one meter throughout), the band's empty bars
+ * before the first note decide -- that is the count-in. The scores' lengths
+ * prove nothing: they often differ at the end too. Only the first ALIGN_BARS
+ * bars are compared: arrangements drift apart later (an extra chorus), and
+ * that says nothing about the start.
  *
  * @param {ScoreTiming} reference the band's MuseScore score
  * @param {ScoreTiming} imported
  * @returns {number}
  */
 export function detectBarOffset(reference, imported) {
-  const fits = [];
-  for (let shift = 0; shift <= 4; shift += 1) {
-    if (reference.events.length - shift === imported.events.length) {
-      fits.push(shift);
+  const ours = reference.events;
+  const theirs = imported.events;
+  let countIn = 0;
+  while (countIn < ours.length && ours[countIn].b.length <= 2) {
+    countIn += 1;
+  }
+  const prior = countIn >= 1 && countIn <= 4 ? countIn : 1;
+  const lengthOf = (/** @type {ScoreTimingEvent} */ pass) => pass.e - pass.t;
+  const ratios = theirs.slice(0, ours.length).map((pass, index) => lengthOf(ours[index]) / lengthOf(pass)).filter(Number.isFinite);
+  const tempoRatio = ratios.length ? [...ratios].sort((left, right) => left - right)[ratios.length >> 1] : 1;
+
+  // Every shift is judged on the same number of bars.
+  const bars = Math.max(0, Math.min(ALIGN_BARS, theirs.length, ours.length - 4));
+  const shifts = [prior, 0, 1, 2, 3, 4];
+  const onsets = (/** @type {ScoreTimingEvent} */ pass) => pass.b.length - 2;
+  /** @param {number} shift */
+  const onsetMatches = (shift) => {
+    let matches = 0;
+    for (let index = 0; index < bars; index += 1) {
+      matches += onsets(ours[index + shift]) === onsets(theirs[index]) ? 1 : 0;
+    }
+    return matches;
+  };
+  // How many notes start in each bar says where the music is -- but only when
+  // both scores hold the same parts (a cover), not the band's full score
+  // against a drum-only tab.
+  const useOnsets = bars > 0 && Math.max(...shifts.map(onsetMatches)) >= bars * 0.6;
+
+  let best = prior;
+  let fewest = Infinity;
+  for (const shift of shifts) {
+    let disagreements = useOnsets ? bars - onsetMatches(shift) : 0;
+    for (let index = 0; index < bars; index += 1) {
+      const band = ours[index + shift];
+      const songsterr = theirs[index];
+      const bandMeter = meterAt(reference, band.m);
+      const songsterrMeter = meterAt(imported, songsterr.m);
+      const ratio = lengthOf(band) / lengthOf(songsterr) / tempoRatio;
+      disagreements += bandMeter.n !== songsterrMeter.n || bandMeter.d !== songsterrMeter.d ? 3 : 0;
+      disagreements += Math.abs(ratio - 1) < 0.04 ? 0 : 1;
+    }
+    if (disagreements < fewest) {
+      best = shift;
+      fewest = disagreements;
     }
   }
-  const metersAgree = (/** @type {number} */ shift) => imported.events.every((pass, index) => {
-    const ours = meterAt(reference, reference.events[index + shift].m);
-    const theirs = meterAt(imported, pass.m);
-    return ours.n === theirs.n && ours.d === theirs.d;
-  });
-  return fits.find(metersAgree) ?? fits[0] ?? 1;
+  return best;
 }
 
 /**
