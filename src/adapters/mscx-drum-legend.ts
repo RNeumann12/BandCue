@@ -74,7 +74,7 @@ export function drumKeyEntries(xml: string, partId: string, staffNumbers: number
       return { pitch, name: drum.name, line: drum.line, head: head || undefined, tpc };
     })
     .sort((left, right) => left.line - right.line || left.pitch - right.pitch);
-  // Short names, unless two drums would then read the same (Crash 1 and 2).
+  // Short names, except where two drums would then read the same (Crash 1 and 2).
   const shortNames = entries.map((entry) => shortDrumName(entry.name));
   return entries.map((entry, index) =>
     shortNames.indexOf(shortNames[index]!) === shortNames.lastIndexOf(shortNames[index]!) ? { ...entry, name: shortNames[index]! } : entry);
@@ -98,26 +98,32 @@ export function buildDrumLegend(xml: string, partId: string, staffNumbers: numbe
     .replace(/\n?[ \t]*<show>0<\/show>/, "")
     .replace(/[ \t]*<Staff>[\s\S]*?<\/Staff>\n?/g, (staff) => (index++ === staffIndex ? staff : ""))
     .replace(/<isStaffVisible>0<\/isStaffVisible>/, "<isStaffVisible>1</isStaffVisible>");
-  const staggered = entries.length > ONE_LINE_OF_NAMES;
-  // MuseScore spaces notes, not their lyrics: room for the longest name.
-  const longest = Math.max(...entries.map((entry) => decodedLength(entry.name)));
-  const stretch = Math.round(Math.min(4, Math.max(1, longest * (staggered ? 0.18 : 0.35))) * 10) / 10;
-  const chords = entries.map((entry, position) => [
-    "<Chord>",
-    "<durationType>quarter</durationType>",
-    "<StemDirection>down</StemDirection>",
-    `<Lyrics>${staggered && position % 2 ? "<no>1</no>" : ""}<text>${entry.name}</text></Lyrics>`,
-    `<Note><pitch>${entry.pitch}</pitch>${entry.tpc ? `<tpc>${entry.tpc}</tpc>` : ""}${entry.head ? `<head>${entry.head}</head>` : ""}</Note>`,
-    "</Chord>"
-  ].join("\n            "));
-  return `${xml.slice(0, firstPart)}${onePart}
-    <Staff id="1">
-      <Measure len="${entries.length}/4">
-        <stretch>${stretch}</stretch>
+  // A big kit takes two (or more) rows, so every name has room on its own line.
+  const rows = Math.ceil(entries.length / ONE_LINE_OF_NAMES);
+  const perRow = Math.ceil(entries.length / rows);
+  const measures: string[] = [];
+  for (let first = 0; first < entries.length; first += perRow) {
+    const row = entries.slice(first, first + perRow);
+    const chords = row.map((entry) => [
+      "<Chord>",
+      "<durationType>quarter</durationType>",
+      "<StemDirection>down</StemDirection>",
+      `<Lyrics><text>${entry.name}</text></Lyrics>`,
+      `<Note><pitch>${entry.pitch}</pitch>${entry.tpc ? `<tpc>${entry.tpc}</tpc>` : ""}${entry.head ? `<head>${entry.head}</head>` : ""}</Note>`,
+      "</Chord>"
+    ].join("\n            "));
+    const lineBreak = first + perRow < entries.length
+      ? "\n        <LayoutBreak>\n          <subtype>line</subtype>\n          </LayoutBreak>"
+      : "";
+    measures.push(`      <Measure len="${row.length}/4">${lineBreak}
         <voice>
           ${chords.join("\n          ")}
           </voice>
-        </Measure>
+        </Measure>`);
+  }
+  return `${xml.slice(0, firstPart)}${onePart}
+    <Staff id="1">
+${measures.join("\n")}
       </Staff>
     </Score>
   </museScore>
@@ -131,7 +137,10 @@ export function buildDrumLegend(xml: string, partId: string, staffNumbers: numbe
  */
 export const DRUM_LEGEND_STYLE: Record<string, string> = {
   lastSystemFillLimit: "1",
-  lyricsMinDistance: "2"
+  lyricsMinDistance: "2",
+  // A big kit's second row is not "bar 2", and both rows start at the margin.
+  showMeasureNumber: "0",
+  enableIndentationOnFirstSystem: "0"
 };
 
 export function drumLegendStyle(style: string): string {
@@ -139,13 +148,8 @@ export function drumLegendStyle(style: string): string {
     const pattern = new RegExp(`<${tag}>[^<]*</${tag}>`);
     return pattern.test(text)
       ? text.replace(pattern, `<${tag}>${value}</${tag}>`)
-      : text.replace("</Style>", `<${tag}>${value}</${tag}>
-    </Style>`);
+      : text.replace("</Style>", `<${tag}>${value}</${tag}>\n    </Style>`);
   }, style);
-}
-
-function decodedLength(text: string): number {
-  return text.replace(/&[a-z]+;|&#\d+;/g, "_").length;
 }
 
 function partXml(xml: string, partId: string): string | undefined {

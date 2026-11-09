@@ -82,6 +82,18 @@ describe("buildDrumLegend", () => {
     expect(legend).not.toContain("<TimeSig>");
   });
 
+  it("puts a big kit on two rows, one line of names each", () => {
+    const pitches = [35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47];
+    const bigKit = SCORE
+      .replace(/<Drum pitch="36">[\s\S]*?<\/Instrument>/, `${pitches.map((pitch) =>
+        `<Drum pitch="${pitch}"><line>${pitch - 40}</line><name>Drum ${pitch}</name></Drum>`).join("")}</Instrument>`)
+      .replace(/(<Staff id="2">\s*<Measure><voice>)/, `$1<Chord><durationType>whole</durationType>${pitches.map((pitch) => note(pitch)).join("")}</Chord>`);
+    const big = buildDrumLegend(bigKit, "2", [2])!;
+    expect([...big.matchAll(/<Measure len="(\d+)\/4">/g)].map((match) => match[1])).toEqual(["7", "6"]);
+    expect(big.match(/<subtype>line<\/subtype>/g)).toHaveLength(1);
+    expect(big).not.toContain("<no>");
+  });
+
   it("is undefined when the part plays nothing it can name", () => {
     expect(buildDrumLegend(SCORE, "1", [1])).toBeUndefined();
   });
@@ -90,9 +102,10 @@ describe("buildDrumLegend", () => {
 describe("drumLegendStyle", () => {
   it("keeps a short key short and its names apart", () => {
     const tight = drumLegendStyle("<Style><lastSystemFillLimit>0.3</lastSystemFillLimit><lyricsMinDistance>0.25</lyricsMinDistance></Style>");
-    expect(tight).toBe("<Style><lastSystemFillLimit>1</lastSystemFillLimit><lyricsMinDistance>2</lyricsMinDistance></Style>");
+    expect(tight).toMatch(/^<Style><lastSystemFillLimit>1<\/lastSystemFillLimit><lyricsMinDistance>2<\/lyricsMinDistance>/);
     const empty = drumLegendStyle("<Style></Style>");
     expect(empty).toContain("<lastSystemFillLimit>1</lastSystemFillLimit>");
     expect(empty).toContain("<lyricsMinDistance>2</lyricsMinDistance>");
+    expect(empty).toContain("<showMeasureNumber>0</showMeasureNumber>");
   });
 });
