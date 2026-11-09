@@ -190,7 +190,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
    * (`reference`): the room plays that one, so its bars and tempos drive the
    * cursor, mapped bar by bar onto the import (see importedSongMs).
    *
-   * @type {{ scoreId: string, manifest: ScoreManifest, partId: string, timing: ScoreTiming, reference?: ScoreTiming, detectedShift: number, systems: ReturnType<typeof systemsOf>, pages: { el: HTMLElement, img: HTMLImageElement, width: number, height: number }[] } | undefined}
+   * @type {{ scoreId: string, manifest: ScoreManifest, partId: string, timing: ScoreTiming, reference?: ScoreTiming, detectedShift: number, systems: ReturnType<typeof systemsOf>, pages: { el: HTMLElement, img: HTMLImageElement, width: number, height: number }[], legend?: HTMLElement } | undefined}
    */
   let loaded;
   /** @type {string | undefined} the scoreId being loaded */
@@ -449,6 +449,10 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       el.pages.append(page);
       return { el: page, img, width: size.width, height: size.height };
     });
+    const legend = part.legend ? drumKey(scoreId, part.legend, pages[0]?.width ?? 9924) : undefined;
+    if (legend) {
+      el.pages.prepend(legend);
+    }
     loaded = {
       scoreId,
       manifest,
@@ -457,7 +461,8 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       reference,
       detectedShift: reference ? detectBarOffset(reference, timing) : 0,
       systems: systemsOf(timing),
-      pages
+      pages,
+      legend
     };
     renderSongsterrStart();
 
@@ -484,6 +489,43 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     manualPage = undefined;
     applyLayout();
     requestDraw();
+  }
+
+  /**
+   * The drum key: which line and notehead is which drum. Above page 1 in
+   * scroll mode; laid over the top of page 1 while it is shown in page mode.
+   *
+   * @param {string} scoreId
+   * @param {{ file: string, width: number, height: number }} legend
+   * @param {number} pageWidth SVG units, so the key is drawn at the pages' scale
+   */
+  function drumKey(scoreId, legend, pageWidth) {
+    const box = document.createElement("figure");
+    box.className = "score-legend";
+    const label = document.createElement("figcaption");
+    label.textContent = "Drum key";
+    const img = document.createElement("img");
+    img.alt = "Drum key: which line and notehead is which drum";
+    img.decoding = "async";
+    img.draggable = false;
+    img.src = scoreFileUrl(scoreId, legend.file);
+    img.style.aspectRatio = `${legend.width} / ${legend.height}`;
+    img.style.width = `${Math.min(100, (legend.width / pageWidth) * 100)}%`;
+    box.append(label, img);
+    return box;
+  }
+
+  /** Page mode: the key sits on page 1, across its width, while page 1 is shown. */
+  function placeLegend() {
+    const legend = loaded?.legend;
+    if (!legend) {
+      return;
+    }
+    const first = loaded?.pages[0];
+    const overlay = settings.layout === "pages";
+    legend.hidden = overlay && !first?.el.classList.contains("is-shown");
+    legend.style.left = overlay && first ? `${first.el.offsetLeft}px` : "";
+    legend.style.width = overlay && first ? `${first.el.clientWidth}px` : "";
   }
 
   function clearScore() {
@@ -866,6 +908,10 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     }
     const line = systemBox(system);
     const nextLine = next ? systemBox(next) : undefined;
+    // The first line keeps the drum key above it in view while it fits.
+    if (systemIndex === 0 && loaded.legend && settings.layout === "scroll" && line.bottom <= el.scroller.clientHeight) {
+      return 0;
+    }
     return followScrollTop({
       lineTop: line.top,
       lineBottom: line.bottom,
@@ -946,6 +992,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       candidate.el.classList.toggle("is-shown", position >= 0);
       candidate.el.style.order = String(Math.max(0, position));
     });
+    placeLegend();
   }
 
   /**
@@ -981,6 +1028,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
         page.el.style.order = "";
       });
     }
+    placeLegend();
     lastSystem = -1;
     pendingIdleScroll = true;
     requestDraw();

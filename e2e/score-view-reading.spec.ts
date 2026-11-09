@@ -54,7 +54,8 @@ async function setUpRoom(request: import("@playwright/test").APIRequestContext) 
     capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
   });
   helper.socket.send(JSON.stringify({ type: "clockStatus", rttMs: 5, offsetMs: 0, jitterMs: 1, sampleCount: 8 }));
-  const files = [...manifest.parts.flatMap((part: { pages: string[]; timing: string }) => [...part.pages, part.timing]), "manifest.json"];
+  const files = [...manifest.parts.flatMap((part: { pages: string[]; timing: string; legend?: { file: string } }) =>
+    [...part.pages, part.timing, ...(part.legend ? [part.legend.file] : [])]), "manifest.json"];
   for (const file of files) {
     const response = await request.put(fileUrl(SCORE_ID, file), {
       headers: { "content-encoding": "gzip", "x-bandcue-client-id": helper.clientId },

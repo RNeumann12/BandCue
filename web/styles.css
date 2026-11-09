@@ -1282,6 +1282,56 @@ body[data-transport="running"] .countdown {
   -webkit-touch-callout: none;
 }
 
+/* The drum key above a drum part: which line and notehead is which drum. */
+.score-legend {
+  margin: 0;
+  padding: 6px 8px 4px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.score-legend[hidden] {
+  display: none;
+}
+
+.score-legend figcaption {
+  color: #555;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.score-legend img {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Page mode: laid over the top margin of page 1, out of the way of taps. */
+.score-view[data-layout="pages"] .score-legend {
+  position: absolute;
+  top: 14px;
+  z-index: 1;
+  pointer-events: none;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.12);
+}
+
+.score-view.is-night .score-legend {
+  background: #111;
+}
+
+.score-view.is-night .score-legend img {
+  filter: invert(0.92) hue-rotate(180deg);
+}
+
+.score-view.is-night .score-legend figcaption {
+  color: #aaa;
+}
+
 /* The cursor: a bar on the note being played. Moved by transform only, so a
    frame never re-lays out the page. */
 .score-cursor,

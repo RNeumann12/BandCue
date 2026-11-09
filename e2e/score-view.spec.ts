@@ -58,7 +58,8 @@ test("a companion reads along with the room's cursor", async ({ page, request })
   expect(refused.status()).toBe(403);
   expect((await request.get(scoreUrl("manifest.json", "wrong"))).status()).toBe(401);
 
-  const files = [...manifest.parts.flatMap((part: { pages: string[]; timing: string }) => [...part.pages, part.timing]), "manifest.json"];
+  const files = [...manifest.parts.flatMap((part: { pages: string[]; timing: string; legend?: { file: string } }) =>
+    [...part.pages, part.timing, ...(part.legend ? [part.legend.file] : [])]), "manifest.json"];
   for (const file of files) {
     const response = await request.put(scoreUrl(file), {
       headers: { "content-encoding": "gzip", "x-bandcue-client-id": helper.clientId },
@@ -96,9 +97,15 @@ test("a companion reads along with the room's cursor", async ({ page, request })
   await page.click("#scoreNotesButton");
   await expect(page.locator("#scoreNotesButton")).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".score-page img").first()).toHaveAttribute("src", /part-1-notes-1\.svg/);
+  await expect(page.locator(".score-legend")).toHaveCount(0);
   await page.selectOption("#scorePartSelect", { label: "Drums" });
   await expect(page.locator("#scoreNotation")).toBeHidden();
+  // The drums open with their key: which line and notehead is which drum.
+  await expect(page.locator(".score-legend img")).toHaveAttribute("src", /part-2-key\.svg/);
+  await expect(page.locator(".score-legend img")).toHaveJSProperty("complete", true);
+  expect(await page.locator(".score-legend img").evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
   await page.selectOption("#scorePartSelect", { label: "Full score" });
+  await expect(page.locator(".score-legend")).toHaveCount(0);
 
   // A companion opens on the notes, filling the screen; the room view is one tap away.
   await expect(page.locator("body")).toHaveClass(/score-focus/);

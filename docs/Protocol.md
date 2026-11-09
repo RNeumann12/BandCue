@@ -366,7 +366,7 @@ never change and are served `Cache-Control: immutable`.
 | `GET` / `HEAD` | anyone in the room | Serves a file. Stored gzip and sent with `Content-Encoding: gzip` (unpacked for clients that do not accept it). 401 without a token, 404 for anything else. |
 | `PUT` | a **connected desktop adapter**, named by its room client id in `x-bandcue-client-id` | Stores a file, raw or `Content-Encoding: gzip`. 403 for any other client, 413 over 32 MB. |
 
-Only these names exist: `manifest.json`, `<voice>.timing.json`, `<voice>-<page>.svg` (lower-case
+Only these names exist: `manifest.json`, `<voice>.timing.json`, `<voice>-<page>.svg`, `<voice>-key.svg` (a drum part's key; lower-case
 letters, digits, `-`, `_`), and `source.gp` (a Songsterr import, see below). The helper uploads `manifest.json` last, so a score counts as stored
 once its manifest is there.
 
@@ -402,7 +402,9 @@ song is dropped. The host page copies the room's imports into its own setlist, i
 and exported setlist files.
 
 `manifest.json` (`ScoreManifest`) lists the voices, the full score first:
-`{ version: 1, scoreId, title, relativePath, museScoreVersion, exportedAt, parts: [{ id, name, pages, timing, measureCount, durationMs }] }`.
+`{ version: 1, scoreId, title, relativePath, museScoreVersion, exportedAt, parts: [{ id, name, pages, timing, measureCount, durationMs, legend? }] }`.
+A drum part's `legend` (`{ file, width, height }`, SVG units) is its drum key: one note per drum,
+named, cropped to what is drawn.
 
 `<voice>.timing.json` (`ScoreTiming`) is MuseScore's own playback timeline in SVG units of the pages:
 

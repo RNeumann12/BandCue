@@ -5,7 +5,8 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { entryContent, forcePageLayout, readZipEntries, rewriteZipText } from "./mscz-page-layout.js";
-import { splitDrumVoices } from "./mscx-drum-voices.js";
+import { buildDrumLegend, drumLegendStyle } from "./mscx-drum-legend.js";
+import { drumStemsDown } from "./mscx-drum-stems.js";
 import type {
   ScoreExportReport,
   ScoreManifest,
@@ -26,7 +27,7 @@ import type {
 // file the browser can use without parsing XML. See docs/Adapters.md.
 
 /** Bump when the export output changes shape, so cached exports are redone. */
-export const SCORE_EXPORTER_VERSION = 3;
+export const SCORE_EXPORTER_VERSION = 4;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;
@@ -271,7 +272,7 @@ function round1(value: number): number {
  * How a converted Guitar Pro import is prepared on top of a normal export (see
  * prepareImport); part of an import's export id, so a change redoes only imports.
  */
-export const IMPORT_PREPARATION_VERSION = 1;
+export const IMPORT_PREPARATION_VERSION = 2;
 
 /** Content-addressed: the id changes whenever the score or the exporter does. */
 export function scoreIdFor(content: Buffer, imported = false): string {
@@ -359,6 +360,8 @@ export interface VoicePlan {
   notation?: "notes" | "tab";
   /** Turns the full score's .mscx into this voice's. */
   transform: (xml: string) => string;
+  /** A drum kit's voice: which part and staff its drum key explains. */
+  drums?: { partId: string; staffNumbers: number[]; staffIndex: number };
 }
 
 /**
@@ -382,13 +385,17 @@ export function planVoices(instruments: ScoreInstrument[]): VoicePlan[] {
     const stem = `part-${instrument.id}`;
     const isDrums = instrument.drumsByName || instrument.staves.every((staff) => staff.kind === "percussion");
     const notations: ("notes" | "tab" | undefined)[] = instrument.fretted ? ["notes", "tab"] : [isDrums ? undefined : "notes"];
+    const kit = instrument.staves.findIndex((staff) => staff.kind === "percussion" && staff.notes > 0);
     for (const notation of notations) {
       plans.push({
         stem: instrument.fretted ? `${stem}-${notation}` : stem,
         name: instrument.name,
         instrument: stem,
         notation: instrument.fretted ? notation : undefined,
-        transform: (xml) => soloInstrument(xml, instrument, notation)
+        transform: (xml) => soloInstrument(xml, instrument, notation),
+        drums: kit >= 0 && !instrument.fretted
+          ? { partId: instrument.id, staffNumbers: [instrument.staves[kit]!.number], staffIndex: kit }
+          : undefined
       });
     }
   }
@@ -589,7 +596,10 @@ export interface ScoreExportOptions {
 
 /** Lists the files of an export, manifest last: its arrival marks the upload complete. */
 export function exportFiles(manifest: ScoreManifest): string[] {
-  return [...manifest.parts.flatMap((part) => [...part.pages, part.timing]), "manifest.json"];
+  return [
+    ...manifest.parts.flatMap((part) => [...part.pages, part.timing, ...(part.legend ? [part.legend.file] : [])]),
+    "manifest.json"
+  ];
 }
 
 /** Reads a previous export of this exact score from the cache, if there is one. */
@@ -633,8 +643,23 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
         (text) => withoutMultimeasureRests(voice.stem === "score" ? text : voice.transform(text)));
       await writeFile(join(work, `${voice.stem}.mscz`), copy ?? paged);
     }
+    // A drum key per kit, engraved as a score of its own.
+    const legends = new Map<string, string>();
+    for (const voice of voices) {
+      const legendXml = voice.drums &&
+        buildDrumLegend(scoreXml, voice.drums.partId, voice.drums.staffNumbers, voice.drums.staffIndex);
+      const copy = legendXml && rewriteZipText(paged, (name) => isScoreFile(name) || name === "score_style.mss",
+        (text) => (/<Score>/.test(text) ? legendXml : drumLegendStyle(text)));
+      if (copy) {
+        legends.set(voice.stem, legendStem(voice.stem));
+        await writeFile(join(work, `${legendStem(voice.stem)}.mscz`), copy);
+      }
+    }
 
-    await writeFile(join(work, "job.json"), JSON.stringify(buildExportJob(voices.map((voice) => voice.stem))));
+    await writeFile(join(work, "job.json"), JSON.stringify([
+      ...buildExportJob(voices.map((voice) => voice.stem)),
+      ...[...legends.values()].map((stem) => ({ in: `${stem}.mscz`, out: [`${stem}.svg`] }))
+    ]));
     const jobRun = await run(options.executable, [...(source.force ? ["-f"] : []), "-j", "job.json"], {
       cwd: work,
       timeoutMs: MUSESCORE_RUN_TIMEOUT_MS
@@ -656,7 +681,9 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
     for (const voice of voices) {
       const part = await collectVoice(work, workFiles, staging, voice.stem, voice.name, marks);
       if (part) {
-        manifestParts.push({ ...part, instrument: voice.instrument, notation: voice.notation });
+        const legendSource = legends.get(voice.stem);
+        const legend = legendSource ? await collectLegend(work, workFiles, staging, legendSource) : undefined;
+        manifestParts.push({ ...part, instrument: voice.instrument, notation: voice.notation, ...(legend ? { legend } : {}) });
       }
     }
     if (!manifestParts.length) {
@@ -683,9 +710,9 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
 }
 
 /**
- * A converted Guitar Pro import, made to read like the band's own scores: its
- * drum kits get hands and feet in two voices (see splitDrumVoices). The band's
- * own MuseScore files are exported as they are written.
+ * A converted Guitar Pro import, made to read like Songsterr: its drum kits get
+ * every stem down (see drumStemsDown). The band's own MuseScore files are
+ * exported as they are written.
  */
 function prepareImport(mscz: Buffer): Buffer {
   return rewriteZipText(mscz, isScoreFile, (xml) => {
@@ -693,7 +720,7 @@ function prepareImport(mscz: Buffer): Buffer {
       .flatMap((instrument) => instrument.staves)
       .filter((staff) => staff.kind === "percussion")
       .map((staff) => staff.number);
-    return splitDrumVoices(xml, drumStaves);
+    return drumStemsDown(xml, drumStaves);
   }) ?? mscz;
 }
 
@@ -744,6 +771,63 @@ async function collectVoice(
     measureCount: timing.measures.length,
     durationMs: timing.durationMs
   };
+}
+
+function legendStem(stem: string): string {
+  return `key-${stem}`;
+}
+
+/** The drum key, cropped to its staff and names; undefined when MuseScore made none. */
+async function collectLegend(
+  work: string,
+  workFiles: string[],
+  target: string,
+  source: string
+): Promise<NonNullable<ScoreManifestPart["legend"]> | undefined> {
+  const file = workFiles.find((name) => name === `${source}-1.svg` || name === `${source}.svg`);
+  if (!file) {
+    return undefined;
+  }
+  const cropped = cropDrumLegendSvg(await readFile(join(work, file), "utf8"));
+  if (!cropped) {
+    return undefined;
+  }
+  const published = `${source.slice("key-".length)}-key.svg`;
+  await writeFile(join(target, published), cropped.svg);
+  return { file: published, width: cropped.width, height: cropped.height };
+}
+
+/**
+ * Cuts a page down to the drum key on it: the box around everything MuseScore
+ * drew (its SVG paths and lines use absolute page coordinates), plus a margin.
+ */
+export function cropDrumLegendSvg(svg: string): { svg: string; width: number; height: number } | undefined {
+  const page = parseSvgPageSize(svg.slice(0, 2000));
+  const widthMm = Number(/<svg\b[^>]*\bwidth="([\d.]+)mm"/.exec(svg)?.[1]);
+  const xs: number[] = [];
+  const ys: number[] = [];
+  // Every drawn element but the white page behind them (class "").
+  for (const match of svg.matchAll(/<(?:path|polyline)\s+class="([^"]+)"[^>]*?\s(?:d|points)="([^"]+)"/g)) {
+    const numbers = (match[2]!.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+    for (let index = 0; index + 1 < numbers.length; index += 2) {
+      xs.push(numbers[index]!);
+      ys.push(numbers[index + 1]!);
+    }
+  }
+  if (!page || !xs.length) {
+    return undefined;
+  }
+  const margin = 60;
+  const x = Math.max(0, Math.min(...xs) - margin);
+  const y = Math.max(0, Math.min(...ys) - margin);
+  const width = round1(Math.min(page.width, Math.max(...xs) + margin) - x);
+  const height = round1(Math.min(page.height, Math.max(...ys) + margin) - y);
+  const unitsToMm = Number.isFinite(widthMm) && widthMm > 0 ? widthMm / page.width : 210 / page.width;
+  const cropped = svg.replace(/<svg\b[^>]*>/, (open) => open
+    .replace(/\bwidth="[^"]*"/, `width="${round1(width * unitsToMm)}mm"`)
+    .replace(/\bheight="[^"]*"/, `height="${round1(height * unitsToMm)}mm"`)
+    .replace(/\bviewBox="[^"]*"/, `viewBox="${round1(x)} ${round1(y)} ${width} ${height}"`));
+  return { svg: cropped, width, height };
 }
 
 function isScoreFile(name: string): boolean {

@@ -562,9 +562,9 @@ The import follows the band's own score bar by bar: the band's MuseScore files s
 count-in bar that Songsterr does not have, so the score view finds how many bars Songsterr lacks
 (*View › Songsterr bar 1 is band bar*, *Auto* by default; set it by hand when it guesses wrong) and
 runs the Songsterr cursor on the band's bars and tempo. It counts the count-in bar in, shows the
-band's bar numbers, and does not drift where Songsterr's tempo differs. Imported drum parts are
-written as drummers read them: hands stems up, bass drum and hi-hat pedal stems down in a second
-voice, as Songsterr shows them (MuseScore's Guitar Pro import puts them all in one voice). After the import nothing goes online again: the coordinator
+band's bar numbers, and does not drift where Songsterr's tempo differs. Imported drum parts look
+like Songsterr's: every stem down, drums played together on one stem, beams below the staff. Every
+drum part opens with a *Drum key* naming each line and notehead (Kick, Snare, Hi-Hat, Crash, …). After the import nothing goes online again: the coordinator
 keeps the files and serves them with the MuseScore laptop switched off. Import again when the tab
 changes on Songsterr (the newer import replaces the older one). The imports travel with the
 setlist: *Export* writes them into the setlist file, and loading that file later brings them back

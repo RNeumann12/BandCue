@@ -147,6 +147,8 @@ export interface ScoreManifestPart {
   pages: string[];
   /** The part's `ScoreTiming` file. */
   timing: string;
+  /** Drum parts: the drum key (one note per drum, named), an SVG cropped to it. */
+  legend?: { file: string; width: number; height: number };
   measureCount: number;
   durationMs: number;
 }

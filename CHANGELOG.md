@@ -4,6 +4,12 @@
 
 ### Added
 
+- **Score view: drums read like Songsterr, with a drum key.** Imported drum parts now have every
+  stem down, so drums played together share one stem and beams run below the staff (they were
+  split into hands up / feet down before). Every drum part opens with a *Drum key*: one note per
+  drum the song plays, on its line and with its notehead, named (Kick, Snare, Hi-Hat, Crash, …),
+  engraved by MuseScore like the part itself.
+
 - **Score view: read the current MuseScore song on any tablet in the room.** The companion page now
   shows the notes of the current MuseScore song with a cursor that stands on the note being played:
   it follows the room's downbeat, the song's tempo and start measure, repeats, D.S./Coda jumps and

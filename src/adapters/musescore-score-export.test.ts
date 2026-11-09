@@ -7,6 +7,7 @@ import {
   ScoreExportQueue,
   buildExportJob,
   buildScoreTiming,
+  cropDrumLegendSvg,
   exportFiles,
   parsePositionsXml,
   planVoices,
@@ -229,6 +230,12 @@ describe("voices", () => {
       .toBe("<createMultiMeasureRests>0</createMultiMeasureRests>");
   });
 
+  it("gives a drum kit's voice its key: the part and the staff with the notes", () => {
+    expect(voice("part-4").drums).toEqual({ partId: "4", staffNumbers: [instruments[3]!.staves.find((staff) => staff.notes > 0)!.number], staffIndex: 0 });
+    expect(voice("part-2-notes").drums).toBeUndefined();
+    expect(voice("score").drums).toBeUndefined();
+  });
+
   it("builds one conversion job entry per voice", () => {
     expect(buildExportJob(["score", "part-2-tab"])).toEqual([
       { in: "score.mscz", out: ["score.svg", "score.mpos", "score.spos"] },
@@ -243,7 +250,7 @@ describe("export files and ids", () => {
     expect(id).toMatch(/^[a-f0-9]{32}$/);
     expect(scoreIdFor(Buffer.from("score"))).toBe(id);
     expect(scoreIdFor(Buffer.from("score!"))).not.toBe(id);
-    // A Guitar Pro import is prepared differently (drum voices), so it has its own id.
+    // A Guitar Pro import is prepared differently (drum stems), so it has its own id.
     expect(scoreIdFor(Buffer.from("score"), true)).not.toBe(id);
   });
 
@@ -253,6 +260,21 @@ describe("export files and ids", () => {
     expect(cached).toBeUndefined();
     expect(exportFiles(manifest).at(-1)).toBe("manifest.json");
     expect(exportFiles(manifest)).toContain("part-1-tab-1.svg");
+    expect(exportFiles(manifest)).toContain("part-2-key.svg");
+  });
+
+  it("crops the drum key page to what is drawn on it", () => {
+    const page = `<svg width="210mm" height="297mm" viewBox="0 0 9924 14028">
+<path class="" fill="#ffffff" d="M0,0 L9924,0 L9924,14028 L0,14028 L0,0 "/>
+<polyline class="StaffLines" points="1122,1000 3000,1000" />
+<polyline class="StaffLines" points="1122,1330 3000,1330" />
+<path class="Lyrics" d="M1200,1700 L1300,1760 C1310,1770 1320,1780 1330,1790"/>
+</svg>`;
+    const cropped = cropDrumLegendSvg(page)!;
+    expect(cropped).toMatchObject({ width: 3000 + 60 - 1062, height: 1790 + 60 - 940 });
+    expect(cropped.svg).toContain(`viewBox="1062 940 ${cropped.width} ${cropped.height}"`);
+    expect(cropped.svg).toMatch(/width="[\d.]+mm" height="[\d.]+mm"/);
+    expect(cropDrumLegendSvg('<svg viewBox="0 0 10 10"></svg>')).toBeUndefined();
   });
 
   it("keeps the committed example export in step with the parser", () => {
