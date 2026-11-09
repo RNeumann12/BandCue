@@ -27,7 +27,7 @@ import type {
 // file the browser can use without parsing XML. See docs/Adapters.md.
 
 /** Bump when the export output changes shape, so cached exports are redone. */
-export const SCORE_EXPORTER_VERSION = 4;
+export const SCORE_EXPORTER_VERSION = 5;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;

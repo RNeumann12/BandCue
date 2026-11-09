@@ -88,9 +88,11 @@ describe("buildDrumLegend", () => {
 });
 
 describe("drumLegendStyle", () => {
-  it("keeps a short key short", () => {
-    expect(drumLegendStyle("<Style><lastSystemFillLimit>0.3</lastSystemFillLimit></Style>"))
-      .toBe("<Style><lastSystemFillLimit>1</lastSystemFillLimit></Style>");
-    expect(drumLegendStyle("<Style></Style>")).toContain("<lastSystemFillLimit>1</lastSystemFillLimit>");
+  it("keeps a short key short and its names apart", () => {
+    const tight = drumLegendStyle("<Style><lastSystemFillLimit>0.3</lastSystemFillLimit><lyricsMinDistance>0.25</lyricsMinDistance></Style>");
+    expect(tight).toBe("<Style><lastSystemFillLimit>1</lastSystemFillLimit><lyricsMinDistance>2</lyricsMinDistance></Style>");
+    const empty = drumLegendStyle("<Style></Style>");
+    expect(empty).toContain("<lastSystemFillLimit>1</lastSystemFillLimit>");
+    expect(empty).toContain("<lyricsMinDistance>2</lyricsMinDistance>");
   });
 });

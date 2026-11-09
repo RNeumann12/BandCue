@@ -125,13 +125,23 @@ export function buildDrumLegend(xml: string, partId: string, staffNumbers: numbe
 }
 
 /**
- * The key's style: a short key stays short instead of being stretched across
- * the page like the last line of a piece.
+ * The key's style, whatever the song's: a short key stays short instead of being
+ * stretched across the page like the last line of a piece, and the names under
+ * the notes keep clear of each other (Guitar Pro imports space lyrics tightly).
  */
+export const DRUM_LEGEND_STYLE: Record<string, string> = {
+  lastSystemFillLimit: "1",
+  lyricsMinDistance: "2"
+};
+
 export function drumLegendStyle(style: string): string {
-  return /<lastSystemFillLimit>[^<]*<\/lastSystemFillLimit>/.test(style)
-    ? style.replace(/<lastSystemFillLimit>[^<]*<\/lastSystemFillLimit>/, "<lastSystemFillLimit>1</lastSystemFillLimit>")
-    : style.replace("</Style>", "<lastSystemFillLimit>1</lastSystemFillLimit>\n    </Style>");
+  return Object.entries(DRUM_LEGEND_STYLE).reduce((text, [tag, value]) => {
+    const pattern = new RegExp(`<${tag}>[^<]*</${tag}>`);
+    return pattern.test(text)
+      ? text.replace(pattern, `<${tag}>${value}</${tag}>`)
+      : text.replace("</Style>", `<${tag}>${value}</${tag}>
+    </Style>`);
+  }, style);
 }
 
 function decodedLength(text: string): number {
