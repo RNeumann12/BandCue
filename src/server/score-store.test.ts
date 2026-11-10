@@ -92,6 +92,19 @@ describe("ScoreStore", () => {
     expect(evicted).toEqual([[ID_B]]);
   });
 
+  it("never evicts a Songsterr import's Guitar Pro file, even when no setlist uses it", async () => {
+    let now = 1;
+    const { store: scores } = store({ maxTotalBytes: 1500, now: () => now });
+    await scores.put(ID_A, "source.gp", Buffer.alloc(1000), false);
+    now = 2;
+    await scores.put(ID_B, "manifest.json", Buffer.alloc(1000), false);
+    now = 3;
+    await scores.put(ID_C, "manifest.json", Buffer.alloc(1000), false);
+    expect(scores.get(ID_A, "source.gp")).toBeDefined();
+    expect(scores.has(ID_B)).toBe(false);
+    expect(scores.has(ID_C)).toBe(true);
+  });
+
   it("keeps a complete export as it is: a second upload changes nothing", async () => {
     const { store: scores } = store();
     await scores.put(ID_A, "score-1.svg", Buffer.from("<svg>real</svg>"), false);

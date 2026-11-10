@@ -141,8 +141,11 @@ export class ScoreStore {
       return;
     }
     const inUse = this.inUse();
+    // A Songsterr import's Guitar Pro file is never evicted, whatever setlist
+    // is loaded: it is small, and only a browser with Songsterr Plus can bring
+    // it back, while every export is rebuilt by the MuseScore helper.
     const candidates = scores
-      .filter((score) => score.id !== keep && !inUse.has(score.id))
+      .filter((score) => score.id !== keep && !inUse.has(score.id) && !score.isImport)
       .sort((left, right) => left.usedAt - right.usedAt);
     const removed: string[] = [];
     for (const score of candidates) {
@@ -159,7 +162,7 @@ export class ScoreStore {
     }
   }
 
-  private listScores(): { id: string; bytes: number; usedAt: number }[] {
+  private listScores(): { id: string; bytes: number; usedAt: number; isImport: boolean }[] {
     let names: string[];
     try {
       names = readdirSync(this.root);
@@ -170,8 +173,10 @@ export class ScoreStore {
       const dir = join(this.root, id);
       let bytes = 0;
       let modifiedAt = 0;
+      let isImport = false;
       try {
         for (const file of readdirSync(dir)) {
+          isImport ||= file === "source.gp";
           const stats = statSync(join(dir, file));
           bytes += stats.size;
           modifiedAt = Math.max(modifiedAt, stats.mtimeMs);
@@ -179,7 +184,7 @@ export class ScoreStore {
       } catch {
         // A directory that vanished counts as empty.
       }
-      return { id, bytes, usedAt: this.lastUsed.get(id) ?? modifiedAt };
+      return { id, bytes, usedAt: this.lastUsed.get(id) ?? modifiedAt, isImport };
     });
   }
 }
