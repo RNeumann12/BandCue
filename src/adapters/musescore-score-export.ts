@@ -660,10 +660,19 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
       ...buildExportJob(voices.map((voice) => voice.stem)),
       ...[...legends.values()].map((stem) => ({ in: `${stem}.mscz`, out: [`${stem}.svg`] }))
     ]));
-    const jobRun = await run(options.executable, [...(source.force ? ["-f"] : []), "-j", "job.json"], {
+    let jobRun = await run(options.executable, [...(source.force ? ["-f"] : []), "-j", "job.json"], {
       cwd: work,
       timeoutMs: MUSESCORE_RUN_TIMEOUT_MS
     });
+    if (!existsSync(join(work, "score.mpos")) && !source.force) {
+      // MuseScore refuses a score it calls corrupted ("Incomplete measure",
+      // often left over from a Guitar Pro import), though its GUI opens the
+      // same file after a warning. -f exports it the way the GUI shows it.
+      jobRun = await run(options.executable, ["-f", "-j", "job.json"], {
+        cwd: work,
+        timeoutMs: MUSESCORE_RUN_TIMEOUT_MS
+      });
+    }
     if (!existsSync(join(work, "score.mpos"))) {
       throw new Error(`MuseScore did not export the score (exit ${jobRun.code}): ${lastLine(jobRun.stderr)}`);
     }
