@@ -1932,6 +1932,56 @@ describe("RoomController Songsterr score imports", () => {
     expect(JSON.stringify(persisted.at(-1))).toContain(DRUM_SCORE_ID);
   });
 
+  it("keeps the newest exporter's export when a laptop with an older BandCue also exports", () => {
+    const OLD_ID = "cccccccccccccccccccccccccccccccc";
+    const NEW_LOCAL_ID = "dddddddddddddddddddddddddddddddd";
+    const { room, helper, persisted } = roomWithSong(new Set([LOCAL_ID, DRUM_SCORE_ID, OLD_ID, NEW_LOCAL_ID]));
+    room.recordScoreImport("zombie", "s900", IMPORT_ID, undefined, 1010);
+    const oldLaptop = room.addClient(undefined, {
+      type: "clientHello", deviceName: "Band laptop", role: "desktop-adapter",
+      capabilities: [{ app: "musescore", canPlay: true, canStop: true }]
+    }, 1011);
+    const report = (clientId: string, local: string, drums: string, exporterVersion: number | undefined, at: number) =>
+      room.handleMessage(clientId, {
+        type: "adapterStatus", app: "musescore", ready: true,
+        scores: [
+          { songId: "zombie", status: "ready", scoreId: local, exporterVersion },
+          { songId: "zombie", status: "ready", scoreId: drums, importKey: "s900", importId: IMPORT_ID, exporterVersion }
+        ]
+      }, at);
+
+    // The old laptop came first; the up-to-date helper's exports replace its.
+    report(oldLaptop.id, LOCAL_ID, OLD_ID, undefined, 1020);
+    expect(room.getState(1020).currentScore).toMatchObject({ scoreId: LOCAL_ID, imports: [{ scoreId: OLD_ID }] });
+    report(helper.id, NEW_LOCAL_ID, DRUM_SCORE_ID, 6, 1030);
+    expect(room.getState(1030).currentScore).toMatchObject({ scoreId: NEW_LOCAL_ID, imports: [{ scoreId: DRUM_SCORE_ID }] });
+
+    // The old laptop reporting again (or alone, once the helper left) changes nothing.
+    report(oldLaptop.id, LOCAL_ID, OLD_ID, undefined, 1040);
+    room.removeClient(helper.id);
+    report(oldLaptop.id, LOCAL_ID, "e".repeat(32), undefined, 1050);
+    const state = room.getState(1050);
+    expect(state.currentScore).toMatchObject({ scoreId: NEW_LOCAL_ID, imports: [{ scoreId: DRUM_SCORE_ID }] });
+    expect(state.setlist.songs[0]?.scoreImports?.[0]).toMatchObject({ scoreId: DRUM_SCORE_ID, exporterVersion: 6 });
+    expect(JSON.stringify(persisted.at(-1))).toContain('"exporterVersion":6');
+  });
+
+  it("never lets a host's stale copy of an import bring back an older export", () => {
+    const OLD_ID = "cccccccccccccccccccccccccccccccc";
+    const { room, host, helper } = roomWithSong(new Set([LOCAL_ID, DRUM_SCORE_ID, OLD_ID]));
+    room.recordScoreImport("zombie", "s900", IMPORT_ID, undefined, 1010);
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "zombie", status: "ready", scoreId: DRUM_SCORE_ID, importKey: "s900", importId: IMPORT_ID, exporterVersion: 6 }]
+    }, 1020);
+    room.removeClient(helper.id);
+
+    const stale = { ...song, scoreImports: [{ key: "s900", importId: IMPORT_ID, importedAt: 1010, scoreId: OLD_ID }] };
+    room.handleMessage(host.id, { type: "setlistUpdate", songs: [stale], updatedAt: 1030 }, 1030);
+    room.handleMessage(host.id, { type: "currentSongUpdate", song: stale, index: 1, total: 1, updatedAt: 1031 }, 1031);
+    expect(room.getState(1032).currentScore?.imports?.[0]).toMatchObject({ scoreId: DRUM_SCORE_ID });
+  });
+
   it("keeps imports through host edits that do not mention them, and drops them with their URL", () => {
     const { room, host } = roomWithSong();
     room.recordScoreImport("zombie", "s900", IMPORT_ID, undefined, 1010);

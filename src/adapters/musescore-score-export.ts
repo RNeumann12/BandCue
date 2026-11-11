@@ -26,7 +26,11 @@ import type {
 // changes resolved into milliseconds -- so this only reshapes them into a JSON
 // file the browser can use without parsing XML. See docs/Adapters.md.
 
-/** Bump when the export output changes shape, so cached exports are redone. */
+/**
+ * Bump when the export output changes shape, so cached exports are redone. The
+ * helper reports it, and a room served by helpers of different versions keeps
+ * the newest one's exports.
+ */
 export const SCORE_EXPORTER_VERSION = 6;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
@@ -271,6 +275,8 @@ function round1(value: number): number {
 /**
  * How a converted Guitar Pro import is prepared on top of a normal export (see
  * prepareImport); part of an import's export id, so a change redoes only imports.
+ * Rooms only rank exports by SCORE_EXPORTER_VERSION: bump that too when an
+ * older helper's import exports should lose to the new ones.
  */
 export const IMPORT_PREPARATION_VERSION = 2;
 
@@ -921,7 +927,8 @@ export class ScoreExportQueue {
         status: item?.state ?? "queued",
         scoreId: item?.state === "ready" ? item.scoreId : undefined,
         detail: item?.detail,
-        ...(importKey ? { importKey, importId } : {})
+        ...(importKey ? { importKey, importId } : {}),
+        exporterVersion: SCORE_EXPORTER_VERSION
       };
     });
   }
