@@ -3,8 +3,10 @@ import type WebSocket from "ws";
 import {
   EXTERNAL_HOTKEY_FUTURE_TOLERANCE_MS,
   MAX_SETLIST_SONGS,
-  RoomController
+  RoomController,
+  type PersistedRoomState
 } from "./room.js";
+import type { SetlistSong } from "../shared/protocol.js";
 
 describe("RoomController", () => {
   it("lets a client host only over a host-token connection", () => {
@@ -1847,6 +1849,36 @@ describe("RoomController score view", () => {
     room.handleMessage(host.id, { type: "setlistUpdate", songs: retargeted, updatedAt: 1020 }, 1020);
     room.handleMessage(host.id, { type: "currentSongUpdate", song: retargeted[0], index: 1, total: 3, updatedAt: 1021 }, 1021);
     expect(room.getState(1022).currentScore?.status).toBe("missing");
+  });
+
+  it("keeps a song's last export readable across a coordinator restart", () => {
+    const { room, helper } = roomWithSetlist();
+    const persisted: PersistedRoomState[] = [];
+    room.onPersistedStateChange((state) => persisted.push(state));
+    room.handleMessage(helper.id, {
+      type: "adapterStatus", app: "musescore", ready: true,
+      scores: [{ songId: "ruins", relativePath: "In Ruins.mscz", status: "ready", scoreId: SCORE_ID, exporterVersion: 7 }]
+    }, 1010);
+    room.getState(1010);
+    const saved = JSON.parse(JSON.stringify(persisted.at(-1)));
+    expect(saved.scores).toEqual([{ songId: "ruins", scoreId: SCORE_ID, reference: "In Ruins.mscz", exporterVersion: 7 }]);
+
+    const restarted = new RoomController("ABC123", "http://room", "http://host", 1500);
+    restarted.setScoreAvailability((scoreId) => scoreId === SCORE_ID);
+    expect(restarted.restorePersistedState(saved)).toBe(3);
+    expect(restarted.getState(2000).currentScore).toEqual({ songId: "ruins", status: "ready", scoreId: SCORE_ID });
+
+    // A score pointed elsewhere meanwhile, or files the store lost, are not served.
+    const moved = { ...saved, setlist: { ...saved.setlist, songs: saved.setlist.songs.map((song: SetlistSong) =>
+      song.id === "ruins" ? { ...song, source: "In Ruins v2.mscz" } : song) } };
+    const elsewhere = new RoomController("ABC123", "http://room", "http://host", 1500);
+    elsewhere.setScoreAvailability(() => true);
+    elsewhere.restorePersistedState(moved);
+    expect(elsewhere.getState(2000).setlistScores?.[0]).toMatchObject({ songId: "ruins", status: "missing" });
+    const emptyStore = new RoomController("ABC123", "http://room", "http://host", 1500);
+    emptyStore.setScoreAvailability(() => false);
+    emptyStore.restorePersistedState(saved);
+    expect(emptyStore.getState(2000).setlistScores?.[0]).toMatchObject({ songId: "ruins", status: "missing" });
   });
 
   it("has no score view for a song that is not a MuseScore song", () => {

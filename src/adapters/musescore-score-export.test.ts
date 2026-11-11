@@ -192,6 +192,18 @@ describe("voices", () => {
     expect(voice("score").transform(IMPORTED)).toBe(IMPORTED);
   });
 
+  it("gives the drum parts a key, and a drums-only score's full score too", () => {
+    expect(voices.filter((plan) => plan.drums).map((plan) => [plan.stem, plan.drums])).toEqual([
+      ["part-4", { partId: "4", staffNumbers: [5], staffIndex: 0 }]
+    ]);
+    const drumsOnly = instruments.filter((instrument) => instrument.id === "4");
+    expect(planVoices(drumsOnly)).toEqual([
+      expect.objectContaining({ stem: "score", drums: { partId: "4", staffNumbers: [5], staffIndex: 0 } })
+    ]);
+    const vocalsOnly = instruments.filter((instrument) => instrument.id === "1");
+    expect(planVoices(vocalsOnly).map((plan) => [plan.stem, plan.drums])).toEqual([["score", undefined]]);
+  });
+
   it("shows only its own instrument, even one the score hides", () => {
     expect(shownParts(voice("part-4").transform(IMPORTED))).toEqual(["4"]);
     expect(shownParts(voice("part-2-tab").transform(IMPORTED))).toEqual(["2"]);

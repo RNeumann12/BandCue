@@ -353,8 +353,9 @@ much:
 `roomState.setlistScores` (every MuseScore song of the setlist): `{ songId, status, scoreId?, detail? }`.
 `ready` means the coordinator holds the export under `scoreId`; `exporting` means a helper is still
 on it; `missing` says why there are no notes in `detail` (no helper connected, no matching score,
-export failed). A published export stays `ready` while its helper reconnects, until the song is
-pointed at a different score.
+export failed). A published export stays `ready` while its helper reconnects, and across a
+coordinator restart (the setlist file keeps it as `scores`), until the song is pointed at a
+different score or the store no longer holds it.
 
 Each entry of a helper's `adapterStatus.scores` carries `exporterVersion` (the helper's
 `SCORE_EXPORTER_VERSION`; helpers before it send none and count as 0). When several helpers export

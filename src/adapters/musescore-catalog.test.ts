@@ -62,6 +62,25 @@ describe("MuseScore catalog", () => {
     });
   });
 
+  it("picks the score saved by the newest MuseScore when a song is in several folders", () => {
+    const root = mkdtempSync(join(tmpdir(), "bandcue-scores-"));
+    mkdirSync(join(root, "MuseScore4"));
+    const score = (version: string) => `<?xml version="1.0"?>\n<museScore version="${version}">\n</museScore>\n`;
+    writeFileSync(join(root, "Zombie.mscx"), score("3.02"));
+    writeFileSync(join(root, "MuseScore4", "Zombie.mscx"), score("4.70"));
+    const { entries } = scanMuseScoreCatalog([root]);
+    const song = { id: "zombie", title: "Zombie", sourceType: "songsterr" as const,
+      source: "https://www.songsterr.com/a/wsa/x-s431", museScoreSource: "Zombie.mscz" };
+
+    const match = matchMuseScoreSong(song, entries);
+    expect(match).toMatchObject({ status: "matched", relativePath: "MuseScore4/Zombie.mscx" });
+    expect(matchedCatalogEntry(match, entries)?.relativePath).toBe("MuseScore4/Zombie.mscx");
+
+    // No clear winner (same version, or unreadable files): still ambiguous.
+    expect(matchMuseScoreSong(song, entries, () => 4.7)).toMatchObject({ status: "ambiguous", count: 2 });
+    expect(matchMuseScoreSong(song, entries, () => 0)).toMatchObject({ status: "ambiguous", count: 2 });
+  });
+
   it("matches a Songsterr-primary song via its dedicated museScoreSource", () => {
     const entries: LocalScoreCatalogEntry[] = [
       {

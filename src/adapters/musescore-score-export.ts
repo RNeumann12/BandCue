@@ -31,7 +31,7 @@ import type {
  * helper reports it, and a room served by helpers of different versions keeps
  * the newest one's exports.
  */
-export const SCORE_EXPORTER_VERSION = 6;
+export const SCORE_EXPORTER_VERSION = 7;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;
@@ -385,13 +385,15 @@ export function planVoices(instruments: ScoreInstrument[]): VoicePlan[] {
   // An instrument without a single note (an empty drum staff, say) is no voice.
   const playing = instruments.filter((instrument) => instrument.staves.some((staff) => staff.notes > 0));
   if (playing.length < 2 && !playing.some((instrument) => instrument.fretted)) {
-    return plans;
+    // A drums-only score (the drummer's own tab) is its full score: the key goes there.
+    const drums = playing[0] && drumKitOf(playing[0]);
+    return drums ? [{ ...plans[0]!, drums }] : plans;
   }
   for (const instrument of playing) {
     const stem = `part-${instrument.id}`;
     const isDrums = instrument.drumsByName || instrument.staves.every((staff) => staff.kind === "percussion");
     const notations: ("notes" | "tab" | undefined)[] = instrument.fretted ? ["notes", "tab"] : [isDrums ? undefined : "notes"];
-    const kit = instrument.staves.findIndex((staff) => staff.kind === "percussion" && staff.notes > 0);
+    const drums = drumKitOf(instrument);
     for (const notation of notations) {
       plans.push({
         stem: instrument.fretted ? `${stem}-${notation}` : stem,
@@ -399,13 +401,19 @@ export function planVoices(instruments: ScoreInstrument[]): VoicePlan[] {
         instrument: stem,
         notation: instrument.fretted ? notation : undefined,
         transform: (xml) => soloInstrument(xml, instrument, notation),
-        drums: kit >= 0 && !instrument.fretted
-          ? { partId: instrument.id, staffNumbers: [instrument.staves[kit]!.number], staffIndex: kit }
-          : undefined
+        drums
       });
     }
   }
   return plans;
+}
+
+/** The staff a drum key is made from: the instrument's first percussion staff with notes. */
+function drumKitOf(instrument: ScoreInstrument): VoicePlan["drums"] {
+  const kit = instrument.staves.findIndex((staff) => staff.kind === "percussion" && staff.notes > 0);
+  return kit >= 0 && !instrument.fretted
+    ? { partId: instrument.id, staffNumbers: [instrument.staves[kit]!.number], staffIndex: kit }
+    : undefined;
 }
 
 /** The score with only `instrument` shown, its staves set to `notation`. */

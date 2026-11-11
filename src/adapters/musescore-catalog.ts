@@ -1,7 +1,8 @@
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, extname, relative, resolve, sep } from "node:path";
 import type { SetlistSong, SongCatalogEntry, SongCatalogMatch } from "../shared/protocol.js";
 import { appliesToMuseScore, museScoreReference } from "../shared/song-sources.js";
+import { entryContent, readZipEntries } from "./mscz-page-layout.js";
 
 export interface LocalScoreCatalogEntry extends SongCatalogEntry {
   absolutePath: string;
@@ -53,9 +54,16 @@ export function scanMuseScoreCatalog(
   };
 }
 
+/**
+ * The MuseScore version that saved a score (`<museScore version="4.70">` → 4.7),
+ * or 0 when the file cannot be read.
+ */
+export type ScoreFormatVersionReader = (entry: LocalScoreCatalogEntry) => number;
+
 export function matchMuseScoreSong(
   song: SetlistSong | undefined,
-  entries: LocalScoreCatalogEntry[]
+  entries: LocalScoreCatalogEntry[],
+  formatVersionOf: ScoreFormatVersionReader = readScoreFormatVersion
 ): SongCatalogMatch {
   if (!appliesToMuseScore(song)) {
     return {
@@ -100,6 +108,20 @@ export function matchMuseScoreSong(
     };
   }
 
+  // The same song in several folders is usually a MuseScore 3 original next to
+  // its MuseScore 4 re-save: the score saved by the newest MuseScore is the one
+  // the band keeps working on. Only a clear winner counts.
+  const newest = matches.length > 1 ? newestFormat(matches, formatVersionOf) : undefined;
+  if (newest) {
+    return {
+      status: "matched",
+      count: 1,
+      title: newest.title,
+      relativePath: newest.relativePath,
+      detail: `Matched ${newest.relativePath} (saved by the newest MuseScore of ${matches.length} matching files)`
+    };
+  }
+
   if (matches.length > 1) {
     return {
       status: "ambiguous",
@@ -132,6 +154,42 @@ export function publicCatalogEntries(entries: LocalScoreCatalogEntry[]): SongCat
     relativePath,
     sourceId
   }));
+}
+
+function newestFormat(
+  matches: LocalScoreCatalogEntry[],
+  formatVersionOf: ScoreFormatVersionReader
+): LocalScoreCatalogEntry | undefined {
+  const versions = matches.map((entry) => ({ entry, version: formatVersionOf(entry) }));
+  const best = Math.max(...versions.map(({ version }) => version));
+  const winners = versions.filter(({ version }) => version === best);
+  return best > 0 && winners.length === 1 ? winners[0]?.entry : undefined;
+}
+
+const formatVersionCache = new Map<string, { stamp: string; version: number }>();
+
+/** Reads the `<museScore version>` of a .mscz/.mscx, cached per file size and time. */
+export function readScoreFormatVersion(entry: LocalScoreCatalogEntry): number {
+  try {
+    const stats = statSync(entry.absolutePath);
+    const stamp = `${stats.size}:${stats.mtimeMs}`;
+    const cached = formatVersionCache.get(entry.absolutePath);
+    if (cached?.stamp === stamp) {
+      return cached.version;
+    }
+    const content = readFileSync(entry.absolutePath);
+    const xml = extname(entry.absolutePath).toLowerCase() === ".mscx"
+      ? content.subarray(0, 4096).toString("utf8")
+      : (() => {
+        const score = readZipEntries(content).find((item) => /\.mscx$/i.test(item.name) && !item.name.includes("/"));
+        return score ? entryContent(score).subarray(0, 4096).toString("utf8") : "";
+      })();
+    const version = Number(/<museScore\s+version="(\d+(?:\.\d+)?)"/.exec(xml)?.[1] ?? 0) || 0;
+    formatVersionCache.set(entry.absolutePath, { stamp, version });
+    return version;
+  } catch {
+    return 0;
+  }
 }
 
 function scanRoot(
