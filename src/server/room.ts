@@ -102,6 +102,19 @@ const MAX_SCORE_IMPORT_JOBS = 20;
 export interface PersistedRoomState {
   setlist: SetlistState;
   currentSong?: CurrentSongState;
+  /**
+   * The last export of each song's own MuseScore score, so the notes stay
+   * readable after a coordinator restart until the MuseScore laptop is back.
+   */
+  scores?: RememberedScore[];
+}
+
+interface RememberedScore {
+  songId: string;
+  scoreId: string;
+  /** The song's MuseScore reference when it was exported (see museScoreReference). */
+  reference: string;
+  exporterVersion: number;
 }
 
 export class RoomController {
@@ -142,10 +155,11 @@ export class RoomController {
   /**
    * The last published export per song, kept after its helper leaves: the
    * files stay on the coordinator, so the band can keep reading while the
-   * MuseScore laptop reconnects. Tied to the song's MuseScore reference, so
-   * pointing the song at a different score forgets it.
+   * MuseScore laptop reconnects, and across coordinator restarts (the setlist
+   * file carries them). Tied to the song's MuseScore reference, so pointing the
+   * song at a different score forgets it.
    */
-  private readonly rememberedScores = new Map<string, { scoreId: string; reference: string; exporterVersion: number }>();
+  private readonly rememberedScores = new Map<string, Omit<RememberedScore, "songId">>();
   /** Helpers already told off for an outdated exporter, so the log says it once per connection. */
   private readonly outdatedExporterLogged = new Set<string>();
   /** The latest Songsterr import the host asked for, per song id (insertion order = age). */
@@ -465,6 +479,21 @@ export class RoomController {
         updatedAt: Number.isFinite(Number(current?.updatedAt)) ? Number(current?.updatedAt) : 0
       };
     }
+
+    const scores = (saved as { scores?: unknown }).scores;
+    const songIds = new Set(songs.map((song) => song.id));
+    for (const raw of Array.isArray(scores) ? scores.slice(0, MAX_SETLIST_SONGS) : []) {
+      const entry = raw as Partial<RememberedScore> | undefined;
+      if (entry && typeof entry.songId === "string" && songIds.has(entry.songId) &&
+          typeof entry.scoreId === "string" && HASH_PATTERN.test(entry.scoreId) &&
+          typeof entry.reference === "string") {
+        this.rememberedScores.set(entry.songId, {
+          scoreId: entry.scoreId,
+          reference: entry.reference,
+          exporterVersion: sanitizeExporterVersion(entry.exporterVersion) ?? 0
+        });
+      }
+    }
     return songs.length;
   }
 
@@ -473,9 +502,14 @@ export class RoomController {
       return;
     }
     const currentSong = this.currentSong ? { ...this.currentSong, leaderId: undefined } : undefined;
+    const songIds = new Set(this.setlist.songs.map((song) => song.id));
+    const scores = [...this.rememberedScores]
+      .filter(([songId]) => songIds.has(songId))
+      .map(([songId, remembered]) => ({ songId, ...remembered }));
     this.persistedStateListener({
       setlist: { songs: this.setlist.songs, updatedAt: this.setlist.updatedAt },
-      currentSong
+      currentSong,
+      ...(scores.length ? { scores } : {})
     });
   }
 
@@ -792,7 +826,11 @@ export class RoomController {
       return { songId: song.id, status: "ready", scoreId: remembered.scoreId };
     }
     if (ready) {
-      this.rememberedScores.set(song.id, { scoreId: ready.scoreId, reference, exporterVersion: ready.exporterVersion });
+      if (remembered?.scoreId !== ready.scoreId || remembered.reference !== reference ||
+          remembered.exporterVersion !== ready.exporterVersion) {
+        this.rememberedScores.set(song.id, { scoreId: ready.scoreId, reference, exporterVersion: ready.exporterVersion });
+        this.notifyPersistedStateChange();
+      }
       return { songId: song.id, status: "ready", scoreId: ready.scoreId };
     }
     if (remembered && rememberedUsable) {

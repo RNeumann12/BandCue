@@ -53,6 +53,14 @@
   reported last. Helpers now report their exporter version, and the room keeps the newest
   exporter's notes, also against a host page or setlist file that still remembers an older export.
   The coordinator log names a helper that needs an update.
+- **A score kept in two folders had no score view** ("Found 2 matching MuseScore files"), e.g. a
+  MuseScore 3 original next to its MuseScore 4 re-save in a `MuseScore4` subfolder. The helper now
+  takes the file saved by the newest MuseScore.
+- **Drums-only scores (the drummer's own Songsterr tab) had no drum key**: the key went only to
+  drum parts of scores with several instruments. Their full score now opens with it too.
+- **After a coordinator restart, songs' own MuseScore scores were missing** until a MuseScore
+  helper reconnected, although their exports were still on the coordinator. The room now keeps
+  each song's last export in its setlist file.
 - **After the host switched songs during playback, the new song's cursor ran** from the old
   song's downbeat although nobody played it. The room now records which song (start measure,
   tempo) a Play started; the score view says *Band is on another song* and waits on the new song's

@@ -245,6 +245,9 @@ npm run dev:musescore -- --score-folder "C:\Users\you\Documents\MuseScore4\Score
 - The host UI shows `matched` / `ambiguous` / `missing` / `not-applicable` and warns when the
   active score title doesn't match the current MuseScore setlist item.
 - Auto-open requires **exactly one** match; ambiguous or missing matches are reported, not opened.
+  When the same score is in several folders, the file saved by the newest MuseScore (its
+  `<museScore version>`) counts as the match — typically a MuseScore 4 re-save next to its
+  MuseScore 3 original. Files saved by the same version stay ambiguous.
 - **With BandCue Bridge attached, a song change stays in the running MuseScore.** The plugin closes
   the current score and opens the next one in the same window (`closeScore()` / `readScore()`),
   which measured 0.8–0.9 s against a real MuseScore 4.7 — no new process, no plugin restart. If the
@@ -476,7 +479,8 @@ every drum stem down, as Songsterr draws drums: one voice, so drums played toget
 and beams run below the staff (`src/adapters/mscx-drum-stems.ts`); those exports carry their own id
 (`IMPORT_PREPARATION_VERSION`).
 
-**Drum key.** Every drum part (imports and the band's own scores) gets a key: a one-measure score
+**Drum key.** Every drum part (imports and the band's own scores, and the full score of a
+drums-only score such as the drummer's own tab) gets a key: a one-measure score
 with a quarter note per drum the part plays, on its line and with its usual notehead, top line
 first, named underneath in a drum chart's words (*Kick*, *Snare*, *Hi-Hat*, *Crash*;
 `src/adapters/mscx-drum-legend.ts`). MuseScore engraves it in the same `-j` job, so it looks exactly
