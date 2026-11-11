@@ -145,7 +145,9 @@ export class RoomController {
    * MuseScore laptop reconnects. Tied to the song's MuseScore reference, so
    * pointing the song at a different score forgets it.
    */
-  private readonly rememberedScores = new Map<string, { scoreId: string; reference: string }>();
+  private readonly rememberedScores = new Map<string, { scoreId: string; reference: string; exporterVersion: number }>();
+  /** Helpers already told off for an outdated exporter, so the log says it once per connection. */
+  private readonly outdatedExporterLogged = new Set<string>();
   /** The latest Songsterr import the host asked for, per song id (insertion order = age). */
   private readonly scoreImportJobs = new Map<string, ScoreImportJob>();
   private scoreImportSequence = 0;
@@ -229,6 +231,7 @@ export class RoomController {
   removeClient(clientId: string): void {
     this.clients.delete(clientId);
     this.scoreReports.delete(clientId);
+    this.outdatedExporterLogged.delete(clientId);
     this.broadcastState();
   }
 
@@ -638,9 +641,12 @@ export class RoomController {
   /**
    * Notes in each import the export the helper finished for it, so the Pi
    * keeps serving it once the MuseScore laptop is gone (and across restarts:
-   * the setlist file carries it).
+   * the setlist file carries it). A helper with an older exporter than the
+   * one that made the recorded export never replaces it: two laptops on
+   * different BandCue versions would otherwise flip the band's notes back to
+   * the old look whenever the older one reported.
    */
-  private adoptImportExports(reports: ScoreExportReport[], now: number): void {
+  private adoptImportExports(clientId: string, reports: ScoreExportReport[], now: number): void {
     let changed = false;
     for (const report of reports) {
       if (!report.importKey || report.status !== "ready" || !report.scoreId) {
@@ -648,21 +654,44 @@ export class RoomController {
       }
       const imported = this.findSong(report.songId)?.scoreImports
         ?.find((entry) => entry.key === report.importKey && entry.importId === report.importId);
+      if (!imported || imported.scoreId === report.scoreId) {
+        continue;
+      }
+      const exporterVersion = report.exporterVersion ?? 0;
+      if (imported.scoreId && exporterVersion < (imported.exporterVersion ?? 0)) {
+        this.logOutdatedExporter(clientId, exporterVersion, imported.exporterVersion ?? 0);
+        continue;
+      }
       // Asked fresh: a "not stored" answer cached while it was still uploading
       // would otherwise keep the finished export from ever being recorded.
-      if (!imported || imported.scoreId === report.scoreId || !(this.scoreAvailable?.(report.scoreId) ?? true)) {
+      if (!(this.scoreAvailable?.(report.scoreId) ?? true)) {
         continue;
       }
       const scoreId = report.scoreId;
       changed = this.updateSong(report.songId, (song) => ({
         ...song,
         scoreImports: song.scoreImports?.map((entry) =>
-          entry.key === report.importKey && entry.importId === report.importId ? { ...entry, scoreId } : entry)
+          entry.key === report.importKey && entry.importId === report.importId
+            ? { ...entry, scoreId, exporterVersion: exporterVersion || undefined }
+            : entry)
       }), now) || changed;
     }
     if (changed) {
       this.notifyPersistedStateChange();
     }
+  }
+
+  /** Names, once per connection, the laptop whose MuseScore helper needs a BandCue update. */
+  private logOutdatedExporter(clientId: string, version: number, newest: number): void {
+    if (this.outdatedExporterLogged.has(clientId)) {
+      return;
+    }
+    this.outdatedExporterLogged.add(clientId);
+    const name = this.clients.get(clientId)?.deviceName ?? clientId;
+    console.log(
+      `[scores] "${name}" exports score views with exporter v${version}, older than v${newest}; ` +
+        "the room keeps the newer exports. Update BandCue on that computer."
+    );
   }
 
   /** The current song's score view and every other song's that has one, for roomState. */
@@ -729,6 +758,9 @@ export class RoomController {
     let pending: ScoreExportReport | undefined;
     let failed: ScoreExportReport | undefined;
     let helperConnected = false;
+    // With several helpers, the newest exporter's export (old BandCue laptops
+    // still render the previous look of the notes).
+    let ready: { clientId: string; scoreId: string; exporterVersion: number } | undefined;
     for (const [clientId, reports] of this.scoreReports) {
       if (!this.clients.has(clientId)) {
         continue;
@@ -739,19 +771,31 @@ export class RoomController {
         continue;
       }
       if (report.status === "ready" && report.scoreId && this.isScoreStored(report.scoreId, now)) {
-        this.rememberedScores.set(song.id, { scoreId: report.scoreId, reference });
-        return { songId: song.id, status: "ready", scoreId: report.scoreId };
-      }
-      if (report.status === "failed") {
+        const exporterVersion = report.exporterVersion ?? 0;
+        if (!ready || exporterVersion > ready.exporterVersion) {
+          ready = { clientId, scoreId: report.scoreId, exporterVersion };
+        }
+      } else if (report.status === "failed") {
         failed ??= report;
       } else {
         pending ??= report;
       }
     }
 
-    // Still being (re-)exported: an earlier export of the song stays readable.
+    // Still being (re-)exported: an earlier export of the song stays readable,
+    // and one from a newer exporter beats an older helper's.
     const remembered = this.rememberedScores.get(song.id);
-    if (remembered && remembered.reference === reference && this.isScoreStored(remembered.scoreId, now)) {
+    const rememberedUsable = Boolean(remembered && remembered.reference === reference &&
+      this.isScoreStored(remembered.scoreId, now));
+    if (ready && remembered && rememberedUsable && remembered.exporterVersion > ready.exporterVersion) {
+      this.logOutdatedExporter(ready.clientId, ready.exporterVersion, remembered.exporterVersion);
+      return { songId: song.id, status: "ready", scoreId: remembered.scoreId };
+    }
+    if (ready) {
+      this.rememberedScores.set(song.id, { scoreId: ready.scoreId, reference, exporterVersion: ready.exporterVersion });
+      return { songId: song.id, status: "ready", scoreId: ready.scoreId };
+    }
+    if (remembered && rememberedUsable) {
       return { songId: song.id, status: "ready", scoreId: remembered.scoreId };
     }
     if (pending) {
@@ -816,7 +860,7 @@ export class RoomController {
       : undefined;
     if (scores && JSON.stringify(scores) !== JSON.stringify(this.scoreReports.get(clientId) ?? null)) {
       this.scoreReports.set(clientId, scores);
-      this.adoptImportExports(scores, now);
+      this.adoptImportExports(clientId, scores, now);
       statusChanged = true;
     }
     this.logCommandTiming(client, nextStatus.lastCommand);
@@ -1629,22 +1673,37 @@ function sanitizeSong(song: SetlistSong): SetlistSong | undefined {
 
 const HASH_PATTERN = /^[a-f0-9]{16,64}$/;
 
-/** Per Songsterr song, the newer import (at a tie, the copy that knows its export). */
+/**
+ * Per Songsterr song, the newer import. For the same import, the room's own
+ * export wins unless the host's copy knows one from a newer exporter: a host
+ * page (or setlist file) saved before the last re-export still carries the
+ * old export, and must not bring the old look of the notes back.
+ */
 function mergeScoreImports(sent: unknown, known: ScoreImport[]): ScoreImport[] {
   const byKey = new Map<string, ScoreImport>();
-  const candidates = [...(Array.isArray(sent) ? sent : []), ...known] as Partial<ScoreImport>[];
+  const candidates = [...known, ...(Array.isArray(sent) ? sent : [])] as Partial<ScoreImport>[];
   for (const entry of candidates) {
     if (!entry || typeof entry !== "object" || typeof entry.key !== "string") {
       continue;
     }
     const importedAt = Number.isFinite(entry.importedAt) ? Number(entry.importedAt) : 0;
     const current = byKey.get(entry.key);
-    if (!current || importedAt > current.importedAt ||
-        (importedAt === current.importedAt && entry.importId === current.importId && !current.scoreId && entry.scoreId)) {
+    const betterExport = current && importedAt === current.importedAt && entry.importId === current.importId &&
+      Boolean(entry.scoreId) && (!current.scoreId || exporterVersionOf(entry) > exporterVersionOf(current));
+    if (!current || importedAt > current.importedAt || betterExport) {
       byKey.set(entry.key, { ...entry, importedAt } as ScoreImport);
     }
   }
   return [...byKey.values()];
+}
+
+function exporterVersionOf(entry: Partial<ScoreImport>): number {
+  return typeof entry.exporterVersion === "number" && Number.isFinite(entry.exporterVersion) ? entry.exporterVersion : 0;
+}
+
+/** A helper's exporter version, if it sent a plausible one. */
+function sanitizeExporterVersion(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value < 10_000 ? value : undefined;
 }
 
 /** Keeps the imports of the song's current Songsterr URLs, one per Songsterr song. */
@@ -1664,12 +1723,14 @@ function sanitizeScoreImports(value: unknown, song: SetlistSong): ScoreImport[] 
     if (!keys.has(key) || !HASH_PATTERN.test(importId) || imports.some((existing) => existing.key === key)) {
       continue;
     }
+    const scoreId = typeof entry.scoreId === "string" && HASH_PATTERN.test(entry.scoreId) ? entry.scoreId : undefined;
     imports.push({
       key,
       importId,
       revision: trimText(typeof entry.revision === "string" ? entry.revision : "", 40) || undefined,
       importedAt: Number.isFinite(entry.importedAt) ? Number(entry.importedAt) : 0,
-      scoreId: typeof entry.scoreId === "string" && HASH_PATTERN.test(entry.scoreId) ? entry.scoreId : undefined
+      scoreId,
+      exporterVersion: scoreId ? sanitizeExporterVersion(entry.exporterVersion) : undefined
     });
   }
   return imports.length ? imports : undefined;
@@ -1830,7 +1891,8 @@ function sanitizeScoreReports(value: AdapterStatus["scores"]): ScoreExportReport
         scoreId,
         detail: trimText(report.detail ?? "", 300) || undefined,
         importKey: typeof report.importKey === "string" && /^s\d{1,12}$/.test(report.importKey) ? report.importKey : undefined,
-        importId: typeof report.importId === "string" && HASH_PATTERN.test(report.importId) ? report.importId : undefined
+        importId: typeof report.importId === "string" && HASH_PATTERN.test(report.importId) ? report.importId : undefined,
+        exporterVersion: sanitizeExporterVersion(report.exporterVersion)
       }];
     });
 }

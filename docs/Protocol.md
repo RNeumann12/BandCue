@@ -356,6 +356,13 @@ on it; `missing` says why there are no notes in `detail` (no helper connected, n
 export failed). A published export stays `ready` while its helper reconnects, until the song is
 pointed at a different score.
 
+Each entry of a helper's `adapterStatus.scores` carries `exporterVersion` (the helper's
+`SCORE_EXPORTER_VERSION`; helpers before it send none and count as 0). When several helpers export
+the same song, the room serves the export of the newest exporter, and a Songsterr import keeps the
+`exporterVersion` of its recorded export: an older helper, a host's copy or a setlist file never
+replaces it with an older one. The coordinator logs `[scores] "<device>" exports score views with
+exporter vN, older than vM` once per connection of such a helper.
+
 ### Score view files (HTTP)
 `/api/scores/<scoreId>/<file>`, with the room or host token as `?token=` (an `<img>` cannot send
 headers). `scoreId` is a hash of the score file and the exporter version, so the bytes under an id

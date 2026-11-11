@@ -99,6 +99,12 @@ export interface ScoreExportReport {
   /** Set for the export of a Songsterr import (`ScoreImport.key`/`importId`). */
   importKey?: string;
   importId?: string;
+  /**
+   * The helper's exporter version (`SCORE_EXPORTER_VERSION`). When helpers of
+   * different versions export the same song, the room keeps the newest export;
+   * helpers older than this field count as version 0.
+   */
+  exporterVersion?: number;
 }
 
 /**
@@ -472,6 +478,8 @@ export interface ScoreImport {
   revision?: string;
   importedAt: number;
   scoreId?: string;
+  /** The exporter version that made `scoreId` (see `ScoreExportReport.exporterVersion`). */
+  exporterVersion?: number;
 }
 
 export interface CurrentSongState {

@@ -48,6 +48,11 @@
 
 ### Fixed
 
+- **The drums fell back to their old look** (two voices, no drum key) when a second computer with
+  an older BandCue ran a MuseScore helper against the same room: the room took whichever helper
+  reported last. Helpers now report their exporter version, and the room keeps the newest
+  exporter's notes, also against a host page or setlist file that still remembers an older export.
+  The coordinator log names a helper that needs an update.
 - **After the host switched songs during playback, the new song's cursor ran** from the old
   song's downbeat although nobody played it. The room now records which song (start measure,
   tempo) a Play started; the score view says *Band is on another song* and waits on the new song's
