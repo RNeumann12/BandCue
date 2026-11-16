@@ -48,6 +48,11 @@
 
 ### Fixed
 
+- **Play no longer needs a desktop adapter.** A room of only the host and companions (phones,
+  tablets reading the score view) can now start a song: the room's clock, count-in and score cursor
+  run without MuseScore or Songsterr attached. The coordinator always accepted such a Play; only
+  the host page held it back. Adapters that are connected and play the song are still waited for,
+  and setlist auto-start still waits for a song to load on them.
 - **A dead connection went unnoticed for over a minute.** When the Wi-Fi dropped without a word,
   the host and companion pages kept looking connected — stale room, live buttons — until the
   browser gave up closing the socket (68 s in Chrome). The page now drops a connection that has

@@ -397,9 +397,12 @@ describe("transport and safety decisions", () => {
     expect(getReadyAdapters(undefined)).toEqual([]);
   });
 
-  it("allows play only when armed, stopped, and a ready adapter exists", () => {
+  it("allows play when armed and stopped, with or without desktop adapters", () => {
     expect(canHostPlay(armedStoppedState([readyAdapter()]))).toBe(true);
-    expect(canHostPlay(armedStoppedState([]))).toBe(false); // no ready adapter
+    // Host + companions only: the room clock is still worth starting.
+    expect(canHostPlay(armedStoppedState([]))).toBe(true);
+    expect(canHostPlay(armedStoppedState([{ id: "c1", role: "companion", deviceName: "Phone" }]))).toBe(true);
+    expect(canHostPlay({ ...armedStoppedState([]), safety: { armed: false } })).toBe(false);
     expect(canHostPlay({ ...armedStoppedState([readyAdapter()]), safety: { armed: false } })).toBe(false);
     expect(canHostPlay({ ...armedStoppedState([readyAdapter()]), transport: { status: "running" } })).toBe(false);
     expect(canHostPlay(undefined)).toBe(false);
@@ -448,7 +451,8 @@ describe("transport and safety decisions", () => {
     expect(playBlockedReason(undefined)).toMatch(/not ready/);
     expect(playBlockedReason({ transport: { status: "running" }, safety: { armed: true }, clients: [] }))
       .toMatch(/already active/);
-    expect(playBlockedReason(armedStoppedState([]))).toMatch(/No ready desktop adapter/);
+    expect(playBlockedReason(armedStoppedState([readyAdapter({ status: { ready: false, detail: "starting up" } })])))
+      .toMatch(/MuseScore laptop is not ready \(starting up\)/);
     expect(playBlockedReason({ ...armedStoppedState([readyAdapter()]), safety: { armed: false } }))
       .toMatch(/Arm playback/);
   });
@@ -717,10 +721,26 @@ describe("setlistLoadDecision", () => {
       .toBe("play");
   });
 
-  it("waits, then times out, when no adapter becomes ready", () => {
+  it("plays immediately when no adapter is connected for the song", () => {
     const noAdapters = { transport: { status: "stopped" }, clients: [] };
-    expect(setlistLoadDecision(noAdapters, { ...options, elapsedMs: 5000 })).toBe("wait");
-    expect(setlistLoadDecision(noAdapters, { ...options, elapsedMs: 20000 })).toBe("timeout");
+    expect(setlistLoadDecision(noAdapters, { ...options, elapsedMs: 0 })).toBe("play");
+
+    // A MuseScore helper does not load a Songsterr-only song.
+    const songsterrSong = { id: "s", title: "Tab", sourceType: "songsterr", source: "https://www.songsterr.com/a/wsa/x-tab-s1" };
+    const otherAppOnly = {
+      transport: { status: "stopped" },
+      currentSong: { song: songsterrSong },
+      clients: [readyAdapter({ status: { ready: false, app: "musescore" } })]
+    };
+    expect(setlistLoadDecision(otherAppOnly, { ...options, elapsedMs: 0 })).toBe("play");
+  });
+
+  it("waits, then times out, when the song's adapters never become ready", () => {
+    const loading = { transport: { status: "stopped" }, clients: [readyAdapter({ status: { ready: false } })] };
+    expect(setlistLoadDecision(loading, { ...options, elapsedMs: 5000 })).toBe("wait");
+    expect(setlistLoadDecision(loading, { ...options, elapsedMs: 20000 })).toBe("timeout");
+    // Partial start still waits for at least one of them to load the song.
+    expect(setlistLoadDecision(loading, { ...options, elapsedMs: 5000, allowPartialStart: true })).toBe("wait");
   });
 
   it("waits for the settle window once an adapter is ready, then plays", () => {
@@ -804,10 +824,8 @@ describe("describeAutoRun", () => {
 });
 
 describe("collectWarnings", () => {
-  it("warns when no desktop adapters are connected", () => {
-    expect(collectWarnings({ clients: [] }, [], [])).toEqual([
-      "No desktop adapters connected. Play will not control MuseScore or Songsterr yet."
-    ]);
+  it("does not warn about a room without desktop adapters", () => {
+    expect(collectWarnings({ clients: [] }, [], [])).toEqual([]);
   });
 
   it("warns when adapters are connected but none are ready", () => {

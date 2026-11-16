@@ -25,6 +25,7 @@ import {
   getCalibrationKey,
   getTimingQuality,
   getReadyAdapters,
+  songAdapters,
   canHostPlay,
   CLOCK_MIN_SAMPLES,
   startBlockers,
@@ -1205,12 +1206,14 @@ function renderHostControls(state, readyAdapters) {
 
   if (!state.safety?.armed && state.transport.status === "stopped") {
     setText(elements.hostWarning, "Arm playback before pressing Play.");
-  } else if (!readyAdapters.length) {
-    setText(elements.hostWarning, "Play is waiting for a ready desktop adapter.");
   } else if (state.transport.status !== "stopped") {
     setText(elements.hostWarning, "Transport is active. Stop before scheduling another play.");
   } else if (!playAvailable) {
     setText(elements.hostWarning, playBlockedReason(state, { allowPartialStart }));
+  } else if (!readyAdapters.length) {
+    setText(elements.hostWarning, songAdapters(state).length
+      ? "Ready to start without the desktop adapters that are not ready."
+      : "Ready: no desktop adapter for this song - Play runs the room clock for every connected device.");
   } else {
     setText(elements.hostWarning, "Ready to control: " + readyAdapters.map((device) => device.status.app).join(", "));
   }

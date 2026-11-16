@@ -660,6 +660,24 @@ export function startBlockers(state) {
 }
 
 /**
+ * Desktop adapters that would play the current song: every connected adapter
+ * while no song is selected, otherwise those whose app the song uses.
+ */
+export function songAdapters(state) {
+  const song = state?.currentSong?.song;
+  return (state?.clients ?? []).filter((device) => {
+    if (device.role !== "desktop-adapter") return false;
+    if (!song) return true;
+    const app = device.status?.app ?? (device.capabilities ?? []).find((capability) => capability.canPlay && capability.canStop)?.app;
+    return helixAppAppliesToSong(app, song);
+  });
+}
+
+/**
+ * Play does not need a desktop adapter: a room of only the host and
+ * companions (phones, score views) still runs the shared clock, count-in and
+ * score following. Adapters that are connected and play the song are waited
+ * for (startBlockers) unless the host allows a partial start.
  * @param {{ allowPartialStart?: boolean }} [options] allowPartialStart: start
  * with whichever devices are ready instead of waiting for every one.
  */
@@ -669,7 +687,6 @@ export function canHostPlay(state, options = {}) {
     state &&
       state.safety?.armed &&
       state.transport.status === "stopped" &&
-      getReadyAdapters(state).length > 0 &&
       !tempoBlockedReason(state) &&
       (allowPartialStart || !startBlockers(state).length)
   );
@@ -683,9 +700,6 @@ export function playBlockedReason(state, options = {}) {
   if (!state.safety?.armed) return "Arm playback before pressing Play.";
   const tempoReason = tempoBlockedReason(state);
   if (tempoReason) return tempoReason;
-  if (!getReadyAdapters(state).length) {
-    return "No ready desktop adapter yet. Connect MuseScore or Songsterr before starting.";
-  }
   const blockers = allowPartialStart ? [] : startBlockers(state);
   if (blockers.length) {
     const more = blockers.length > 1 ? ` (+${blockers.length - 1} more)` : "";
@@ -741,24 +755,29 @@ export function describeAutoRun(settings) {
 // adapters. Kept pure so the timing branches can be unit tested without a DOM.
 //   - "wait":    keep waiting (transport busy, adapter not ready, or still settling)
 //   - "play":    the song is loaded enough to arm and start
-//   - "timeout": no adapter ever became ready; the caller should abort the run
+//   - "timeout": the song's adapters never became ready; the caller should abort the run
 // `needsAdapter` is false for songs nothing can open (e.g. plain "other" notes),
 // in which case there is nothing to load and playback can start immediately.
+// The same goes for a room with no adapter for the song at all (only the host
+// and companions): nothing loads, so there is nothing to wait for.
 export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, timeoutMs, allowPartialStart = false }) {
   if (state?.transport?.status && state.transport.status !== "stopped") {
     return "wait";
   }
 
-  if (!needsAdapter) {
+  const adapters = songAdapters(state);
+  if (!needsAdapter || !adapters.length) {
     return "play";
   }
 
   // An auto-started song goes through the same "every device" rule as a
   // pressed Play, so the band never auto-starts with one member left behind.
+  // Even with a partial start allowed, it waits until at least one of the
+  // song's adapters has loaded it rather than starting while all still load.
   // A device that has not applied the song's tempo yet is waited for as well:
   // the room turns a Play down until it has, whoever allows a partial start.
   if (
-    !getReadyAdapters(state).length ||
+    !adapters.some((device) => device.status?.ready) ||
     tempoBlockedReason(state) ||
     (!allowPartialStart && startBlockers(state).length)
   ) {
@@ -827,9 +846,8 @@ function isEditableHotkeyTarget(target) {
 export function collectWarnings(state, readyAdapters, desktopAdapters) {
   const warnings = [];
 
-  if (!desktopAdapters.length) {
-    warnings.push("No desktop adapters connected. Play will not control MuseScore or Songsterr yet.");
-  } else if (!readyAdapters.length) {
+  // No adapters at all is a valid room (host + companions only), not a warning.
+  if (desktopAdapters.length && !readyAdapters.length) {
     warnings.push("Desktop adapters are connected, but none are ready.");
   }
 

@@ -12,8 +12,8 @@ const ROOM_CODE = "E2E0FF";
  * Browser-level smoke test for the host workflow. Everything here runs against
  * the real coordinator and the real served host page, so it covers the wiring
  * that unit tests structurally can't: DOM ids ↔ app.js ↔ WebSocket ↔ room.
- * A fake desktop adapter joins over a raw WebSocket so Play becomes available
- * without any real Songsterr/MuseScore.
+ * A fake desktop adapter joins over a raw WebSocket so Play has a device to
+ * control without any real Songsterr/MuseScore.
  */
 async function joinFakeAdapter(name: string): Promise<WebSocket> {
   const adapter = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}`);
@@ -55,7 +55,7 @@ test("host connects, edits the setlist, and schedules a play", async ({ page }) 
   const exported = JSON.parse(await readFile(exportPath!, "utf8"));
   expect(exported).toMatchObject({ version: 2, songs: [{ title: "E2E Smoke Song", tempoPercent: 92 }] });
 
-  // A fake ready adapter joins; without one, Play stays blocked.
+  // A fake ready adapter joins, so the play command has a device to reach.
   const adapter = await joinFakeAdapter("E2E fake adapter");
 
   try {
@@ -86,6 +86,43 @@ test("host connects, edits the setlist, and schedules a play", async ({ page }) 
       .toBe("stopped");
   } finally {
     adapter.close();
+  }
+});
+
+test("host plays with no desktop adapter, only a companion", async ({ page }) => {
+  await page.goto(`/host?token=${HOST_TOKEN}`);
+  await expect(page.locator("#roomCode")).toHaveText(new RegExp(ROOM_CODE));
+
+  const companion = new WebSocket(`ws://127.0.0.1:${PORT}/ws?token=${TOKEN}`);
+  await new Promise<void>((resolve, reject) => {
+    companion.once("open", () => resolve());
+    companion.once("error", reject);
+  });
+  companion.send(JSON.stringify({ type: "clientHello", deviceName: "E2E phone", role: "companion", capabilities: [] }));
+
+  try {
+    await expect(page.locator("#devices")).toContainText("E2E phone");
+    const room = await (await page.request.get("/api/room")).json();
+    expect(room.clients.some((client: { role: string }) => client.role === "desktop-adapter")).toBe(false);
+
+    if ((await page.locator("#armButton").getAttribute("aria-pressed")) !== "true") {
+      await page.click("#armButton");
+    }
+    await expect(page.locator("#playButton")).toBeEnabled();
+    await expect(page.locator("#hostWarning")).toContainText("no desktop adapter");
+    await page.click("#playButton");
+
+    await expect
+      .poll(async () => (await (await page.request.get("/api/room")).json()).transport.status)
+      .toMatch(/scheduled|running/);
+
+    await expect(page.locator("#stopButton")).toBeEnabled();
+    await page.click("#stopButton");
+    await expect
+      .poll(async () => (await (await page.request.get("/api/room")).json()).transport.status)
+      .toBe("stopped");
+  } finally {
+    companion.close();
   }
 });
 
