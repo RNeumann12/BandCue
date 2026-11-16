@@ -1477,6 +1477,33 @@ body[data-transport="running"] .countdown {
   gap: 8px;
 }
 
+/* A page whose image failed to load and is being asked for again (keepLoading
+   in score-view.js): said on the page itself, where the notes should be. */
+.score-page-retry {
+  position: absolute;
+  top: 12%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 90%;
+  border-radius: 999px;
+  padding: 6px 14px;
+  background: rgba(20, 19, 15, 0.82);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
+
+.score-legend {
+  position: relative;
+}
+
+.score-legend .score-page-retry {
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
 /* Page numbers: shown on page turns, where the next page may sit on the left. */
 .score-page-number {
   display: none;
@@ -1723,4 +1750,115 @@ body.score-focus .connection-banner {
     gap: 8px;
     padding: 6px;
   }
+}
+
+/* Notices: what just happened (a refused request, a pedal's hotkey). Fixed to
+   the bottom of the window so they are seen wherever the page is scrolled to,
+   also over the score in "Notes only". */
+.notices {
+  position: fixed;
+  z-index: 30;
+  left: 50%;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: grid;
+  gap: 8px;
+  width: min(560px, calc(100vw - 24px));
+  pointer-events: none;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 2px solid var(--ink);
+  border-left: 8px solid var(--pending);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 10px 8px 10px 12px;
+  box-shadow: 4px 4px 0 var(--ink);
+  font-weight: 800;
+  pointer-events: auto;
+}
+
+.notice.error {
+  border-left-color: var(--bad);
+}
+
+.notice > span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.notice-close {
+  flex: none;
+  min-width: 36px;
+  min-height: 36px;
+  margin: -4px 0;
+  border: 0;
+  border-radius: 6px;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  font-size: 1.3rem;
+  line-height: 1;
+}
+
+.notice-close:hover:not(:disabled),
+.notice-close:active:not(:disabled) {
+  transform: none;
+  box-shadow: none;
+  color: var(--ink);
+}
+
+.recent-messages {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.recent-messages summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.recent-messages ul {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recent-messages li.error {
+  color: var(--bad);
+}
+
+.recent-messages time {
+  font-family: var(--font-display);
+}
+
+.page-problem-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border-left-color: var(--warn);
+}
+
+.page-problem-banner > span:first-child {
+  flex: 1 1 240px;
+  overflow-wrap: anywhere;
+}
+
+.page-problem-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Stop with nothing known to be playing: still there (see
+   updateStopAvailability in app.js), but it does not ask to be pressed. */
+#stopButton[data-idle="true"]:not(:disabled) {
+  opacity: 0.7;
 }

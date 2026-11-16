@@ -213,9 +213,14 @@ every transport request. Summary of the rules:
 - **Play** requires `safety.armed === true`, requires the room to be `stopped`, and — in
   `host-only` mode — requires the host. A non-host must be a *ready* adapter with both
   `canPlay` and `canStop` capabilities.
-- **Stop** requires the room to be non-stopped. Permission depends on control mode:
-  `host-only` (host only), `leader-stop` (host or the current leader), `everyone-can-stop` (anyone).
-- Accepting a play **disarms** safety, so the host must re-Arm for the next start.
+- **Stop** of a scheduled or running room depends on control mode: `host-only` (host only),
+  `leader-stop` (host or the current leader), `everyone-can-stop` (anyone).
+- A **host** may also send Stop while the room is already stopped. The room only knows what it last
+  decided: after a coordinator restart mid-song it is "stopped" while the devices play on. The Stop
+  command goes to every device; an adapter's Stop is a no-op on a player that is not playing.
+- Accepting a play or a stop **disarms** safety, so the host must re-Arm for the next start.
+- The room can only be **armed while it is stopped**. The setlist auto-start does not arm at all:
+  it sends one play request flagged `arm`, so a refused auto-start leaves the room disarmed.
 
 Host-only mutations (`setlistUpdate`, `currentSongUpdate`, `safetyUpdate`, `calibrationUpdate`,
 `openSongRequest`) are rejected with an `error` message if they come from a non-host client.

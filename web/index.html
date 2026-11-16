@@ -23,6 +23,13 @@
         This link follows the room but cannot control it. To run the rehearsal, open the
         <strong>Host controls</strong> link the BandCue coordinator shows when it starts.
       </div>
+      <div class="connection-banner page-problem-banner" id="pageProblemBanner" role="alert" hidden>
+        <span id="pageProblemText"></span>
+        <span class="page-problem-actions">
+          <button class="secondary compact" id="pageReloadButton" type="button">Reload</button>
+          <button class="secondary compact" id="pageProblemDismissButton" type="button">Dismiss</button>
+        </span>
+      </div>
       <section class="mast">
         <div>
           <p class="eyebrow">BandCue rehearsal room</p>
@@ -238,6 +245,10 @@
           <kbd>Ctrl+Alt+T</kbd> Auto-start
         </div>
         <p class="host-warning" id="hostWarning"></p>
+        <details class="recent-messages" id="recentMessages" hidden>
+          <summary>Recent messages</summary>
+          <ul id="recentMessagesList"></ul>
+        </details>
       </section>
 
       <section class="warnings" id="warnings" hidden></section>
@@ -376,6 +387,9 @@
 
       </section>
     </main>
+    <!-- What just happened (a refused request, a pedal's hotkey): stays on
+         screen for a few seconds wherever the page is scrolled to. -->
+    <div class="notices" id="notices" aria-live="polite" hidden></div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

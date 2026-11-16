@@ -58,6 +58,107 @@ describe("RoomController", () => {
     room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1050 }, 1050);
     expect(room.getState(1050).transport.status).toBe("scheduled");
   });
+
+  it("arms only while stopped, so a song cannot end with the room armed", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const hostMessages: string[] = [];
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello", deviceName: "Host", role: "host", capabilities: []
+    }, 1000);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1010 }, 1010);
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1020 }, 1020);
+    expect(room.getState(1020)).toMatchObject({ transport: { status: "scheduled" }, safety: { armed: false } });
+
+    // A second host page's auto-start arrives a moment after the first one's.
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, controlMode: "leader-stop", updatedAt: 1030 }, 1030);
+    expect(room.getState(1030).safety).toMatchObject({ armed: false, controlMode: "leader-stop" });
+    expect(lastError(hostMessages)).toContain("only be armed while it is stopped");
+
+    // Disarming is always allowed, and so is arming once the song is over.
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: false, updatedAt: 1040 }, 1040);
+    room.handleMessage(host.id, { type: "transportRequest", action: "stop", requestedAt: 1050 }, 1050);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1060 }, 1060);
+    expect(room.getState(1060).safety.armed).toBe(true);
+  });
+
+  it("starts a host's arm-and-play in one step and leaves nothing armed when it is turned down", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const hostMessages: string[] = [];
+    const host = room.addClient(fakeSocket(hostMessages), {
+      type: "clientHello", deviceName: "Host", role: "host", capabilities: []
+    }, 1000);
+    const adapter = room.addClient(undefined, {
+      type: "clientHello", deviceName: "Guitar", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true, canSetTempo: true }]
+    }, 1000);
+    room.handleMessage(adapter.id, { type: "adapterStatus", app: "songsterr", ready: true }, 1005);
+    room.handleMessage(host.id, { type: "safetyUpdate", controlMode: "everyone-can-stop", updatedAt: 1006 }, 1006);
+    room.handleMessage(host.id, { type: "currentSongUpdate", updatedAt: 1010, song: {
+      id: "zombie", title: "Zombie", sourceType: "songsterr", source: "https://www.songsterr.com/a/wsa/x-s1", tempoPercent: 92
+    } }, 1010);
+
+    // The adapter has not applied 92% yet: the auto-start is refused...
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1020, arm: true }, 1020);
+    expect(lastError(hostMessages)).toContain("92%");
+    // ...and the room is not left armed for the next stray Play.
+    expect(room.getState(1020)).toMatchObject({ transport: { status: "stopped" }, safety: { armed: false } });
+
+    // Only a host may arm that way.
+    room.handleMessage(adapter.id, {
+      type: "adapterStatus", app: "songsterr", ready: true,
+      tempo: { requestedPercent: 92, appliedPercent: 92, state: "applied" }
+    }, 1030);
+    room.handleMessage(adapter.id, { type: "transportRequest", action: "play", requestedAt: 1040, arm: true }, 1040);
+    expect(room.getState(1040).transport.status).toBe("stopped");
+
+    room.handleMessage(host.id, { type: "transportRequest", action: "play", requestedAt: 1050, arm: true }, 1050);
+    expect(room.getState(1050)).toMatchObject({ transport: { status: "scheduled" }, safety: { armed: false } });
+  });
+
+  it("sends a host's Stop to every device even when the room already says stopped", () => {
+    const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+    const host = room.addClient(undefined, { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
+    const adapterMessages: string[] = [];
+    const adapter = room.addClient(fakeSocket(adapterMessages), {
+      type: "clientHello", deviceName: "Guitar", role: "desktop-adapter",
+      capabilities: [{ app: "songsterr", canPlay: true, canStop: true }]
+    }, 1000);
+    // A coordinator that restarted mid-song: stopped, sequence 0, device playing.
+    room.handleMessage(adapter.id, { type: "adapterStatus", app: "songsterr", ready: true, playback: "playing" }, 1010);
+    room.handleMessage(host.id, { type: "safetyUpdate", armed: true, updatedAt: 1015 }, 1015);
+
+    room.handleMessage(host.id, { type: "transportRequest", action: "stop", requestedAt: 1020 }, 1020);
+
+    const command = adapterMessages.map((raw) => JSON.parse(raw)).find((message) => message.type === "transportCommand");
+    expect(command).toMatchObject({ action: "stop", sequenceId: 1, scheduledServerTime: 1020 });
+    expect(room.getState(1020)).toMatchObject({
+      transport: { status: "stopped", sequenceId: 1, stopReason: "manual" },
+      // Stop makes the room safe: it does not stay armed.
+      safety: { armed: false }
+    });
+
+    // The adapter itself may not: nothing in the room is running for it to stop.
+    room.handleMessage(adapter.id, { type: "transportRequest", action: "stop", requestedAt: 1030 }, 1030);
+    expect(room.getState(1030).transport.sequenceId).toBe(1);
+  });
+
+  it("logs a page's script errors, a few per connection", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const room = new RoomController("ABC123", "http://room", "http://host", 1500);
+      const tablet = room.addClient(undefined, {
+        type: "clientHello", deviceName: "Drums tablet", role: "companion", capabilities: []
+      }, 1000);
+      for (let index = 0; index < 8; index += 1) {
+        room.handleMessage(tablet.id, { type: "clientError", message: `TypeError: boom ${index}` }, 1010 + index);
+      }
+      expect(warn).toHaveBeenCalledTimes(5);
+      expect(warn.mock.calls[0]?.[0]).toBe("[page] Drums tablet (companion): TypeError: boom 0");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("records which song a play started, so a later song change cannot borrow its downbeat", () => {
     const room = new RoomController("ABC123", "http://room", "http://host", 1500);
     const host = room.addClient(undefined, { type: "clientHello", deviceName: "Host", role: "host", capabilities: [] }, 1000);
@@ -2284,6 +2385,12 @@ describe("RoomController external cue", () => {
     expect(parsed(hostMessages, "externalCue")).toHaveLength(1);
   });
 });
+
+/** The text of the latest `error` message a fake socket received. */
+function lastError(messages: string[]): string {
+  const errors = messages.map((raw) => JSON.parse(raw)).filter((message) => message.type === "error");
+  return String(errors.at(-1)?.message ?? "");
+}
 
 function fakeSocket(messages: string[]): WebSocket {
   return {

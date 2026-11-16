@@ -736,6 +736,27 @@ describe("setlistLoadDecision", () => {
     expect(setlistLoadDecision(syncingState, { ...options, elapsedMs: 20000 })).toBe("timeout");
     expect(setlistLoadDecision(syncingState, { ...options, elapsedMs: 4500, allowPartialStart: true })).toBe("play");
   });
+
+  it("waits for a device that has not applied the song's tempo, partial start or not", () => {
+    // The room turns a Play down until every device of the song runs at the
+    // song's tempo, so an auto-start sent earlier would only be refused.
+    const song = { id: "s", title: "Slow one", sourceType: "musescore", source: "Slow.mscz", tempoPercent: 80 };
+    const withTempo = (tempo: Record<string, unknown> | undefined) => ({
+      transport: { status: "stopped" },
+      currentSong: { song },
+      clients: [readyAdapter({
+        capabilities: [{ app: "musescore", canPlay: true, canStop: true, canSetTempo: true }],
+        status: { ready: true, app: "musescore", tempo }
+      })]
+    });
+    const pending = withTempo({ requestedPercent: 80, state: "pending" });
+    expect(setlistLoadDecision(pending, { ...options, elapsedMs: 4500 })).toBe("wait");
+    expect(setlistLoadDecision(pending, { ...options, elapsedMs: 4500, allowPartialStart: true })).toBe("wait");
+    expect(setlistLoadDecision(pending, { ...options, elapsedMs: 20000 })).toBe("timeout");
+
+    const applied = withTempo({ requestedPercent: 80, appliedPercent: 80, state: "applied" });
+    expect(setlistLoadDecision(applied, { ...options, elapsedMs: 4500 })).toBe("play");
+  });
 });
 
 describe("shouldAdvanceSetlistOnStop", () => {

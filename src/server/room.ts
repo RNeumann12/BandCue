@@ -92,6 +92,7 @@ const AUTO_STOP_RECHECK_MS = 2_000;
 const LIVENESS_SWEEP_INTERVAL_MS = 4_000;
 export const MAX_SETLIST_SONGS = 500;
 const MAX_SCORE_IMPORT_JOBS = 20;
+const MAX_CLIENT_ERROR_LOGS = 5;
 
 /**
  * What the coordinator keeps across restarts: the setlist and the current song.
@@ -149,6 +150,8 @@ export class RoomController {
   // Last logged "<sequence>:<firedAt>" per client, to keep the per-play timing
   // log to one line per executed command.
   private readonly lastTimingLogByClientId = new Map<string, string>();
+  /** Script errors a page reported, by client id (see logClientError). */
+  private readonly clientErrorCounts = new Map<string, number>();
   private persistedStateListener?: (state: PersistedRoomState) => void;
   /** Each MuseScore helper's latest score-view export list, by client id. */
   private readonly scoreReports = new Map<string, ScoreExportReport[]>();
@@ -244,6 +247,7 @@ export class RoomController {
    */
   removeClient(clientId: string): void {
     this.clients.delete(clientId);
+    this.clientErrorCounts.delete(clientId);
     this.scoreReports.delete(clientId);
     this.outdatedExporterLogged.delete(clientId);
     this.broadcastState();
@@ -377,6 +381,25 @@ export class RoomController {
 
     if (message.type === "externalCue") {
       this.handleExternalCue(client, message, now);
+      return;
+    }
+
+    if (message.type === "clientError") {
+      this.logClientError(client, message.message);
+    }
+  }
+
+  /**
+   * A web page reporting a script error. The page shows it to whoever stands
+   * in front of it; this line is for reading afterwards, on a coordinator
+   * nobody watches during a rehearsal. A few per connection, so a page failing
+   * on every frame cannot flood the log.
+   */
+  private logClientError(client: RoomClientSummary, message: string): void {
+    const count = (this.clientErrorCounts.get(client.id) ?? 0) + 1;
+    this.clientErrorCounts.set(client.id, count);
+    if (count <= MAX_CLIENT_ERROR_LOGS) {
+      console.warn(`[page] ${client.deviceName} (${client.role}): ${trimText(message, 300)}`);
     }
   }
 
@@ -1022,8 +1045,21 @@ export class RoomController {
       return;
     }
 
+    // Arming is "the next Play may start the band". While a song is scheduled
+    // or running there is no next Play to allow yet, and an arm accepted now
+    // would outlive the song: the room would sit armed afterwards with nobody
+    // having armed it, one stray hotkey away from starting. (Two host pages
+    // that both auto-start the next song got it there.)
+    const armRefused = update.armed === true && this.transport.status !== "stopped";
+    if (armRefused) {
+      this.send(client, {
+        type: "error",
+        message: "The room can only be armed while it is stopped."
+      });
+    }
+
     this.safety = {
-      armed: update.armed ?? this.safety.armed,
+      armed: armRefused ? this.safety.armed : update.armed ?? this.safety.armed,
       controlMode: update.controlMode ?? this.safety.controlMode,
       leaderId: client.id,
       updatedAt: update.updatedAt || now
@@ -1055,7 +1091,10 @@ export class RoomController {
       request.action,
       now,
       delayMs,
-      this.safety
+      // A host's auto-start arms and plays in one request (see TransportRequest.arm).
+      request.action === "play" && request.arm === true && client.role === "host"
+        ? { ...this.safety, armed: true }
+        : this.safety
     );
 
     if (!decision.accepted || !decision.nextState) {
@@ -1086,7 +1125,9 @@ export class RoomController {
       action: request.action,
       leaderId: this.transport.leaderId ?? client.id,
       sequenceId: this.transport.sequenceId,
-      scheduledServerTime: this.transport.scheduledServerTime ?? now,
+      // A Stop is for now. (The state of a room stopped twice keeps the first
+      // stop's time; see decideTransportRequest.)
+      scheduledServerTime: request.action === "stop" ? now : this.transport.scheduledServerTime ?? now,
       // Rehearsal sync: hitting play should start every device from the top of
       // the song so the band stays together. Each adapter performs the reset
       // through its platform's official seek API on a best-effort basis and

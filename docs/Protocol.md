@@ -51,7 +51,7 @@ client                                   server
 
 A `ClientMessage` is one of: `clientHello`, `clockSync`, `clockStatus`, `calibrationUpdate`,
 `adapterStatus`, `currentSongUpdate`, `setlistUpdate`, `safetyUpdate`, `openSongRequest`,
-`transportRequest`.
+`transportRequest`, `externalCue`, `clientError`.
 
 ### `clientHello`
 First message after connecting. Declares who you are and what you can do.
@@ -144,6 +144,11 @@ Arms/disarms and/or sets the control mode. Omitted fields keep their current val
 { "type": "safetyUpdate", "armed": true, "controlMode": "leader-stop", "updatedAt": 1718900000000 }
 ```
 
+`armed: true` is only accepted while the transport is stopped; otherwise the sender gets an `error`
+and `armed` keeps its value (a `controlMode` in the same message is still applied). An arm accepted
+during a song would outlive it and leave the room armed with nobody having armed it. Disarming is
+always accepted.
+
 ### `openSongRequest` *(host only)*
 Asks adapters to open the current song's source. Rejected unless the current song applies to
 Songsterr or MuseScore. The server answers with a broadcast `openSongCommand`.
@@ -161,9 +166,27 @@ an `error`, on acceptance everyone receives a `transportCommand` + new `roomStat
   "type": "transportRequest",
   "action": "play",
   "requestedAt": 1718900000000,
-  "cueAtServerTime": 1718899999955  // optional; room time of the external cue,
+  "cueAtServerTime": 1718899999955, // optional; room time of the external cue,
                                     // see Helix sync under SetlistSong
+  "arm": true                       // optional; host only, Play only: arm and start in one step
 }
+```
+
+`arm` is what the host page's setlist auto-start sends. The room's `armed` flag is not changed by
+it, so a Play that is turned down leaves nothing armed. From anyone but a host it is ignored.
+
+A **host** may send `stop` while the room is already stopped. The coordinator then broadcasts the
+Stop command under a new sequence: the room's "stopped" is what the room last decided, not what
+every device is doing (a coordinator restarted mid-song, a player started by hand). The room state
+keeps the time of the earlier stop. From anyone else, a stop of a stopped room is turned down.
+
+### `clientError`
+A script error on a web page, for the coordinator's log (`[page] <device> (<role>): <message>`). It
+never changes room state. The message is cut to 300 characters and the coordinator logs at most
+five per connection.
+
+```jsonc
+{ "type": "clientError", "message": "TypeError: Cannot read properties of null (reading 'map')" }
 ```
 
 ### `externalCue`

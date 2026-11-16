@@ -319,7 +319,30 @@ export function decideTransportRequest(
   }
 
   if (current.status === "stopped") {
-    return { accepted: false, reason: "Playback is already stopped." };
+    // The room's "stopped" is what the room last decided, not what every device
+    // is doing: a coordinator restarted mid-song comes back stopped while the
+    // band's devices play on, and so does a room whose duration ran out before
+    // a device that reports no playback state did. A host can therefore always
+    // send Stop. It is safe to repeat: every adapter's Stop is a no-op on a
+    // player that is not playing.
+    if (client.role !== "host") {
+      return { accepted: false, reason: "Playback is already stopped." };
+    }
+    return {
+      accepted: true,
+      nextState: {
+        status: "stopped",
+        leaderId: client.id,
+        action,
+        sequenceId: current.sequenceId + 1,
+        // Where an earlier stop of this run left the song is still where it
+        // stopped; a second Stop must not move it (the score cursor reads it).
+        scheduledServerTime: current.action === "stop" && current.scheduledServerTime !== undefined
+          ? current.scheduledServerTime
+          : now,
+        stopReason: "manual"
+      }
+    };
   }
 
   if (controlMode === "host-only" && client.role !== "host") {

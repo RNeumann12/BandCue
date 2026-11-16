@@ -60,6 +60,19 @@ const FOLLOW_ANIMATION_MS = 420;
 const FOLLOW_PAUSE_MS = 5_000;
 // After a failed load, how long before that score is tried again.
 const LOAD_RETRY_MS = 3_000;
+// A request for a manifest or a timing map that has not answered by now is
+// given up and tried again: on a Wi-Fi that swallows packets it would otherwise
+// leave "Loading the notes..." standing for as long as the browser cares to wait.
+const FETCH_TIMEOUT_MS = 10_000;
+// A page image that failed to load is asked for again: first after this long,
+// then doubling, up to the cap.
+const IMAGE_RETRY_BASE_MS = 1_000;
+const IMAGE_RETRY_MAX_MS = 8_000;
+// How long after a score appears its remaining pages start being fetched
+// ahead, how long a failed one waits, and how often one is tried.
+const FETCH_AHEAD_START_MS = 1_200;
+const FETCH_AHEAD_RETRY_MS = 4_000;
+const FETCH_AHEAD_ATTEMPTS = 6;
 // Manifests and timing maps kept in memory (a set is rarely longer).
 const CACHE_LIMIT = 24;
 // Songs whose part choice is remembered.
@@ -206,6 +219,17 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
   /** @type {HTMLImageElement[]} kept so the browser finishes and keeps them */
   let preloaded = [];
   let preloadedKey = "";
+  /**
+   * Page images (and the drum key) that failed to load and wait for another
+   * go. A browser never asks again for an <img> that failed, so a page fetched
+   * during a Wi-Fi blip used to stay blank for the rest of the song.
+   *
+   * @type {Map<HTMLImageElement, { retry: () => void, timer: ReturnType<typeof setTimeout> }>}
+   */
+  const failedImages = new Map();
+  /** Counts up with every score shown, so an older fetch-ahead stops. */
+  let fetchAheadRun = 0;
+  let online = true;
 
   const cursor = document.createElement("div");
   cursor.className = "score-cursor";
@@ -354,6 +378,14 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     el.connection.hidden = !offline;
     el.connection.textContent = offline ? "Offline – reconnecting" : "";
     root.classList.toggle("is-offline", offline);
+    const back = !online && !offline;
+    online = !offline;
+    if (back) {
+      // The room answers again: do not sit out the rest of a retry wait.
+      for (const entry of [...failedImages.values()]) {
+        entry.retry();
+      }
+    }
   }
 
   /** @param {string} scoreId */
@@ -426,6 +458,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     if (!part) {
       return;
     }
+    forgetFailedImages();
     el.pages.replaceChildren();
     const pages = part.pages.map((file, index) => {
       const size = timing.pages[index] ?? timing.pages[0] ?? { width: 9924, height: 14028 };
@@ -446,9 +479,11 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       number.textContent = String(index + 1);
       number.setAttribute("aria-hidden", "true");
       page.append(img, number);
+      keepLoading(img, page, `Page ${index + 1}`);
       el.pages.append(page);
       return { el: page, img, width: size.width, height: size.height };
     });
+    fetchPagesAhead(scoreId, part.pages);
     const legend = part.legend ? drumKey(scoreId, part.legend, pages[0]?.width ?? 9924) : undefined;
     if (legend) {
       el.pages.prepend(legend);
@@ -512,7 +547,103 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     img.style.aspectRatio = `${legend.width} / ${legend.height}`;
     img.style.width = `${Math.min(100, (legend.width / pageWidth) * 100)}%`;
     box.append(label, img);
+    keepLoading(img, box, "Drum key");
     return box;
+  }
+
+  /**
+   * Asks again for an image that failed to load, for as long as it is on
+   * screen, and says so on the page meanwhile.
+   *
+   * @param {HTMLImageElement} img with its `src` set
+   * @param {HTMLElement} holder the page (or the drum key) the image sits in
+   * @param {string} label "Page 3"
+   */
+  function keepLoading(img, holder, label) {
+    const url = img.src;
+    let attempts = 0;
+    const note = document.createElement("span");
+    note.className = "score-page-retry";
+    note.setAttribute("role", "status");
+    note.hidden = true;
+    holder.append(note);
+
+    const retry = () => {
+      const entry = failedImages.get(img);
+      if (!entry) {
+        return;
+      }
+      clearTimeout(entry.timer);
+      failedImages.delete(img);
+      if (img.isConnected) {
+        // It was wanted once already; do not wait for it to scroll near again.
+        img.loading = "eager";
+        img.src = url;
+      }
+    };
+    img.addEventListener("error", () => {
+      if (!img.isConnected) {
+        return;
+      }
+      attempts += 1;
+      note.textContent = `${label} – loading again…`;
+      note.hidden = false;
+      holder.classList.add("is-retrying");
+      const delay = Math.min(IMAGE_RETRY_MAX_MS, IMAGE_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 4));
+      clearTimeout(failedImages.get(img)?.timer);
+      failedImages.set(img, { retry, timer: setTimeout(retry, delay) });
+    });
+    img.addEventListener("load", () => {
+      attempts = 0;
+      note.hidden = true;
+      holder.classList.remove("is-retrying");
+    });
+  }
+
+  function forgetFailedImages() {
+    for (const entry of failedImages.values()) {
+      clearTimeout(entry.timer);
+    }
+    failedImages.clear();
+  }
+
+  /**
+   * Fetches every page of the part on screen into the browser's cache, one
+   * after the other. Pages are only shown as the cursor nears them, and a
+   * connection that drops mid-song used to leave the next one blank; with the
+   * files already here (they never change under their id, and are served as
+   * such) there is nothing left to ask the room for. `data-pages-fetched` on
+   * the view says how far it got ("3/3").
+   *
+   * @param {string} scoreId
+   * @param {string[]} files the part's page files
+   */
+  function fetchPagesAhead(scoreId, files) {
+    const run = ++fetchAheadRun;
+    let fetched = 0;
+    root.dataset.pagesFetched = `0/${files.length}`;
+    void (async () => {
+      await sleep(FETCH_AHEAD_START_MS);
+      for (const file of files) {
+        for (let attempt = 1; attempt <= FETCH_AHEAD_ATTEMPTS; attempt += 1) {
+          if (run !== fetchAheadRun) {
+            return;
+          }
+          try {
+            await fetchToCache(scoreFileUrl(scoreId, file));
+            fetched += 1;
+            break;
+          } catch {
+            // The page image itself still loads (and retries) when it is needed.
+            await sleep(FETCH_AHEAD_RETRY_MS);
+          }
+        }
+        if (run !== fetchAheadRun) {
+          return;
+        }
+        root.dataset.pagesFetched = `${fetched}/${files.length}`;
+      }
+    })();
   }
 
   /** Page mode: the key sits on page 1, across its width, while page 1 is shown. */
@@ -533,6 +664,9 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       return;
     }
     loaded = undefined;
+    fetchAheadRun += 1;
+    delete root.dataset.pagesFetched;
+    forgetFailedImages();
     el.pages.replaceChildren();
     el.partSelect.replaceChildren();
     el.position.textContent = "";
@@ -1659,13 +1793,53 @@ async function exitFullscreen() {
   }
 }
 
+/**
+ * `fetch` that gives up: the response, body included, must be there within
+ * `timeoutMs`. (AbortSignal.timeout would do, but older iPads lack it.)
+ *
+ * @template T
+ * @param {string} url
+ * @param {number} timeoutMs
+ * @param {(response: Response) => Promise<T>} read
+ * @returns {Promise<T>}
+ */
+async function fetchWithin(url, timeoutMs, read) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    return await read(response);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("the coordinator did not answer in time");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** @param {string} url */
 async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-  return response.json();
+  return fetchWithin(url, FETCH_TIMEOUT_MS, (response) => response.json());
+}
+
+/**
+ * Reads a file to its end and throws it away: what counts is that the browser
+ * now has it in its cache.
+ *
+ * @param {string} url
+ */
+async function fetchToCache(url) {
+  await fetchWithin(url, FETCH_TIMEOUT_MS * 2, (response) => response.arrayBuffer());
+}
+
+/** @param {number} ms */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** @param {number} value */

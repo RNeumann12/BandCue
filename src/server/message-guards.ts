@@ -159,8 +159,13 @@ export function sanitizeClientMessage(value: unknown): ClientMessage | undefined
             type: "transportRequest",
             action: value.action as TransportAction,
             requestedAt: isFiniteNumber(value.requestedAt) ? value.requestedAt : 0,
-            cueAtServerTime: isFiniteNumber(value.cueAtServerTime) ? value.cueAtServerTime : undefined
+            cueAtServerTime: isFiniteNumber(value.cueAtServerTime) ? value.cueAtServerTime : undefined,
+            ...(value.arm === true && value.action === "play" ? { arm: true } : {})
           }
+        : undefined;
+    case "clientError":
+      return typeof value.message === "string" && value.message.trim()
+        ? { type: "clientError", message: trimText(value.message, 300) }
         : undefined;
     case "externalCue":
       // Without a usable cue instant there is nothing to anchor a count-in to,

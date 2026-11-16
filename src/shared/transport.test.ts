@@ -63,6 +63,41 @@ describe("transport decisions", () => {
     expect(decision.accepted).toBe(false);
   });
 
+  it("lets a host stop a room that already says stopped", () => {
+    // A coordinator restarted mid-song: the room is stopped, the devices are not.
+    const decision = decideTransportRequest(stopped, client({ id: "host", role: "host" }), "stop", 20_000);
+
+    expect(decision.accepted).toBe(true);
+    expect(decision.nextState).toEqual({
+      status: "stopped",
+      leaderId: "host",
+      action: "stop",
+      sequenceId: 1,
+      scheduledServerTime: 20_000,
+      stopReason: "manual"
+    });
+  });
+
+  it("keeps where the song stopped when a host stops a stopped room again", () => {
+    const stoppedEarlier: TransportState = {
+      status: "stopped",
+      action: "stop",
+      sequenceId: 7,
+      scheduledServerTime: 15_000,
+      stopReason: "auto-playback-ended"
+    };
+    const decision = decideTransportRequest(stoppedEarlier, client({ id: "host", role: "host" }), "stop", 20_000);
+
+    expect(decision.nextState).toMatchObject({ sequenceId: 8, scheduledServerTime: 15_000, stopReason: "manual" });
+  });
+
+  it("still turns down a stop of a stopped room from anyone but a host", () => {
+    for (const controlMode of ["host-only", "leader-stop", "everyone-can-stop"] as const) {
+      const decision = decideTransportRequest(stopped, client(), "stop", 20_000, 1500, { controlMode });
+      expect(decision).toEqual({ accepted: false, reason: "Playback is already stopped." });
+    }
+  });
+
   it("accepts stop from host", () => {
     const running: TransportState = {
       status: "running",

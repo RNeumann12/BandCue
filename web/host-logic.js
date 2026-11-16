@@ -755,7 +755,13 @@ export function setlistLoadDecision(state, { needsAdapter, elapsedMs, settleMs, 
 
   // An auto-started song goes through the same "every device" rule as a
   // pressed Play, so the band never auto-starts with one member left behind.
-  if (!getReadyAdapters(state).length || (!allowPartialStart && startBlockers(state).length)) {
+  // A device that has not applied the song's tempo yet is waited for as well:
+  // the room turns a Play down until it has, whoever allows a partial start.
+  if (
+    !getReadyAdapters(state).length ||
+    tempoBlockedReason(state) ||
+    (!allowPartialStart && startBlockers(state).length)
+  ) {
     return elapsedMs >= timeoutMs ? "timeout" : "wait";
   }
 

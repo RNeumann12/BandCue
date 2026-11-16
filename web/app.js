@@ -29,6 +29,7 @@ import {
   CLOCK_MIN_SAMPLES,
   startBlockers,
   playBlockedReason,
+  tempoBlockedReason,
   setlistLoadDecision,
   shouldAdvanceSetlistOnStop,
   normalizeAutoRunSettings,
@@ -59,6 +60,10 @@ const wsUrl = `${wsProtocol}//${location.host}/ws?token=${encodeURIComponent(tok
 // to eventually tear the dead connection down.
 const HEARTBEAT_TIMEOUT_MS = 6000;
 const HEARTBEAT_CHECK_INTERVAL_MS = 2000;
+// A connection attempt that neither opens nor fails (a Wi-Fi that swallows
+// packets) would otherwise sit in CONNECTING for as long as the browser cares
+// to wait -- minutes. Give up on it and try again.
+const CONNECT_TIMEOUT_MS = 8000;
 // Exponential backoff with jitter so a coordinator restart doesn't get hammered
 // by every device reconnecting in lockstep.
 const RECONNECT_BASE_MS = 1000;
@@ -83,6 +88,13 @@ const $$ = (root, selector) => /** @type {HTMLElement[]} */ ([...root.querySelec
 const elements = {
   connectionBanner: $("#connectionBanner"),
   hostDeniedBanner: $("#hostDeniedBanner"),
+  pageProblemBanner: $("#pageProblemBanner"),
+  pageProblemText: $("#pageProblemText"),
+  pageReloadButton: $button("#pageReloadButton"),
+  pageProblemDismissButton: $button("#pageProblemDismissButton"),
+  notices: $("#notices"),
+  recentMessages: $("#recentMessages"),
+  recentMessagesList: $("#recentMessagesList"),
   readoutLabel: $("#readoutLabel"),
   readoutSong: $("#readoutSong"),
   roomCode: $("#roomCode"),
@@ -161,7 +173,7 @@ const scoreView = createScoreView({
   root: $("#scoreView"),
   token: token ?? "",
   isHost,
-  roomNow: () => (serverOffsetMs === undefined ? undefined : Date.now() + serverOffsetMs),
+  roomNow: displayRoomNow,
   // The host taps a bar of the notes to rehearse from there.
   onPickStart: isHost ? (measure) => setCurrentSongStartMeasure(measure) : undefined
 });
@@ -200,6 +212,15 @@ let connectionProblem = "";
 // fresh sample as-is; seeding with 0 would slew a real offset from zero and
 // leave a residual timing error after the warm-up burst.
 let serverOffsetMs;
+// The last offset this page measured, kept across reconnects -- for *showing*
+// room time only. Every new connection starts its clock estimate from scratch
+// (serverOffsetMs above), and for the moment until its first sample is back
+// there would be no room time to show: the score cursor fell back to the
+// song's start bar and the view began scrolling there, mid-song, on every
+// reconnect. A clock that stepped while the device slept makes this estimate
+// wrong for that same moment; the first sample replaces it. Nothing is ever
+// *scheduled* against it (see hostCueServerTime).
+let displayOffsetMs;
 let samples = [];
 let lastState;
 let clientId;
@@ -219,6 +240,14 @@ let allowPartialStart = loadAllowPartialStart();
 // and we are waiting for it to be loaded enough to play).
 let setlistRunPhase = "idle";
 let setlistLoadStartedAt = 0;
+// An auto-start whose Play is on its way to the coordinator: the status line
+// says "Playing" only once the room does, and says why if the room refuses.
+/** @type {{ label: string, durationKnown: boolean, sentAt: number } | undefined} */
+let autoStartRequest;
+const AUTO_START_ANSWER_MS = 5000;
+// Script errors reported to the coordinator's log (see reportPageProblem).
+const PAGE_PROBLEM_REPORT_LIMIT = 3;
+let pageProblemReports = 0;
 let prevTransportStatus = "stopped";
 let lastStableRoomSignature = "";
 let pendingTimingState;
@@ -237,6 +266,13 @@ const SETLIST_LOAD_SETTLE_MS = 4500;
 // src/adapters/musescore-windows.ts). The device says why it is not ready all
 // along, and Stop calls the song off at any point.
 const SETLIST_LOAD_TIMEOUT_MS = 45000;
+
+window.addEventListener("error", (event) => reportPageProblem(event.error ?? event.message));
+window.addEventListener("unhandledrejection", (event) => reportPageProblem(event.reason));
+elements.pageReloadButton?.addEventListener("click", () => location.reload());
+elements.pageProblemDismissButton?.addEventListener("click", () => {
+  elements.pageProblemBanner.hidden = true;
+});
 
 if (!token) {
   setText(elements.roomCode, "Missing token");
@@ -446,7 +482,11 @@ function requestPlayAtCue(cueAtServerTime) {
   }
 
   if (!canHostPlay(lastState, { allowPartialStart })) {
-    setText(elements.hostWarning, playBlockedReason(lastState, { allowPartialStart }));
+    // The button is disabled in this state, so this is a hotkey or a pedal:
+    // whoever pressed it is not looking at the line under the buttons.
+    const reason = playBlockedReason(lastState, { allowPartialStart });
+    setText(elements.hostWarning, reason);
+    showNotice(`Play not sent: ${reason}`, "error");
     return;
   }
 
@@ -465,7 +505,7 @@ function sendTransportRequest(message) {
   if (send(message)) {
     return true;
   }
-  setText(elements.hostWarning, `Not connected to the coordinator; ${message.action} was not sent.`);
+  showNotice(`Not connected to the coordinator; ${message.action} was not sent.`, "error");
   return false;
 }
 
@@ -484,16 +524,26 @@ function requestStop() {
   }
 
   // Stop also cancels a song that is loading for an auto-start: the host wants
-  // silence, not the next song kicking in a moment later. That is the only thing
-  // left to do when the transport is already stopped. Stopping a *running* song
-  // needs no extra handling -- it carries stopReason "manual", which never
+  // silence, not the next song kicking in a moment later. Stopping a *running*
+  // song needs no extra handling -- it carries stopReason "manual", which never
   // advances the setlist.
-  cancelPendingAutoLoad("Next song called off.");
+  const calledOff = cancelPendingAutoLoad("Next song called off.");
 
-  if (!lastState || lastState.transport.status === "stopped") {
+  if (!lastState) {
     return;
   }
 
+  // Calling the next song off while nothing plays is all that press was for:
+  // its devices are busy loading, and a Stop would only make them report one
+  // they could not carry out.
+  if (calledOff && lastState.transport.status === "stopped") {
+    return;
+  }
+
+  // Otherwise Stop always goes out, also when the room says "stopped": the
+  // room only knows what it last decided, and after a coordinator restart
+  // mid-song that is not what the devices are doing. Every adapter treats a
+  // Stop on a player that is not playing as a no-op.
   transportRequestPending = sendTransportRequest({ type: "transportRequest", action: "stop", requestedAt: Date.now() });
 }
 
@@ -585,8 +635,54 @@ function connect() {
   const ws = new WebSocket(wsUrl);
   socket = ws;
   let opened = false;
+  let connectTimer;
+
+  // Runs once per socket, when it is done for -- because the browser said so
+  // (`close`), or because this page stopped believing in it. The second case
+  // must not wait for the first: closing a connection whose other end is gone
+  // (Wi-Fi dropped, coordinator lost power) starts a closing handshake nobody
+  // answers, and the browser only fires `close` when its own timeout runs out.
+  // Measured in Chromium: 68 s of a page that looked connected, with a stale
+  // room and live buttons.
+  const lose = ({ retryNow = false } = {}) => {
+    if (ws !== socket) {
+      return;
+    }
+    socket = undefined;
+    clearTimeout(connectTimer);
+    if (clockTimer) {
+      clearInterval(clockTimer);
+      clockTimer = undefined;
+    }
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
+    }
+    transportRequestPending = false;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+    }
+    reconnectAttempts += 1;
+    setConnectionState("offline");
+    if (!opened) {
+      diagnoseConnectionProblem();
+    }
+    try {
+      ws.close();
+    } catch {
+      // Already closed, or never opened.
+    }
+    // A connection that was alive seconds ago gets one attempt right away;
+    // if that fails too, the backoff takes over.
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, retryNow ? 0 : reconnectDelayMs(reconnectAttempts));
+  };
+  connectTimer = setTimeout(() => lose(), CONNECT_TIMEOUT_MS);
 
   ws.addEventListener("open", () => {
+    clearTimeout(connectTimer);
     reconnectAttempts = 0;
     lastServerContactAt = Date.now();
     opened = true;
@@ -604,8 +700,7 @@ function connect() {
     serverOffsetMs = undefined;
     heartbeatTimer = setInterval(() => {
       if (Date.now() - lastServerContactAt > HEARTBEAT_TIMEOUT_MS) {
-        // Closing a half-open socket fires the close handler, which reconnects.
-        socket?.close();
+        lose({ retryNow: true });
       }
     }, HEARTBEAT_CHECK_INTERVAL_MS);
     send({
@@ -636,8 +731,23 @@ function connect() {
       return;
     }
     lastServerContactAt = Date.now();
-    const message = JSON.parse(event.data);
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    // One message this page cannot handle must not cost it the next one.
+    try {
+      handleServerMessage(message);
+    } catch (error) {
+      reportPageProblem(error);
+    }
+  });
 
+  ws.addEventListener("close", () => lose());
+
+  function handleServerMessage(message) {
     if (message.type === "serverHello") {
       clientId = message.clientId;
       if (isHost && message.role && message.role !== "host") {
@@ -662,6 +772,7 @@ function connect() {
       // Ease the new offset into the running estimate to damp jitter (large, real
       // clock steps are still adopted immediately by blendOffset).
       serverOffsetMs = blendOffset(serverOffsetMs, summary.offsetMs);
+      displayOffsetMs = serverOffsetMs;
       send({
         type: "clockStatus",
         rttMs: summary.rttMs,
@@ -675,19 +786,35 @@ function connect() {
     if (message.type === "roomState") {
       transportRequestPending = false;
       lastState = message;
-      renderState(message);
+      // The notes on a music stand must keep following the room even if the
+      // room panel trips over something in this state.
+      try {
+        renderState(message);
+      } catch (error) {
+        reportPageProblem(error);
+      }
       scoreView.update(message);
       return;
     }
 
     if (message.type === "error") {
       transportRequestPending = false;
-      setText(elements.subline, message.message);
-      setText(elements.hostWarning, message.message);
+      // Not into the subline or the line under the buttons: both are rewritten
+      // by the next room state, which is never more than a second away.
+      showNotice(message.message, "error");
+      if (autoStartRequest && Date.now() - autoStartRequest.sentAt < AUTO_START_ANSWER_MS) {
+        setAutoRunStatus(`Auto-start of ${autoStartRequest.label} stopped: ${message.message}`);
+        autoStartRequest = undefined;
+      }
+      if (lastState) {
+        renderHostControls(lastState, getReadyAdapters(lastState));
+      }
+      return;
     }
 
     if (message.type === "helixScheduleUpdate") {
       renderHelixScheduleDebug(message);
+      return;
     }
 
     // A shortcut that an adapter claimed system-wide. It is relayed here because
@@ -695,39 +822,134 @@ function connect() {
     // Missing action means Play for compatibility with older adapters.
     if (message.type === "externalCue") {
       const action = message.action || "play";
-      setText(elements.subline, `${action} hotkey from ${message.source || "an adapter"}.`);
+      showNotice(`${hotkeyActionLabel(action)} hotkey from ${message.source || "an adapter"}.`);
       runHostHotkeyAction(action, message.cueAtServerTime);
     }
-  });
+  }
+}
 
-  ws.addEventListener("close", () => {
-    // A socket this page replaced on purpose (a rename rejoins the room) has
-    // nothing left to clean up or reconnect.
-    if (ws !== socket) {
-      return;
+function hotkeyActionLabel(action) {
+  return {
+    "toggle-arm": "Arm",
+    play: "Play",
+    stop: "Stop",
+    "next-song": "Next song",
+    "previous-song": "Previous song",
+    "open-current-song": "Open song",
+    "toggle-auto-advance": "Auto-load",
+    "toggle-auto-start": "Auto-start"
+  }[action] ?? action;
+}
+
+// --- Notices ---------------------------------------------------------------
+// Things that *happened* -- the room turned a request down, a pedal's hotkey
+// arrived, a song was sent to the adapters. They get their own place because
+// every other line of this page describes the room as it is now and is
+// rewritten with each room state.
+const NOTICE_MS = { info: 6000, error: 10000 };
+const MAX_NOTICES = 4;
+const RECENT_MESSAGE_LIMIT = 8;
+const noticeTimers = new WeakMap();
+/** @type {{ at: number, text: string, kind: string }[]} */
+let recentMessages = [];
+
+/**
+ * @param {unknown} text
+ * @param {"info" | "error"} [kind]
+ */
+function showNotice(text, kind = "info") {
+  const message = String(text ?? "").trim();
+  if (!message || !elements.notices) {
+    return;
+  }
+
+  rememberMessage(message, kind);
+  // The same thing said again (a hotkey pressed twice into a room that is not
+  // ready) restarts its notice instead of stacking a copy.
+  let notice = $$(elements.notices, ".notice").find((candidate) => candidate.dataset.text === message);
+  if (!notice) {
+    notice = document.createElement("div");
+    notice.className = `notice ${kind}`;
+    notice.dataset.text = message;
+    if (kind === "error") {
+      notice.setAttribute("role", "alert");
     }
-    if (clockTimer) {
-      clearInterval(clockTimer);
-      clockTimer = undefined;
+    const body = document.createElement("span");
+    body.textContent = message;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "notice-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "\u00d7";
+    const created = notice;
+    close.addEventListener("click", () => removeNotice(created));
+    notice.append(body, close);
+    elements.notices.append(notice);
+    for (const extra of $$(elements.notices, ".notice").slice(0, -MAX_NOTICES)) {
+      removeNotice(extra);
     }
-    if (heartbeatTimer) {
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = undefined;
-    }
-    transportRequestPending = false;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-    }
-    reconnectAttempts += 1;
-    setConnectionState("offline");
-    if (!opened) {
-      diagnoseConnectionProblem();
-    }
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = undefined;
-      connect();
-    }, reconnectDelayMs(reconnectAttempts));
-  });
+  }
+
+  elements.notices.hidden = false;
+  clearTimeout(noticeTimers.get(notice));
+  const shown = notice;
+  noticeTimers.set(notice, setTimeout(() => removeNotice(shown), NOTICE_MS[kind] ?? NOTICE_MS.info));
+}
+
+function removeNotice(notice) {
+  clearTimeout(noticeTimers.get(notice));
+  notice.remove();
+  if (elements.notices && !elements.notices.childElementCount) {
+    elements.notices.hidden = true;
+  }
+}
+
+// The last few, for the host who looked up a moment too late.
+function rememberMessage(text, kind) {
+  if (!isHost || !elements.recentMessages) {
+    return;
+  }
+
+  recentMessages = [...recentMessages, { at: Date.now(), text, kind }].slice(-RECENT_MESSAGE_LIMIT);
+  elements.recentMessages.hidden = hostDenied;
+  elements.recentMessagesList.replaceChildren(
+    ...[...recentMessages].reverse().map((entry) => {
+      const item = document.createElement("li");
+      item.className = entry.kind;
+      const time = document.createElement("time");
+      time.textContent = formatTime(entry.at);
+      item.append(time, ` ${entry.text}`);
+      return item;
+    })
+  );
+}
+
+// --- Page problems ---------------------------------------------------------
+// A script error used to leave the page showing whatever it showed last, with
+// nothing to say so. Now it says so, offers the one thing that helps, and
+// tells the coordinator, whose log is the only one anybody can read afterwards.
+function reportPageProblem(problem) {
+  const message = problem instanceof Error
+    ? `${problem.name}: ${problem.message}`
+    : String(problem ?? "Unknown error");
+  // Chromium reports a ResizeObserver that could not finish in one frame as a
+  // window error. Nothing is broken; the next frame delivers it.
+  if (/^ResizeObserver loop/i.test(message)) {
+    return;
+  }
+
+  console.error("BandCue page problem:", problem);
+  if (elements.pageProblemBanner) {
+    setText(elements.pageProblemText, `This page hit a problem and may be out of date (${message.slice(0, 160)}).`);
+    elements.pageProblemBanner.hidden = false;
+  }
+  if (pageProblemReports < PAGE_PROBLEM_REPORT_LIMIT) {
+    pageProblemReports += 1;
+    const where = problem instanceof Error && problem.stack
+      ? ` @ ${problem.stack.split("\n").slice(1, 3).map((line) => line.trim()).join(" < ")}`
+      : "";
+    send({ type: "clientError", message: `${message}${where}`.slice(0, 300) });
+  }
 }
 
 function denyHostControls() {
@@ -738,13 +960,16 @@ function denyHostControls() {
   elements.hostPanel.hidden = true;
   elements.setlistPanel.hidden = true;
   elements.timingPanel.hidden = true;
+  if (elements.recentMessages) {
+    elements.recentMessages.hidden = true;
+  }
   if (elements.hostDeniedBanner) {
     elements.hostDeniedBanner.hidden = false;
   }
 }
 
 function reconnectNow() {
-  if (!token || !socket || socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+  if (!token || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
     return;
   }
   connect();
@@ -1596,17 +1821,25 @@ function renderAutoRunSettings() {
   }
 }
 
-// Stop is normally pointless while the transport is stopped, but during a
-// pending auto-start it is the way to call the next song off.
+// Stop is always there for a connected host: to stop the song, to call off a
+// song that is loading for an auto-start, and -- while the room says "stopped"
+// -- to stop devices the room does not know are playing (a coordinator
+// restarted mid-song, a player started by hand). In that last state it is
+// drawn quieter unless a device reports that it is playing.
 function updateStopAvailability(state = lastState) {
   if (!isHost || !elements.stopButton) {
     return;
   }
 
   const stopped = (state?.transport?.status ?? "stopped") === "stopped";
-  elements.stopButton.disabled = transportRequestPending
-    || (connectionState !== "open" && !stopped)
-    || (stopped && !(setlistRunPhase === "loading" && autoRun.start));
+  const callingOff = setlistRunPhase === "loading";
+  const strayPlayback = stopped && (state?.clients ?? []).some((client) => client.status?.playback === "playing");
+  elements.stopButton.disabled = transportRequestPending || (connectionState !== "open" && !callingOff);
+  elements.stopButton.dataset.idle = String(stopped && !callingOff && !strayPlayback);
+  setText(elements.stopButton, strayPlayback ? "Stop all" : "Stop");
+  elements.stopButton.title = stopped && !callingOff
+    ? "Send Stop to every device, whatever the room thinks is playing (Ctrl+Alt+S)"
+    : "Stop (Ctrl+Alt+S)";
 }
 
 function beginLoadingCurrentSong() {
@@ -1627,17 +1860,31 @@ function beginLoadingCurrentSong() {
 // caller decides whether a stop is also needed).
 function cancelPendingAutoLoad(reason) {
   if (setlistRunPhase === "idle") {
-    return;
+    return false;
   }
 
   setlistRunPhase = "idle";
   updateStopAvailability();
   setAutoRunStatus(reason || describeAutoRun(autoRun));
+  return true;
 }
 
 function driveSetlistRun(state) {
   if (!isHost) {
     return;
+  }
+
+  if (autoStartRequest) {
+    if (state.transport.status !== "stopped") {
+      // The room took the auto-start.
+      setAutoRunStatus(autoStartRequest.durationKnown
+        ? `Playing ${autoStartRequest.label} - auto-advances at the end.`
+        : `Playing ${autoStartRequest.label} - auto-advances when adapters stop.`);
+      autoStartRequest = undefined;
+    } else if (Date.now() - autoStartRequest.sentAt > AUTO_START_ANSWER_MS) {
+      setAutoRunStatus(`Auto-start of ${autoStartRequest.label} got no answer from the room - press Play.`);
+      autoStartRequest = undefined;
+    }
   }
 
   if (setlistRunPhase === "loading") {
@@ -1656,16 +1903,16 @@ function driveSetlistRun(state) {
     });
 
     if (decision === "timeout") {
-      const blockers = allowPartialStart ? [] : startBlockers(state);
-      cancelPendingAutoLoad(blockers.length
-        ? `Auto-start stopped: ${blockers[0]}.`
+      const blocker = autoStartBlocker(state);
+      cancelPendingAutoLoad(blocker
+        ? `Auto-start stopped: ${blocker.replace(/\.$/, "")}.`
         : "Auto-load stopped: no ready adapter for the next song.");
     } else if (decision === "play") {
       finishLoadingCurrentSong();
     } else {
-      const blockers = allowPartialStart ? [] : startBlockers(state);
-      setAutoRunStatus(blockers.length
-        ? `Loading ${currentSongLabel()}: waiting for ${blockers[0]}...`
+      const blocker = autoStartBlocker(state);
+      setAutoRunStatus(blocker
+        ? `Loading ${currentSongLabel()}: waiting - ${blocker.replace(/\.$/, "")}...`
         : `Loading ${currentSongLabel()}...`);
     }
     return;
@@ -1676,6 +1923,13 @@ function driveSetlistRun(state) {
   if (autoRun.advance && shouldAdvanceSetlistOnStop(state, prevTransportStatus)) {
     handleSongFinished();
   }
+}
+
+// What a loading song is still waiting for, in words: a device that has not
+// applied the song's tempo (the room refuses to start without it), or a device
+// that is not ready or not synced.
+function autoStartBlocker(state) {
+  return tempoBlockedReason(state) ?? (allowPartialStart ? undefined : startBlockers(state)[0]);
 }
 
 function finishLoadingCurrentSong() {
@@ -1697,17 +1951,29 @@ function playCurrentSongForRun() {
     return;
   }
 
-  // Arm and play in the same tick: the server processes the safety update before
-  // the transport request, so play is accepted without waiting a round trip.
-  publishSafety({ armed: true });
-  transportRequestPending = sendTransportRequest({ type: "transportRequest", action: "play", requestedAt: Date.now() });
+  // Arm and play as one request. Arming first and asking second left the room
+  // armed whenever the Play was then turned down (a device that had not applied
+  // the song's tempo yet, a second host page that got its Play in first) -- an
+  // armed room nobody armed, one stray hotkey away from starting.
+  transportRequestPending = sendTransportRequest({
+    type: "transportRequest",
+    action: "play",
+    requestedAt: Date.now(),
+    arm: true
+  });
+  if (!transportRequestPending) {
+    setAutoRunStatus(`Auto-start of ${currentSongLabel()} stopped: not connected to the coordinator.`);
+    return;
+  }
 
-  // Auto-advance can come from a known duration or from adapters naturally
-  // reporting stopped after playback.
-  const durationKnown = Boolean(song.durationMs) || appliesToSongsterr(song);
-  setAutoRunStatus(durationKnown
-    ? `Playing ${currentSongLabel()} - auto-advances at the end.`
-    : `Playing ${currentSongLabel()} - auto-advances when adapters stop.`);
+  // "Playing" is for the room to say (see driveSetlistRun). Auto-advance can
+  // come from a known duration or from adapters naturally reporting stopped.
+  autoStartRequest = {
+    label: currentSongLabel(),
+    durationKnown: Boolean(song.durationMs) || appliesToSongsterr(song),
+    sentAt: Date.now()
+  };
+  setAutoRunStatus(`Starting ${currentSongLabel()}...`);
 }
 
 function handleSongFinished() {
@@ -1723,7 +1989,7 @@ function handleSongFinished() {
 // Drives only the loading branch (which is time-based); the end-of-song branch
 // is event-driven from renderState so one stop never advances twice.
 function tickSetlistLoading() {
-  if (isHost && setlistRunPhase === "loading" && lastState) {
+  if (isHost && (setlistRunPhase === "loading" || autoStartRequest) && lastState) {
     driveSetlistRun(lastState);
   }
 }
@@ -1993,7 +2259,7 @@ function publishSafety(update) {
 function openCurrentSong() {
   const song = getCurrentOpenableSong();
   if (!song) {
-    setText(elements.hostWarning, "Current song needs a Songsterr URL or a MuseScore score.");
+    showNotice("Current song needs a Songsterr URL or a MuseScore score.", "error");
     return;
   }
 
@@ -2028,7 +2294,7 @@ function openCurrentSong() {
     }
   }
 
-  setText(elements.hostWarning, `Open ${songTitle}: ${messages.join("; ")}.`);
+  showNotice(`Open ${songTitle}: ${messages.join("; ")}.`);
 }
 
 function getCurrentOpenableSong() {
@@ -2223,7 +2489,7 @@ function updateCountdown() {
   }
 
   const transport = lastState.transport;
-  const serverNow = Date.now() + (serverOffsetMs ?? 0);
+  const serverNow = displayRoomNow() ?? Date.now();
 
   if (transport.status === "scheduled" && transport.scheduledServerTime) {
     const remaining = Math.max(0, transport.scheduledServerTime - serverNow);
@@ -2245,6 +2511,16 @@ function updateCountdown() {
   setText(elements.countdown, "--");
   setText(elements.elapsedTime, "00:00");
   setText(elements.subline, "Waiting for a transport command");
+}
+
+/**
+ * Room time for what this page shows (the countdown, the elapsed time, the
+ * score cursor): from this connection's clock estimate, or -- until that has
+ * its first sample -- from the last one measured. Undefined before any.
+ */
+function displayRoomNow() {
+  const offsetMs = serverOffsetMs ?? displayOffsetMs;
+  return offsetMs === undefined ? undefined : Date.now() + offsetMs;
 }
 
 function syncCountdownTimer() {

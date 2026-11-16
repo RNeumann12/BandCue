@@ -48,6 +48,38 @@
 
 ### Fixed
 
+- **A dead connection went unnoticed for over a minute.** When the Wi-Fi dropped without a word,
+  the host and companion pages kept looking connected — stale room, live buttons — until the
+  browser gave up closing the socket (68 s in Chrome). The page now drops a connection that has
+  been silent for 6 s, shows the offline banner at once and reconnects; a connection attempt that
+  neither opens nor fails is given up after 8 s.
+- **The room could end up armed with nobody having armed it.** The setlist auto-start armed the
+  room and then asked for Play; when that Play was turned down (a device had not applied the
+  song's tempo yet, or a second host page got its Play in first) the room stayed armed, during the
+  song and after it. Auto-start now arms and plays in one request, the room only accepts an arm
+  while it is stopped, the auto-start waits for a device that has not applied the song's tempo,
+  and the status line says *Playing* only once the room does (and why not, if it refuses).
+- **Messages from the room vanished within a second.** A refused request ("…has not applied 80%
+  tempo", "Only a host can…"), a relayed pedal hotkey and the result of *Open Current Song* were
+  written into lines that the next room update overwrote. They now appear as notices at the bottom
+  of the window for 6–10 s, and the host page keeps the last few under *Recent messages*.
+- **No way to stop the devices when the room said "stopped"** — after a coordinator restart
+  mid-song, or with a player started by hand. The host's Stop now always goes out to every device
+  (*Stop all* when a device reports that it is playing); a Stop on a player that is not playing
+  does nothing.
+- **A script error left the page standing still without a sign.** The page now says so, offers
+  *Reload*, carries on with the next room update, keeps the notes following the room either way,
+  and reports the error to the coordinator's log (`[page] Drums tablet (companion): …`).
+- **A page of the notes stayed blank after a Wi-Fi blip.** A page image that failed to load was
+  never asked for again. It is now retried (after 1 s, then doubling up to 8 s, and at once when
+  the connection is back), and the page says *Page 3 – loading again…* meanwhile. Every page of the
+  part on screen is also fetched ahead as soon as the score appears, so a connection that drops
+  mid-song has nothing left to fetch.
+- **"Loading the notes…" could stand for minutes** when a request got no answer at all. It is now
+  given up after 10 s, says so, and is tried again.
+- **Every reconnect during a song sent the score cursor back to the start bar** for a moment, and
+  the view began scrolling there. The page now keeps its last clock estimate for display until the
+  new connection has measured its own; the big elapsed-time readout no longer jumps either.
 - **The drums fell back to their old look** (two voices, no drum key) when a second computer with
   an older BandCue ran a MuseScore helper against the same room: the room took whichever helper
   reported last. Helpers now report their exporter version, and the room keeps the newest

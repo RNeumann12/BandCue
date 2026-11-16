@@ -71,6 +71,19 @@ describe("server message guards", () => {
       requestedAt: 1000
     })).toBeUndefined();
 
+    // Arm-and-play is a Play; "arm" means nothing on a Stop or as a non-boolean.
+    expect(sanitizeClientMessage({ type: "transportRequest", action: "play", requestedAt: 1, arm: true }))
+      .toMatchObject({ action: "play", arm: true });
+    expect(sanitizeClientMessage({ type: "transportRequest", action: "stop", requestedAt: 1, arm: true }))
+      .not.toHaveProperty("arm");
+    expect(sanitizeClientMessage({ type: "transportRequest", action: "play", requestedAt: 1, arm: "yes" }))
+      .not.toHaveProperty("arm");
+
+    expect(sanitizeClientMessage({ type: "clientError", message: `  TypeError:\n boom ${"x".repeat(400)}` }))
+      .toEqual({ type: "clientError", message: `TypeError: boom ${"x".repeat(284)}` });
+    expect(sanitizeClientMessage({ type: "clientError", message: "   " })).toBeUndefined();
+    expect(sanitizeClientMessage({ type: "clientError", message: 42 })).toBeUndefined();
+
     expect(sanitizeClientMessage({
       type: "externalCue",
       action: "next-song",

@@ -317,6 +317,21 @@ export interface TransportRequest {
    * has no external anchor (button press, setlist auto-start).
    */
   cueAtServerTime?: number;
+  /**
+   * Host only, Play only: arm and start in one step (the setlist's auto-start).
+   * The room's `armed` flag is not touched, so a Play that is turned down leaves
+   * nothing armed behind -- which arming first and asking second did.
+   */
+  arm?: boolean;
+}
+
+/**
+ * A script error on a web page, for the coordinator's log: a tablet on a music
+ * stand has no console anyone reads. Never changes room state.
+ */
+export interface ClientError {
+  type: "clientError";
+  message: string;
 }
 
 /** Host actions that may be relayed from a system-wide shortcut listener. */
@@ -614,7 +629,8 @@ export type ClientMessage =
   | ScoreImportRequest
   | ScoreImportProgress
   | TransportRequest
-  | ExternalCue;
+  | ExternalCue
+  | ClientError;
 
 export type ServerMessage =
   | ServerHello
