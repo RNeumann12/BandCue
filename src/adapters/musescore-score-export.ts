@@ -32,7 +32,7 @@ import type {
  * helper reports it, and a room served by helpers of different versions keeps
  * the newest one's exports.
  */
-export const SCORE_EXPORTER_VERSION = 8;
+export const SCORE_EXPORTER_VERSION = 9;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;

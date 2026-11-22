@@ -707,7 +707,7 @@ export function systemsOf(timing) {
   return { systems, systemOfMeasure };
 }
 
-// Without measured bounds (an export before exporter version 8), what the
+// Without measured bounds (an export before exporter version 9), what the
 // band keeps around the lines, in median line gaps: notes and marks above a
 // page's first line reach ~1.3 gaps up, those below its last ~1 gap down.
 const FALLBACK_ABOVE_GAPS = 1.4;
