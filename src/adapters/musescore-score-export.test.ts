@@ -8,6 +8,7 @@ import {
   buildExportJob,
   buildScoreTiming,
   cropDrumLegendSvg,
+  svgContentBounds,
   exportFiles,
   parsePositionsXml,
   planVoices,
@@ -287,6 +288,20 @@ describe("export files and ids", () => {
     expect(cropped.svg).toContain(`viewBox="1062 940 ${cropped.width} ${cropped.height}"`);
     expect(cropped.svg).toMatch(/width="[\d.]+mm" height="[\d.]+mm"/);
     expect(cropDrumLegendSvg('<svg viewBox="0 0 10 10"></svg>')).toBeUndefined();
+  });
+
+  it("measures the band of a page with music on it, without header and footer", () => {
+    const page = `<svg width="210mm" height="297mm" viewBox="0 0 9924 14028">
+<path class="" fill="#ffffff" d="M0,0 L9924,0 L9924,14028 L0,14028 L0,0 "/>
+<path class="Text" d="M790,800 L810,869"/>
+<polyline class="StaffLines" points="708,1287 9215,1287" />
+<path class="RehearsalMark" d="M708,900 L900,1100"/>
+<path class="Note" d="M2000,5200 C2010,5260 2020,5300 2030,5310"/>
+<path class="Text" d="M4900,13600 L5000,13700"/>
+</svg>`;
+    // 150 units of paper below; above only up to the header's page number.
+    expect(svgContentBounds(page, { width: 9924, height: 14028 })).toEqual({ top: 870, bottom: 5460 });
+    expect(svgContentBounds('<svg viewBox="0 0 10 10"></svg>', { width: 10, height: 10 })).toBeUndefined();
   });
 
   it("keeps the committed example export in step with the parser", () => {

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { entryContent, forcePageLayout, readZipEntries, rewriteZipText } from "./mscz-page-layout.js";
 import { buildDrumLegend, drumLegendStyle } from "./mscx-drum-legend.js";
+import { restoreDrumArticulations } from "./mscx-drum-articulations.js";
 import { drumStemsDown } from "./mscx-drum-stems.js";
 import type {
   ScoreExportReport,
@@ -31,7 +32,7 @@ import type {
  * helper reports it, and a room served by helpers of different versions keeps
  * the newest one's exports.
  */
-export const SCORE_EXPORTER_VERSION = 7;
+export const SCORE_EXPORTER_VERSION = 8;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;
@@ -122,7 +123,7 @@ export function parseSvgPageSize(svg: string): { width: number; height: number }
 export function buildScoreTiming(
   mpos: PositionsFile,
   spos: PositionsFile | undefined,
-  pages: { width: number; height: number }[],
+  pages: ScoreTiming["pages"],
   marks: ScoreMarks = { sections: [], meters: [] }
 ): ScoreTiming {
   const scale = POSITION_UNITS_PER_SVG_UNIT;
@@ -278,7 +279,7 @@ function round1(value: number): number {
  * Rooms only rank exports by SCORE_EXPORTER_VERSION: bump that too when an
  * older helper's import exports should lose to the new ones.
  */
-export const IMPORT_PREPARATION_VERSION = 2;
+export const IMPORT_PREPARATION_VERSION = 3;
 
 /** Content-addressed: the id changes whenever the score or the exporter does. */
 export function scoreIdFor(content: Buffer, imported = false): string {
@@ -734,8 +735,9 @@ export async function exportScore(source: ScoreExportSource, options: ScoreExpor
 
 /**
  * A converted Guitar Pro import, made to read like Songsterr: its drum kits get
- * every stem down (see drumStemsDown). The band's own MuseScore files are
- * exported as they are written.
+ * back the drums MuseScore's import flattened (rimshots, half-open hi-hats,
+ * chokes -- see restoreDrumArticulations) and every stem down (see
+ * drumStemsDown). The band's own MuseScore files are exported as they are written.
  */
 function prepareImport(mscz: Buffer): Buffer {
   return rewriteZipText(mscz, isScoreFile, (xml) => {
@@ -743,7 +745,7 @@ function prepareImport(mscz: Buffer): Buffer {
       .flatMap((instrument) => instrument.staves)
       .filter((staff) => staff.kind === "percussion")
       .map((staff) => staff.number);
-    return drumStemsDown(xml, drumStaves);
+    return drumStemsDown(restoreDrumArticulations(xml, drumStaves), drumStaves);
   }) ?? mscz;
 }
 
@@ -765,7 +767,7 @@ async function collectVoice(
   }
 
   const pages: string[] = [];
-  const sizes: { width: number; height: number }[] = [];
+  const sizes: ScoreTiming["pages"] = [];
   for (const { file, page } of pageFiles) {
     const svg = await readFile(join(work, file), "utf8");
     const size = parseSvgPageSize(svg.slice(0, 2000));
@@ -775,7 +777,7 @@ async function collectVoice(
     const published = `${stem}-${page}.svg`;
     await writeFile(join(target, published), svg);
     pages.push(published);
-    sizes.push(size);
+    sizes.push({ ...size, ...svgContentBounds(svg, size) });
   }
 
   const mpos = parsePositionsXml(await readFile(join(work, `${stem}.mpos`), "utf8"));
@@ -818,6 +820,57 @@ async function collectLegend(
   const published = `${source.slice("key-".length)}-key.svg`;
   await writeFile(join(target, published), cropped.svg);
   return { file: published, width: cropped.width, height: cropped.height };
+}
+
+/** Blank paper kept above and below a page's music in scroll mode, SVG units (~3 mm). */
+const CONTENT_BAND_PAD = 150;
+
+/**
+ * The band of a page scroll mode shows: from the topmost to the bottommost
+ * point of everything MuseScore drew, plus a little paper, but never the white
+ * page behind it or the running header and footer (page number, title,
+ * copyright: plain "Text" lying in the page's outer margin). Scroll mode stacks
+ * these bands, so the pages run on into each other without their margins.
+ */
+export function svgContentBounds(
+  svg: string,
+  page: { width: number; height: number }
+): { top: number; bottom: number } | undefined {
+  const edge = page.height * 0.08;
+  let top = Infinity;
+  let bottom = -Infinity;
+  let header = 0;
+  let footer = page.height;
+  for (const match of svg.matchAll(/<(?:path|polyline)\s+class="([^"]+)"[^>]*?\s(?:d|points)="([^"]+)"/g)) {
+    const numbers = (match[2]!.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
+    let low = Infinity;
+    let high = -Infinity;
+    for (let index = 1; index < numbers.length; index += 2) {
+      low = Math.min(low, numbers[index]!);
+      high = Math.max(high, numbers[index]!);
+    }
+    if (!Number.isFinite(low)) {
+      continue;
+    }
+    if (match[1] === "Text" && high < edge) {
+      header = Math.max(header, high);
+    } else if (match[1] === "Text" && low > page.height - edge) {
+      footer = Math.min(footer, low);
+    } else {
+      top = Math.min(top, low);
+      bottom = Math.max(bottom, high);
+    }
+  }
+  if (!Number.isFinite(top) || bottom <= top) {
+    return undefined;
+  }
+  // The paper around the music stops short of the header and footer.
+  const above = Math.max(0, Math.min(CONTENT_BAND_PAD, top - header - 1));
+  const below = Math.max(0, Math.min(CONTENT_BAND_PAD, footer - bottom - 1));
+  return {
+    top: round1(Math.max(0, top - above)),
+    bottom: round1(Math.min(page.height, bottom + below))
+  };
 }
 
 /**

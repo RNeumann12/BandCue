@@ -707,6 +707,55 @@ export function systemsOf(timing) {
   return { systems, systemOfMeasure };
 }
 
+// Without measured bounds (an export before exporter version 8), what the
+// band keeps around the lines, in median line gaps: notes and marks above a
+// page's first line reach ~1.3 gaps up, those below its last ~1 gap down.
+const FALLBACK_ABOVE_GAPS = 1.4;
+const FALLBACK_BELOW_GAPS = 1.1;
+const FALLBACK_GAP = 900;
+
+/**
+ * Scroll mode shows the pages as one endless sheet: of every page only the band
+ * with music on it, so no page margins (or the blank rest of a short last page)
+ * open a gap between two lines. The exporter measures that band (see
+ * svgContentBounds in musescore-score-export.ts); for older
+ * exports it is estimated from the lines. A page without lines (text only)
+ * shows whole. The band always covers every line plus `overhang` (where the
+ * cursor reaches past the staff).
+ *
+ * @param {ScoreTiming} timing
+ * @param {{ page: number, top: number, bottom: number }[]} systems see systemsOf
+ * @param {number} [overhang]
+ * @returns {{ top: number, bottom: number }[]} SVG units, one per page
+ */
+export function scrollBands(timing, systems, overhang = 0) {
+  /** @type {number[]} */
+  const gaps = [];
+  for (let index = 1; index < systems.length; index += 1) {
+    const [before, after] = [systems[index - 1], systems[index]];
+    if (before && after && before.page === after.page && after.top > before.bottom) {
+      gaps.push(after.top - before.bottom);
+    }
+  }
+  gaps.sort((left, right) => left - right);
+  const gap = gaps[Math.floor(gaps.length / 2)] ?? FALLBACK_GAP;
+  return timing.pages.map((page, index) => {
+    const lines = systems.filter((system) => system.page === index);
+    if (!lines.length) {
+      return { top: 0, bottom: page.height };
+    }
+    const first = Math.min(...lines.map((line) => line.top));
+    const last = Math.max(...lines.map((line) => line.bottom));
+    const measured = typeof page.top === "number" && typeof page.bottom === "number" && page.bottom > page.top;
+    const top = measured ? /** @type {number} */ (page.top) : first - gap * FALLBACK_ABOVE_GAPS;
+    const bottom = measured ? /** @type {number} */ (page.bottom) : last + gap * FALLBACK_BELOW_GAPS;
+    return {
+      top: Math.max(0, Math.min(top, first - overhang)),
+      bottom: Math.min(page.height, Math.max(bottom, last + overhang))
+    };
+  });
+}
+
 // Instrument families for carrying a player's part choice from song to song:
 // a drummer who picked "Schlagzeug" in one score wants "Drums" in the next.
 const PART_FAMILIES = [

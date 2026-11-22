@@ -194,7 +194,12 @@ export interface ScoreTimingMeter {
 
 export interface ScoreTiming {
   version: 1;
-  pages: { width: number; height: number }[];
+  /**
+   * SVG units. `top`/`bottom`: the band of the page MuseScore drew notes and
+   * text on (no running header or footer); scroll mode shows only that band.
+   * Missing from exports before exporter version 8.
+   */
+  pages: { width: number; height: number; top?: number; bottom?: number }[];
   measures: (ScoreTimingMeasure | null)[];
   events: ScoreTimingEvent[];
   durationMs: number;

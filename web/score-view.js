@@ -37,6 +37,7 @@ import {
   referenceMeasureOf,
   resolvePlayhead,
   resolveScoreSource,
+  scrollBands,
   sectionAt,
   songTimeMs,
   startOffsetMs,
@@ -51,6 +52,15 @@ import { createKeepAwake } from "./keep-awake.js";
  * @typedef {import("../src/shared/protocol.js").ScoreTiming} ScoreTiming
  * @typedef {import("../src/shared/protocol.js").ScoreAvailability} ScoreAvailability
  * @typedef {import("./score-timing.js").PlayOfSong} PlayOfSong
+ * @typedef {{
+ *   el: HTMLElement,
+ *   img: HTMLImageElement,
+ *   width: number,
+ *   height: number,
+ *   top: number,
+ *   shown: number,
+ *   band?: { top: number, bottom: number }
+ * }} ScorePage one page: its size, and the band of it shown (`top`, `shown` tall; SVG units)
  */
 
 const SETTINGS_KEY = "bandcue:score-view";
@@ -203,7 +213,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
    * (`reference`): the room plays that one, so its bars and tempos drive the
    * cursor, mapped bar by bar onto the import (see importedSongMs).
    *
-   * @type {{ scoreId: string, manifest: ScoreManifest, partId: string, timing: ScoreTiming, reference?: ScoreTiming, detectedShift: number, systems: ReturnType<typeof systemsOf>, pages: { el: HTMLElement, img: HTMLImageElement, width: number, height: number }[], legend?: HTMLElement } | undefined}
+   * @type {{ scoreId: string, manifest: ScoreManifest, partId: string, timing: ScoreTiming, reference?: ScoreTiming, detectedShift: number, systems: ReturnType<typeof systemsOf>, pages: ScorePage[], legend?: HTMLElement } | undefined}
    */
   let loaded;
   /** @type {string | undefined} the scoreId being loaded */
@@ -460,15 +470,15 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     }
     forgetFailedImages();
     el.pages.replaceChildren();
-    const pages = part.pages.map((file, index) => {
+    const pages = part.pages.map(/** @returns {ScorePage} */ (file, index) => {
       const size = timing.pages[index] ?? timing.pages[0] ?? { width: 9924, height: 14028 };
       const page = document.createElement("div");
       page.className = "score-page";
-      page.style.aspectRatio = `${size.width} / ${size.height}`;
       page.dataset.page = String(index);
       const img = document.createElement("img");
       img.alt = `${manifest.title}, page ${index + 1}`;
       img.decoding = "async";
+      img.style.aspectRatio = `${size.width} / ${size.height}`;
       img.draggable = false;
       // The first pages load now; the rest as they come near (scroll mode) or
       // are about to be turned to (see loadPagesAround).
@@ -481,7 +491,12 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       page.append(img, number);
       keepLoading(img, page, `Page ${index + 1}`);
       el.pages.append(page);
-      return { el: page, img, width: size.width, height: size.height };
+      return { el: page, img, width: size.width, height: size.height, top: 0, shown: size.height };
+    });
+    const systems = systemsOf(timing);
+    const bands = scrollBands(timing, systems.systems, CURSOR_OVERHANG);
+    pages.forEach((page, index) => {
+      page.band = bands[index];
     });
     fetchPagesAhead(scoreId, part.pages);
     const legend = part.legend ? drumKey(scoreId, part.legend, pages[0]?.width ?? 9924) : undefined;
@@ -495,7 +510,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
       timing,
       reference,
       detectedShift: reference ? detectBarOffset(reference, timing) : 0,
-      systems: systemsOf(timing),
+      systems,
       pages,
       legend
     };
@@ -905,7 +920,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     root.dataset.cursorStyle = settings.motion;
     const scale = page.el.clientWidth / page.width;
     const { measure } = position;
-    const top = (measure.y - CURSOR_OVERHANG) * scale;
+    const top = (measure.y - CURSOR_OVERHANG - page.top) * scale;
     const height = (measure.h + CURSOR_OVERHANG * 2) * scale;
     const width = Math.max(3, CURSOR_WIDTH * scale);
     cursor.style.width = `${width}px`;
@@ -957,7 +972,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     const scale = page.el.clientWidth / page.width;
     nextMark.style.width = `${measure.w * scale}px`;
     nextMark.style.height = `${(measure.h + CURSOR_OVERHANG * 2) * scale}px`;
-    nextMark.style.transform = `translate3d(${measure.x * scale}px, ${(measure.y - CURSOR_OVERHANG) * scale}px, 0)`;
+    nextMark.style.transform = `translate3d(${measure.x * scale}px, ${(measure.y - CURSOR_OVERHANG - page.top) * scale}px, 0)`;
   }
 
   /**
@@ -1061,8 +1076,8 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     const scale = page.el.clientWidth / page.width;
     const offsetTop = page.el.offsetTop;
     return {
-      top: offsetTop + (system.top - CURSOR_OVERHANG) * scale,
-      bottom: offsetTop + (system.bottom + CURSOR_OVERHANG) * scale
+      top: offsetTop + (system.top - CURSOR_OVERHANG - page.top) * scale,
+      bottom: offsetTop + (system.bottom + CURSOR_OVERHANG - page.top) * scale
     };
   }
 
@@ -1148,6 +1163,23 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     requestDraw();
   }
 
+  /**
+   * Scroll mode shows only the band of a page with music on it (see
+   * scrollBands), so the pages join into one endless sheet; page mode shows
+   * whole pages.
+   *
+   * @param {ScorePage} page
+   * @param {boolean} crop
+   */
+  function cropPage(page, crop) {
+    const band = crop && page.band ? page.band : { top: 0, bottom: page.height };
+    page.top = band.top;
+    page.shown = band.bottom - band.top;
+    page.el.style.aspectRatio = `${page.width} / ${page.shown}`;
+    // A percentage margin is a share of the width, as the SVG units are.
+    page.img.style.marginTop = band.top ? `${(-band.top / page.width) * 100}%` : "";
+  }
+
   function applyLayout() {
     root.dataset.layout = settings.layout;
     root.classList.toggle("is-night", settings.night);
@@ -1162,6 +1194,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
         page.el.style.order = "";
       });
     }
+    loaded?.pages.forEach((page) => cropPage(page, settings.layout === "scroll"));
     placeLegend();
     lastSystem = -1;
     pendingIdleScroll = true;
@@ -1339,7 +1372,7 @@ export function createScoreView({ root, token, isHost, roomNow, onPickStart }) {
     }
     const bounds = target.getBoundingClientRect();
     const x = (event.clientX - bounds.left) / bounds.width * page.width;
-    const y = (event.clientY - bounds.top) / bounds.height * page.height;
+    const y = page.top + (event.clientY - bounds.top) / bounds.height * page.shown;
     const measureIndex = measureAtPoint(loaded.timing, index, x, y);
     if (measureIndex === undefined) {
       announce("No bar there. Tap a bar of music.");

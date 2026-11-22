@@ -32,6 +32,7 @@ import {
   sectionAt,
   songTimeMs,
   startOffsetMs,
+  scrollBands,
   systemsOf,
   visiblePages
 } from "./score-timing.js";
@@ -491,5 +492,48 @@ describe("Songsterr imports on the band's bars", () => {
     expect(referenceMeasureOf(band, songsterr, 0, 1)).toBe(1);
     expect(referenceMeasureOf(band, songsterr, 8, 1)).toBe(9);
     expect(referenceMeasureOf(band, songsterr, 8, 2)).toBeUndefined();
+  });
+});
+
+describe("scrollBands", () => {
+  const measure = (page: number, y: number) => ({ page, x: 700, y, w: 2000, h: 330 });
+  const timing = (pages: ScoreTiming["pages"]): ScoreTiming => ({
+    version: 1,
+    pages,
+    measures: [measure(0, 2100), measure(0, 3300), measure(1, 1287), measure(1, 2400)],
+    events: [],
+    durationMs: 0
+  });
+
+  it("keeps only the measured band of each page, so pages join without their margins", () => {
+    const score = timing([
+      { width: 9924, height: 14028, top: 700, bottom: 3900 },
+      { width: 9924, height: 14028, top: 1000, bottom: 2900 }
+    ]);
+    expect(scrollBands(score, systemsOf(score).systems, 70)).toEqual([
+      { top: 700, bottom: 3900 },
+      { top: 1000, bottom: 2900 }
+    ]);
+  });
+
+  it("never cuts into a line or the cursor's overhang", () => {
+    const score = timing([
+      { width: 9924, height: 14028, top: 2100, bottom: 2200 },
+      { width: 9924, height: 14028, top: 1287, bottom: 2730 }
+    ]);
+    expect(scrollBands(score, systemsOf(score).systems, 200)[0]).toEqual({ top: 1900, bottom: 3830 });
+  });
+
+  it("estimates the band from the line gaps for exports without measured bounds", () => {
+    const score = timing([{ width: 9924, height: 14028 }, { width: 9924, height: 14028 }]);
+    // Line gap: 3300 - 2430 = 870 on page 1, 2400 - 1617 = 783 on page 2; median 870.
+    const [first, second] = scrollBands(score, systemsOf(score).systems);
+    expect(first).toEqual({ top: 2100 - 870 * 1.4, bottom: 3630 + 870 * 1.1 });
+    expect(second?.top).toBeCloseTo(1287 - 870 * 1.4);
+  });
+
+  it("shows a page without lines whole", () => {
+    const score = { ...timing([{ width: 9924, height: 14028 }, { width: 9924, height: 14028 }, { width: 9924, height: 14028 }]) };
+    expect(scrollBands(score, systemsOf(score).systems)[2]).toEqual({ top: 0, bottom: 14028 });
   });
 });

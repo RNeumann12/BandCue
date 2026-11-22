@@ -271,12 +271,15 @@ test("the host taps a bar to make it the song's start", async ({ page, request }
   // Bar 7 sits on page 2.
   const measure = timing.measures[6];
   const pageSize = timing.pages[measure.page];
-  const target = page.locator(`.score-page[data-page="${measure.page}"]`);
+  // The whole page's image: scroll mode shows only a band of the page (its
+  // margins cut away), so the image starts above the page's own box.
+  const target = page.locator(`.score-page[data-page="${measure.page}"] img`);
   // Into the score's own scroller's view (and the host page's).
   await target.evaluate((element, y) => {
     const scroller = document.querySelector("#scoreScroller") as HTMLElement;
-    const page = element as HTMLElement;
-    scroller.scrollTop = page.offsetTop + y * page.clientHeight - 120;
+    const image = element as HTMLElement;
+    const top = image.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    scroller.scrollTop = top + y * image.clientHeight - 120;
     scroller.scrollIntoView({ block: "center" });
   }, measure.y / pageSize.height);
   await page.waitForTimeout(200);
