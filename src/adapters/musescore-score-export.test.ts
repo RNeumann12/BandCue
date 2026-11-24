@@ -304,6 +304,18 @@ describe("export files and ids", () => {
     expect(svgContentBounds('<svg viewBox="0 0 10 10"></svg>', { width: 10, height: 10 })).toBeUndefined();
   });
 
+  it("places glyphs MuseScore draws around the origin by their transform", () => {
+    // A flag ("Hook") as MuseScore 4.7.6 writes it: local coordinates, scaled and moved.
+    const page = `<svg width="210mm" height="297mm" viewBox="0 0 9924 14028">
+<polyline class="StaffLines" points="708,2700 9215,2700" />
+<path class="Hook" transform="matrix(0.7,0,0,0.7,8677.64,2726.23)" d="M0,-0.33 C0,1.98 1.98,3.97 4.3,3.97 L11.58,-270.42"/>
+<path class="Note" d="M2000,3100 L2030,3110"/>
+</svg>`;
+    // The flag reaches 0.7 × 270.42 above 2726.23, not up to y = -270.
+    expect(svgContentBounds(page, { width: 9924, height: 14028 })).toEqual({ top: 2386.9, bottom: 3260 });
+    expect(cropDrumLegendSvg(page)!.svg).toContain('viewBox="648 2476.9');
+  });
+
   it("keeps the committed example export in step with the parser", () => {
     const committed = JSON.parse(readFileSync(join(EXAMPLES, "export/score.timing.json"), "utf8")) as ScoreTiming;
     expect(committed.events.map((event) => event.m)).toEqual(buildScoreTiming(mpos, spos, [A4]).events.map((event) => event.m));

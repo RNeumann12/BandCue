@@ -32,7 +32,7 @@ import type {
  * helper reports it, and a room served by helpers of different versions keeps
  * the newest one's exports.
  */
-export const SCORE_EXPORTER_VERSION = 9;
+export const SCORE_EXPORTER_VERSION = 10;
 /** `mpos`/`spos` coordinates are 12 times MuseScore's SVG units (verified on 4.7.5). */
 export const POSITION_UNITS_PER_SVG_UNIT = 12;
 const MUSESCORE_RUN_TIMEOUT_MS = 180_000;
@@ -822,6 +822,31 @@ async function collectLegend(
   return { file: published, width: cropped.width, height: cropped.height };
 }
 
+/**
+ * Every element MuseScore drew on a page (path or polyline, but not the white
+ * page behind them, class ""), with its points in page coordinates. Most
+ * elements carry absolute coordinates, but some glyphs (flags, custom note
+ * heads) are drawn around the origin and placed with a `transform="matrix(…)"`,
+ * which is applied here.
+ */
+function* drawnSvgElements(svg: string): Generator<{ kind: string; xs: number[]; ys: number[] }> {
+  for (const match of svg.matchAll(/<(?:path|polyline)\s+class="([^"]+)"([^>]*?)\s(?:d|points)="([^"]+)"/g)) {
+    const numbers = (match[3]!.match(/-?\d+(?:\.\d+)?(?:e-?\d+)?/gi) ?? []).map(Number);
+    const matrix = /\btransform="matrix\(([^)]*)\)"/.exec(match[2]!)?.[1]?.split(/[\s,]+/).map(Number);
+    const [a, b, c, d, e, f] = matrix?.length === 6 && matrix.every(Number.isFinite) ? matrix : [1, 0, 0, 1, 0, 0];
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (let index = 0; index + 1 < numbers.length; index += 2) {
+      const [x, y] = [numbers[index]!, numbers[index + 1]!];
+      xs.push(a! * x + c! * y + e!);
+      ys.push(b! * x + d! * y + f!);
+    }
+    if (xs.length) {
+      yield { kind: match[1]!, xs, ys };
+    }
+  }
+}
+
 /** Blank paper kept above and below a page's music in scroll mode, SVG units (~3 mm). */
 const CONTENT_BAND_PAD = 150;
 
@@ -841,20 +866,12 @@ export function svgContentBounds(
   let bottom = -Infinity;
   let header = 0;
   let footer = page.height;
-  for (const match of svg.matchAll(/<(?:path|polyline)\s+class="([^"]+)"[^>]*?\s(?:d|points)="([^"]+)"/g)) {
-    const numbers = (match[2]!.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
-    let low = Infinity;
-    let high = -Infinity;
-    for (let index = 1; index < numbers.length; index += 2) {
-      low = Math.min(low, numbers[index]!);
-      high = Math.max(high, numbers[index]!);
-    }
-    if (!Number.isFinite(low)) {
-      continue;
-    }
-    if (match[1] === "Text" && high < edge) {
+  for (const element of drawnSvgElements(svg)) {
+    const low = Math.min(...element.ys);
+    const high = Math.max(...element.ys);
+    if (element.kind === "Text" && high < edge) {
       header = Math.max(header, high);
-    } else if (match[1] === "Text" && low > page.height - edge) {
+    } else if (element.kind === "Text" && low > page.height - edge) {
       footer = Math.min(footer, low);
     } else {
       top = Math.min(top, low);
@@ -875,20 +892,16 @@ export function svgContentBounds(
 
 /**
  * Cuts a page down to the drum key on it: the box around everything MuseScore
- * drew (its SVG paths and lines use absolute page coordinates), plus a margin.
+ * drew (see drawnSvgElements), plus a margin.
  */
 export function cropDrumLegendSvg(svg: string): { svg: string; width: number; height: number } | undefined {
   const page = parseSvgPageSize(svg.slice(0, 2000));
   const widthMm = Number(/<svg\b[^>]*\bwidth="([\d.]+)mm"/.exec(svg)?.[1]);
   const xs: number[] = [];
   const ys: number[] = [];
-  // Every drawn element but the white page behind them (class "").
-  for (const match of svg.matchAll(/<(?:path|polyline)\s+class="([^"]+)"[^>]*?\s(?:d|points)="([^"]+)"/g)) {
-    const numbers = (match[2]!.match(/-?\d+(?:\.\d+)?/g) ?? []).map(Number);
-    for (let index = 0; index + 1 < numbers.length; index += 2) {
-      xs.push(numbers[index]!);
-      ys.push(numbers[index + 1]!);
-    }
+  for (const element of drawnSvgElements(svg)) {
+    xs.push(...element.xs);
+    ys.push(...element.ys);
   }
   if (!page || !xs.length) {
     return undefined;
